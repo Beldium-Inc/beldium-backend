@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <body style="margin:0;background:#f4f6f3;font-family:Arial,sans-serif;color:#17221b">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="padding:32px 16px">
+      <tr><td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#ffffff;border-radius:12px;padding:32px">
+          <tr><td>
+            <p style="font-size:13px;font-weight:700;letter-spacing:.12em;color:#357a4a">BELDIUM MINING COMPLIANCE</p>
+            <h1 style="font-size:26px;margin:24px 0 12px">Verify your email</h1>
+            <p>Hello{% if first_name %} {{ first_name }}{% endif %},</p>
+            <p>Use this one-time code to continue setting up your account:</p>
+            <p style="font-size:34px;font-weight:700;letter-spacing:.18em;text-align:center;background:#eef5ef;padding:20px;border-radius:8px">{{ verification_code }}</p>
+            <p>This code expires in {{ expires_in_minutes }} minutes and can only be used once.</p>
+            <p>If you did not request this code, you can safely ignore this email.</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>

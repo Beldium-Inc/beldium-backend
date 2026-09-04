@@ -28,7 +28,7 @@ class OrganisationSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "verification_status", "my_role", "member_count", "created_at", "updated_at"]
 
-    def get_my_role(self, obj):
+    def get_my_role(self, obj) -> str | None:
         request = self.context.get("request")
         if not request or not request.user.is_authenticated:
             return None

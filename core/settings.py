@@ -5,10 +5,20 @@ from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key")
+SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key-change-this-before-any-real-deployment-2026")
 DEBUG = str(config("DEBUG", default="true")).strip().lower() in {"1", "true", "yes", "on", "debug", "development"}
+ENVIRONMENT = str(config("ENVIRONMENT", default="local")).strip().lower()
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:3000,http://localhost:5173", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+
+if ENVIRONMENT == "production":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31_536_000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -78,6 +88,28 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
 
+SENDGRID_API_KEY = config("SENDGRID_API_KEY", default="")
+EMAIL_BACKEND = config(
+    "EMAIL_BACKEND",
+    default=(
+        "sendgrid_backend.SendgridBackend"
+        if ENVIRONMENT == "production" and SENDGRID_API_KEY
+        else "django.core.mail.backends.console.EmailBackend"
+    ),
+)
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@beldium.com")
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
+
+CELERY_BROKER_URL = config("REDIS_URL", default="redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TASK_ALWAYS_EAGER = str(config("CELERY_TASK_ALWAYS_EAGER", default="true")).strip().lower() in {
+    "1", "true", "yes", "on"
+}
+CELERY_TASK_EAGER_PROPAGATES = str(
+    config("CELERY_TASK_EAGER_PROPAGATES", default="false")
+).strip().lower() in {"1", "true", "yes", "on"}
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework_simplejwt.authentication.JWTAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
@@ -88,6 +120,11 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
     ],
     "DEFAULT_PAGINATION_CLASS": "common.pagination.DefaultPagination",
+    "EXCEPTION_HANDLER": "common.exception_handler.custom_exception_handler",
+    "DEFAULT_THROTTLE_RATES": {
+        "verification_issue": "5/10m",
+        "verification_attempt": "10/10m",
+    },
     "PAGE_SIZE": 20,
 }
 SIMPLE_JWT = {

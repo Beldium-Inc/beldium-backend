@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.db.models import Count
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
@@ -7,6 +8,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from organisations.models import JoinRequest, MembershipRole, Organisation, OrganisationInvitation, OrganisationMembership
+from common.exceptions import ConflictError, ResourceNotFoundError
 from organisations.permissions import has_organisation_role
 from organisations.serializers import (
     JoinRequestDecisionSerializer,
@@ -22,6 +24,7 @@ ADMIN_ROLES = [MembershipRole.OWNER, MembershipRole.ADMIN]
 
 
 class OrganisationViewSet(viewsets.ModelViewSet):
+    queryset = Organisation.objects.none()
     serializer_class = OrganisationSerializer
     search_fields = ["name", "registration_number"]
     filterset_fields = ["organisation_type", "verification_status", "country", "state"]
@@ -37,6 +40,8 @@ class OrganisationViewSet(viewsets.ModelViewSet):
         return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return self.queryset
         qs = Organisation.objects.annotate(member_count=Count("memberships", distinct=True)).order_by("name")
         if self.request.user.is_staff or self.request.user.is_superuser:
             return qs
@@ -79,10 +84,13 @@ class OrganisationViewSet(viewsets.ModelViewSet):
 
 
 class JoinRequestViewSet(viewsets.ModelViewSet):
+    queryset = JoinRequest.objects.none()
     serializer_class = JoinRequestSerializer
     http_method_names = ["get", "post", "head", "options"]
 
     def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return self.queryset
         return JoinRequest.objects.filter(requester=self.request.user).select_related("requester", "organisation")
 
     def perform_create(self, serializer):
@@ -94,11 +102,16 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     @transaction.atomic
     def decide(self, request, pk=None):
-        join_request = JoinRequest.objects.select_for_update().select_related("organisation").get(pk=pk)
+        join_request = get_object_or_404(
+            JoinRequest.objects.select_for_update().select_related("organisation"), pk=pk
+        )
         if not has_organisation_role(request.user, join_request.organisation_id, ADMIN_ROLES):
             raise PermissionDenied("Only organisation administrators may decide join requests.")
         if join_request.status != "pending":
-            return Response({"detail": "This request has already been decided."}, status=status.HTTP_409_CONFLICT)
+            raise ConflictError(
+                "This join request has already been decided.",
+                code="join_request_already_decided",
+            )
         serializer = JoinRequestDecisionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         join_request.status = serializer.validated_data["decision"]
@@ -126,9 +139,12 @@ class InvitationAcceptanceView(generics.GenericAPIView):
             token=serializer.validated_data["token"]
         ).first()
         if not invitation:
-            return Response({"detail": "Invitation not found."}, status=status.HTTP_404_NOT_FOUND)
+            raise ResourceNotFoundError("Invitation not found.", code="invitation_not_found")
         if invitation.accepted_at or invitation.revoked_at or invitation.expires_at <= timezone.now():
-            return Response({"detail": "Invitation is no longer valid."}, status=status.HTTP_409_CONFLICT)
+            raise ConflictError(
+                "Invitation is no longer valid.",
+                code="invitation_invalid",
+            )
         if invitation.email.lower() != request.user.email.lower():
             raise PermissionDenied("This invitation belongs to another email address.")
         OrganisationMembership.objects.update_or_create(
