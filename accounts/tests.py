@@ -19,6 +19,8 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("register"), {
             "email": "owner@example.com",
             "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
             "first_name": "Ada",
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -33,6 +35,8 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "owner@example.com",
             "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
@@ -55,6 +59,8 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("register"), {
             "email": "rollback@example.com",
             "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
         })
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertFalse(User.objects.filter(email="rollback@example.com").exists())

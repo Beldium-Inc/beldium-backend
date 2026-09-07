@@ -16,7 +16,14 @@ The first domain slice includes:
 - Private organisation membership boundaries
 - Organisation invitations and invitation acceptance
 - Join requests with transactional approval or rejection
+- Password reset, password change, verified email change, and JWT logout
+- Organisation member role changes, suspension, activation, and removal
+- Organisation submission and platform verification decisions
+- Role capability responses and account/organisation audit events
 - OpenAPI schema and Swagger UI
+- Phone OTP verification and Google/Microsoft sign-in
+- Full compliance onboarding sections, personnel, declarations, and a 15-item document checklist
+- S3-compatible uploads, requested-document review, applicant messaging, and dashboard aggregates
 
 ## Local setup
 
@@ -40,7 +47,18 @@ SQLite is used by default for local development. Set `DB_ENGINE=postgresql` and 
 | POST | `/api/v1/auth/resend-verification/` | Request another verification code |
 | POST | `/api/v1/auth/token/` | Obtain JWT access and refresh tokens |
 | POST | `/api/v1/auth/token/refresh/` | Refresh an access token |
+| POST | `/api/v1/auth/logout/` | Blacklist a refresh token |
+| POST | `/api/v1/auth/password-reset/request/` | Request a password-reset code |
+| POST | `/api/v1/auth/password-reset/confirm/` | Verify the code and set a new password |
+| POST | `/api/v1/auth/change-password/` | Change password using the current password |
+| POST | `/api/v1/auth/change-email/request/` | Send a code to a proposed new email |
+| POST | `/api/v1/auth/change-email/confirm/` | Verify and activate the new email |
+| GET | `/api/v1/auth/audit/` | Read the current user's security audit trail |
 | GET/PATCH | `/api/v1/auth/me/` | Read or update the current user |
+| POST | `/api/v1/auth/verify-phone/request/` | Send a phone verification OTP |
+| POST | `/api/v1/auth/verify-phone/confirm/` | Verify a phone OTP |
+| POST | `/api/v1/auth/social/` | Exchange a verified Google/Microsoft ID token for JWTs |
+| POST | `/api/v1/auth/social/link/` | Link a provider to an authenticated account |
 | GET/POST | `/api/v1/organisations/` | List memberships or create an organisation |
 | GET | `/api/v1/organisations/directory/` | Discover verified organisations |
 | GET | `/api/v1/organisations/{id}/members/` | List organisation members |
@@ -48,9 +66,49 @@ SQLite is used by default for local development. Set `DB_ENGINE=postgresql` and 
 | POST | `/api/v1/invitations/accept/` | Accept an invitation |
 | GET/POST | `/api/v1/join-requests/` | Manage the current user's join requests |
 | POST | `/api/v1/join-requests/{id}/decide/` | Approve or reject a request as an organisation administrator |
+| GET | `/api/v1/organisations/{id}/my-permissions/` | Read the current membership and capabilities |
+| PATCH | `/api/v1/organisations/{id}/members/{membership_id}/` | Change a member's role or profile |
+| POST | `/api/v1/organisations/{id}/members/{membership_id}/suspend/` | Suspend a member |
+| POST | `/api/v1/organisations/{id}/members/{membership_id}/activate/` | Reactivate a member |
+| DELETE | `/api/v1/organisations/{id}/members/{membership_id}/remove/` | Remove a member |
+| POST | `/api/v1/organisations/{id}/invitations/{invitation_id}/revoke/` | Revoke an invitation |
+| POST | `/api/v1/organisations/{id}/submit/` | Submit an organisation for Beldium verification |
+| POST | `/api/v1/organisations/{id}/decide/` | Verify or reject an organisation as platform staff |
+| GET | `/api/v1/organisations/{id}/audit/` | Read organisation membership and verification events |
+| GET/POST | `/api/v1/compliance-applications/` | List or start compliance applications |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/organisation/` | Save the complete legal organisation profile |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/representative/` | Save the authorised representative |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/services/` | Save services and geographic coverage |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/professional-capability/` | Save professional staffing capability |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/inspection-capability/` | Save physical inspection capability |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/conflict-declaration/` | Save independence and conflicts |
+| PATCH | `/api/v1/compliance-applications/{id}/sections/declaration/` | Save final declarations |
+| GET/POST | `/api/v1/compliance-applications/{id}/personnel/` | List or add key personnel |
+| PATCH/DELETE | `/api/v1/compliance-applications/{id}/personnel/{personnel_id}/` | Update or remove personnel |
+| GET/POST | `/api/v1/compliance-applications/{id}/documents/` | List or upload compliance documents |
+| GET | `/api/v1/compliance-applications/{id}/document-requirements/` | Read checklist status |
+| POST | `/api/v1/compliance-applications/{id}/submit/` | Submit a complete application |
+| POST | `/api/v1/compliance-applications/{id}/decide/` | Record a staff review decision |
+| POST | `/api/v1/compliance-applications/{id}/request-document/` | Request an additional document |
+| POST | `/api/v1/compliance-applications/{id}/documents/{document_id}/review/` | Review an uploaded document |
+| GET/POST | `/api/v1/compliance-applications/{id}/messages/` | Read or send application messages |
+| POST | `/api/v1/compliance-applications/{id}/messages/mark-read/` | Mark visible messages as read |
+| GET | `/api/v1/dashboard/` | Read application progress and requested actions |
 | GET | `/api/docs/` | Swagger UI |
 
 Registration, verification, resend, and token issuance are public endpoints. All other endpoints require a bearer access token.
+
+Registration follows the authentication prototype at [miningcomplianceauth.lovable.app](https://miningcomplianceauth.lovable.app/). It accepts the prototype role identifiers `compliance-org`, `compliance-officer`, `regulatory-org`, `regulatory-officer`, and `independent`, together with country, matching password confirmation, and acceptance of the terms.
+
+Organisation join requests carry the requested role, job title, employee/professional ID, and optional administrator message. An administrator may modify the role while approving the request. Organisation verification remains separate from account verification, so an authenticated user can continue onboarding while the organisation is under review.
+
+The onboarding section identifiers are `organisation`, `representative`, `services`, `professional-capability`, `inspection-capability`, `conflict-declaration`, and `declaration`. Save each as `{ "data": { ... } }`; missing required values use the standard validation envelope.
+
+## File storage and external identity
+
+Uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Local development stores files under `media/`. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
+
+Phone OTP delivery uses `SMS_WEBHOOK_URL` and `SMS_WEBHOOK_TOKEN`. Google requires `GOOGLE_OAUTH_CLIENT_ID`; Microsoft requires `MICROSOFT_OAUTH_CLIENT_ID` and `MICROSOFT_OAUTH_TENANT_ID`. Provider tokens are validated server-side. Existing password accounts must authenticate before linking a social identity; an email match never silently links an account.
 
 New accounts must verify their email before using the token endpoint. Registration sends a six-digit code that expires after 10 minutes. A code is single-use, is invalidated after five failed attempts, and requesting another code invalidates earlier codes. Resend requests are limited to five per email/IP pair every 10 minutes.
 
@@ -90,12 +148,10 @@ python manage.py check
 python manage.py test
 ```
 
-## Planned domain sequence
+## Planned domain sequence beyond onboarding
 
 1. Mining sites, ownership, licences, and GPS boundaries
-2. Compliance applications and workflow history
-3. Evidence documents and information requests
-4. Reviews, configurable scoring, and risk assessments
-5. Inspections, findings, non-conformities, and corrective actions
-6. Production, inventory, sampling, and laboratory results
-7. Notifications, audit trail, dashboard aggregates, and reports
+2. Configurable scoring and risk assessments
+3. Inspections, findings, non-conformities, and corrective actions
+4. Production, inventory, sampling, and laboratory results
+5. Advanced notifications and reports

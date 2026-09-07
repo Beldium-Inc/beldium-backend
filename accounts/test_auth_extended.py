@@ -20,6 +20,8 @@ class AuthenticationEdgeCaseTests(APITestCase):
         response = self.client.post(reverse("register"), {
             "email": "Owner@EXAMPLE.COM",
             "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
             "first_name": "Ada",
         })
 
@@ -33,6 +35,8 @@ class AuthenticationEdgeCaseTests(APITestCase):
         response = self.client.post(reverse("register"), {
             "email": "owner@example.com",
             "password": "AnotherPassword-2026!",
+            "confirm_password": "AnotherPassword-2026!",
+            "agreed_terms": True,
         })
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -44,6 +48,8 @@ class AuthenticationEdgeCaseTests(APITestCase):
         response = self.client.post(reverse("register"), {
             "email": "weak@example.com",
             "password": "12345678",
+            "confirm_password": "12345678",
+            "agreed_terms": True,
         })
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)

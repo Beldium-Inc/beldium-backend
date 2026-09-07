@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "common",
     "accounts",
     "organisations",
+    "compliance",
 ]
 
 MIDDLEWARE = [
@@ -85,6 +86,8 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 STATIC_URL = "static/"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
 
@@ -99,6 +102,11 @@ EMAIL_BACKEND = config(
 )
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@beldium.com")
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
+SMS_WEBHOOK_URL = config("SMS_WEBHOOK_URL", default="")
+SMS_WEBHOOK_TOKEN = config("SMS_WEBHOOK_TOKEN", default="")
+GOOGLE_OAUTH_CLIENT_ID = config("GOOGLE_OAUTH_CLIENT_ID", default="")
+MICROSOFT_OAUTH_CLIENT_ID = config("MICROSOFT_OAUTH_CLIENT_ID", default="")
+MICROSOFT_OAUTH_TENANT_ID = config("MICROSOFT_OAUTH_TENANT_ID", default="common")
 
 CELERY_BROKER_URL = config("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
@@ -138,3 +146,19 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": "API for mining organisations, compliance partners, and regulators.",
     "VERSION": "1.0.0",
 }
+
+# Compliance uploads use Django's storage API. Local development uses the
+# filesystem; production can switch to any S3-compatible provider without
+# changing application code.
+if config("AWS_STORAGE_BUCKET_NAME", default=""):
+    AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID", default="")
+    AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY", default="")
+    AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME")
+    AWS_S3_REGION_NAME = config("AWS_S3_REGION_NAME", default="us-east-1")
+    AWS_S3_ENDPOINT_URL = config("AWS_S3_ENDPOINT_URL", default=None)
+    AWS_DEFAULT_ACL = None
+    AWS_QUERYSTRING_AUTH = True
+    STORAGES = {
+        "default": {"BACKEND": "storages.backends.s3.S3Storage"},
+        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    }
