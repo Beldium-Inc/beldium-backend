@@ -46,6 +46,7 @@ class ComplianceApplication(TimeStampedModel):
     # A UUID is unusable over the phone or in an email subject; this is the
     # reference an applicant and a reviewer actually quote to each other.
     reference = models.CharField(max_length=32, unique=True, null=True, blank=True, editable=False)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_compliance_applications")
     organisation = models.OneToOneField(
         "organisations.Organisation", on_delete=models.CASCADE, related_name="compliance_application"
     )
@@ -85,6 +86,7 @@ class Personnel(TimeStampedModel):
 
 
 class ComplianceDocument(TimeStampedModel):
+    due_date = models.DateField(null=True, blank=True)
     class Status(models.TextChoices):
         REQUESTED = "requested", "Requested"
         SUBMITTED = "submitted", "Submitted"
@@ -122,3 +124,44 @@ class ApplicationMessage(TimeStampedModel):
 
     class Meta:
         ordering = ["created_at"]
+
+
+class MessageReadReceipt(TimeStampedModel):
+    message = models.ForeignKey(ApplicationMessage, on_delete=models.CASCADE, related_name="read_receipts")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    read_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["message", "user"], name="unique_message_reader")]
+
+
+class ApprovalCondition(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending evidence"
+        SUBMITTED = "submitted", "Evidence submitted"
+        REJECTED = "rejected", "Evidence rejected"
+        CLEARED = "cleared", "Cleared"
+
+    application = models.ForeignKey(ComplianceApplication, on_delete=models.CASCADE, related_name="conditions")
+    title = models.CharField(max_length=200)
+    description = models.TextField()
+    due_date = models.DateField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="issued_approval_conditions")
+
+    class Meta:
+        ordering = ["due_date", "created_at"]
+
+
+class ConditionEvidence(TimeStampedModel):
+    condition = models.ForeignKey(ApprovalCondition, on_delete=models.CASCADE, related_name="evidence")
+    file = models.FileField(upload_to="compliance/conditions/%Y/%m/", validators=[FileExtensionValidator(["pdf", "doc", "docx", "jpg", "jpeg", "png"])])
+    notes = models.TextField(blank=True)
+    submitted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="submitted_condition_evidence")
+    status = models.CharField(max_length=20, choices=[("submitted", "Submitted"), ("verified", "Verified"), ("rejected", "Rejected")], default="submitted")
+    review_notes = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="reviewed_condition_evidence")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]

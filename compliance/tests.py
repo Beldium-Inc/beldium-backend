@@ -59,7 +59,7 @@ class ComplianceApplicationLifecycleTests(APITestCase):
         self.assertEqual(dashboard.data["applications"][0]["progress"]["percent"], 100)
 
     def test_staff_requests_document_and_owner_uploads_it(self):
-        application = ComplianceApplication.objects.create(organisation=self.organisation)
+        application = ComplianceApplication.objects.create(organisation=self.organisation, status=ApplicationStatus.UNDER_REVIEW)
         self.client.force_authenticate(self.admin)
         requested = self.client.post(reverse("compliance-application-request-document", args=[application.id]), {"document_type": "insurance", "title": "Insurance", "request_message": "Upload current cover."})
         self.assertEqual(requested.status_code, status.HTTP_201_CREATED)

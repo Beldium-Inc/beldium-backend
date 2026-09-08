@@ -122,7 +122,11 @@ class CollectionAuthenticationTests(APITestCase):
 @override_settings(MEDIA_ROOT="/tmp/beldium-compliance-tests")
 class DecisionRequiresSubmissionTests(APITestCase):
     """A decision records reviewed_at and moves the organisation's verification
-    status, so it must not be possible against an application never submitted."""
+    status, so it must not be possible against an application never submitted.
+
+    The guard now lives in compliance.workflow.require_review, which refuses
+    every state outside review rather than only draft.
+    """
 
     def setUp(self):
         self.staff = User.objects.create_superuser("staff@example.com", "SafePassword-2026!")
@@ -158,7 +162,7 @@ class DecisionRequiresSubmissionTests(APITestCase):
         response = self._decide(application, ApplicationStatus.VERIFIED)
 
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(response.data["error"]["code"], "application_not_submitted")
+        self.assertEqual(response.data["error"]["code"], "application_not_under_review")
 
     def test_a_refused_decision_writes_nothing(self):
         application = self._application(ApplicationStatus.DRAFT)
@@ -174,10 +178,13 @@ class DecisionRequiresSubmissionTests(APITestCase):
         self.assertIsNone(self.organisation.verified_at)
 
     def test_every_submitted_state_can_still_be_decided(self):
+        # Approval paths additionally demand 100% progress and verified
+        # documents (workflow + decide), which is covered by test_review_workflow;
+        # these are the transitions a decision can make on its own.
         for index, (current, target) in enumerate([
             (ApplicationStatus.UNDER_REVIEW, ApplicationStatus.ACTION_REQUIRED),
             (ApplicationStatus.ACTION_REQUIRED, ApplicationStatus.REJECTED),
-            (ApplicationStatus.CONDITIONALLY_APPROVED, ApplicationStatus.VERIFIED),
+            (ApplicationStatus.CONDITIONALLY_APPROVED, ApplicationStatus.REJECTED),
         ]):
             with self.subTest(current=current):
                 application = self._application(current, self._other_organisation(index))
@@ -319,7 +326,7 @@ class ApplicationReferenceTests(APITestCase):
 
         # The module name starts with a digit, so it cannot be imported normally.
         migration = importlib.import_module(
-            "compliance.migrations.0002_complianceapplication_reference"
+            "compliance.migrations.0003_complianceapplication_reference"
         )
         application = ComplianceApplication.objects.create(organisation=self.organisation)
         ComplianceApplication.objects.filter(pk=application.pk).update(reference=None)
@@ -352,7 +359,11 @@ class ActivityFeedTests(APITestCase):
             name="Assurance Ltd", organisation_type="compliance_partner", registration_number="RC-90107"
         )
         self.organisation.memberships.create(user=self.owner, role="owner", is_active=True)
-        self.application = ComplianceApplication.objects.create(organisation=self.organisation)
+        # Reviewer actions run through workflow.require_review, so the
+        # application has to be open for review for those events to happen.
+        self.application = ComplianceApplication.objects.create(
+            organisation=self.organisation, status=ApplicationStatus.ACTION_REQUIRED
+        )
         ComplianceApplication.objects.filter(pk=self.application.pk).update(submitted_at=timezone.now())
 
     def _url(self):
@@ -386,7 +397,7 @@ class ActivityFeedTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         descriptions = [row["description"] for row in response.data["results"]]
         self.assertIn("Added Grace Hopper to key personnel", descriptions)
-        self.assertIn("Reviewer requested Code of Conduct", descriptions)
+        self.assertIn("Reviewer requested an additional document", descriptions)
 
     def test_a_colleague_is_named_but_a_reviewer_is_not(self):
         self._generate_events()
@@ -395,7 +406,7 @@ class ActivityFeedTests(APITestCase):
         rows = {row["description"]: row["actor"] for row in self.client.get(self._url()).data["results"]}
 
         self.assertEqual(rows["Added Grace Hopper to key personnel"], "Ada Lovelace")
-        self.assertEqual(rows["Reviewer requested Code of Conduct"], "Beldium review team")
+        self.assertEqual(rows["Reviewer requested an additional document"], "Beldium review team")
 
     def test_it_leaks_no_reviewer_detail(self):
         self._generate_events()

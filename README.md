@@ -175,3 +175,82 @@ python manage.py test
 3. Inspections, findings, non-conformities, and corrective actions
 4. Production, inventory, sampling, and laboratory results
 5. Advanced notifications and reports
+
+## Review workflow and frontend integration
+
+Application review now enforces these transitions:
+
+| Current status | Allowed next status | Who / endpoint |
+|---|---|---|
+| `draft`, `rejected` | `under_review` | Application editor: `submit/` |
+| `under_review` | `action_required`, `conditionally_approved`, `verified`, `rejected` | Platform staff: `decide/` |
+| `action_required` | `under_review` | Application editor: `submit/` |
+| `action_required` | `rejected` | Platform staff: `decide/` |
+| `conditionally_approved` | `action_required`, `verified`, `rejected` | Platform staff: `decide/` |
+| `verified` | None | Final for this onboarding application |
+
+Application editors are active owners, administrators, compliance managers, or platform staff. General onboarding edits are allowed only in draft, action-required, and rejected applications. Staff document requests/reviews are available only while review is open. An organisation with a compliance application must use the application decision endpoint; the older organisation decision endpoint cannot bypass compliance checks.
+
+Submission requires verified applicant email, all onboarding sections, personnel, all 15 standard documents, and every additional requested document. Requested or rejected documents do not count as complete, even if an older file is still present. Approval additionally requires staff to verify every document. Uploading corrections does not automatically resubmit: call `submit/` after completing them.
+
+### Document deadlines
+
+`POST /api/v1/compliance-applications/{id}/request-document/` accepts:
+
+```json
+{
+  "document_type": "insurance",
+  "title": "Professional indemnity insurance",
+  "request_message": "Please upload current cover.",
+  "due_date": "2027-01-31"
+}
+```
+
+`due_date` is optional for document requests and cannot be in the past when supplied. Re-requesting a document resets its review and puts the application into `action_required`; the previous file remains available until replaced. A replacement must include an actual multipart `file`. Document responses expose `due_date` and `is_overdue`. The checklist includes additional requested documents as well as standard requirements.
+
+### Approval conditions and evidence
+
+All routes below are relative to `/api/v1/compliance-applications/{id}/`:
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `conditions/` | Members/staff view conditions and evidence history |
+| POST | `conditions/` | Staff add a condition while review is open |
+| POST | `conditions/{condition_id}/evidence/` | Editor uploads evidence as multipart `file` and optional `notes` |
+| POST | `conditions/{condition_id}/evidence/{evidence_id}/review/` | Staff review evidence with `status: verified` or `rejected`, plus optional `notes` |
+
+Conditional approval through `decide/` requires at least one outstanding structured condition, either already created through `conditions/` or supplied in the decision:
+
+```json
+{
+  "status": "conditionally_approved",
+  "notes": "Renew insurance before final verification.",
+  "conditions": [
+    {
+      "title": "Renew insurance",
+      "description": "Upload the renewed professional indemnity policy.",
+      "due_date": "2027-01-31"
+    }
+  ]
+}
+```
+
+Condition titles, descriptions and deadlines are required. Evidence may be uploaded while the application is `conditionally_approved` or `action_required`. Each condition follows `pending → submitted → cleared`, or `submitted → rejected → submitted` when replacement evidence is needed. Evidence versions and review notes are retained. A pending review or cleared condition cannot receive duplicate evidence. All conditions must be cleared before staff explicitly verifies the application; clearance does not automatically approve it.
+
+Past deadlines set `is_overdue`; they do not automatically reject an application or prevent remediation. There is no automatic deadline reminder delivery in this change. `conditional_requirements` remains available as legacy display text; legacy text-only conditions must be converted to structured conditions by staff before final verification.
+
+### Dashboard, messages and mineral experience
+
+- `GET /api/v1/dashboard/` now includes `beldium_id`, structured `conditions` with evidence history, and `requested_documents` with deadlines and overdue indicators.
+- Progress uses the creating applicant's active account and verified email. Older applications without `created_by` fall back to an active organisation owner. Phone verification remains a separate account feature and is not a submission prerequisite.
+- `PATCH .../sections/professional-capability/` accepts `data.mineral_experience`, an optional list of up to 100 nonblank names, each at most 100 characters. Names must be unique ignoring case; e.g. `["Gold", "Tin"]`. The frontend's mineral selection should map to this field.
+- Message `read_at` now means **read by the current user**. `messages/mark-read/` creates individual receipts and returns the number newly marked. One member reading a message does not clear another member's unread count. Internal messages remain staff-only.
+- The old shared message timestamp is retained in the database for compatibility but no longer used by the API. Existing messages begin unread for each recipient because historical individual readers cannot be inferred.
+
+Apply the database migration before starting the updated backend:
+
+```bash
+python manage.py migrate
+```
+
+The frontend still needs to call these endpoints. Email/SMS, social sign-in and S3 provider credentials must be configured and verified separately in the deployment environment.

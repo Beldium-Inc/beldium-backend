@@ -5,7 +5,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 
 from accounts.models import AccountAuditEvent
-from compliance.models import ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
+from compliance.models import ApprovalCondition, ConditionEvidence, ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
 from organisations.models import OrganisationType
 
 
@@ -63,14 +63,25 @@ class PersonnelSerializer(serializers.ModelSerializer):
         return self._url(obj, "certificate")
 
 
+def validate_due_date(value):
+    if value < timezone.localdate():
+        raise serializers.ValidationError("The deadline cannot be in the past.")
+    return value
+
+
 class ComplianceDocumentSerializer(serializers.ModelSerializer):
+    is_overdue = serializers.SerializerMethodField()
+
+    def get_is_overdue(self, obj) -> bool:
+        return bool(obj.due_date and obj.due_date < timezone.localdate() and obj.status in {"requested", "rejected"})
+
     file_url = serializers.SerializerMethodField()
     original_name = serializers.CharField(read_only=True)
 
     class Meta:
         model = ComplianceDocument
-        fields = ["id", "document_type", "title", "file", "file_url", "original_name", "status", "request_message", "review_notes", "reviewed_at", "created_at", "updated_at"]
-        read_only_fields = ["id", "file_url", "original_name", "status", "request_message", "review_notes", "reviewed_at", "created_at", "updated_at"]
+        fields = ["id", "document_type", "title", "file", "file_url", "original_name", "status", "request_message", "due_date", "is_overdue", "review_notes", "reviewed_at", "created_at", "updated_at"]
+        read_only_fields = ["id", "file_url", "original_name", "status", "request_message", "due_date", "is_overdue", "review_notes", "reviewed_at", "created_at", "updated_at"]
         extra_kwargs = {"file": {"write_only": True, "required": True}}
 
     def validate_file(self, value):
@@ -88,10 +99,23 @@ class ComplianceDocumentSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(url) if request else url
 
 
-class RequestedDocumentSerializer(serializers.ModelSerializer):
+class ComplianceDocumentUploadSerializer(serializers.ModelSerializer):
     class Meta:
         model = ComplianceDocument
-        fields = ["id", "document_type", "title", "request_message", "status", "created_at"]
+        fields = ["document_type", "file"]
+        extra_kwargs = {"file": {"required": True}}
+
+    def validate_file(self, value):
+        return validate_upload(value)
+
+
+class RequestedDocumentSerializer(serializers.ModelSerializer):
+    def validate_due_date(self, value):
+        return validate_due_date(value) if value else value
+
+    class Meta:
+        model = ComplianceDocument
+        fields = ["id", "document_type", "title", "request_message", "due_date", "status", "created_at"]
         read_only_fields = ["id", "status", "created_at"]
 
 
@@ -101,15 +125,58 @@ class DocumentReviewSerializer(serializers.Serializer):
 
 
 class ApplicationMessageSerializer(serializers.ModelSerializer):
+    read_at = serializers.SerializerMethodField()
+    is_internal = serializers.BooleanField(required=False, default=False)
+
+    def get_read_at(self, obj) -> str | None:
+        request = self.context.get("request")
+        if not request:
+            return None
+        receipt = obj.read_receipts.filter(user=request.user).first()
+        return receipt.read_at.isoformat() if receipt else None
+
+    def validate_is_internal(self, value):
+        if value and not self.context["request"].user.is_staff:
+            raise serializers.ValidationError("Only staff may send internal messages.")
+        return value
+
     author_email = serializers.EmailField(source="author.email", read_only=True)
 
     class Meta:
         model = ApplicationMessage
         fields = ["id", "author_email", "body", "is_internal", "read_at", "created_at"]
-        read_only_fields = ["id", "author_email", "is_internal", "read_at", "created_at"]
+        read_only_fields = ["id", "author_email", "read_at", "created_at"]
+
+
+class ConditionEvidenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ConditionEvidence
+        fields = ["id", "file", "notes", "status", "submitted_by", "review_notes", "reviewed_by", "reviewed_at", "created_at"]
+        read_only_fields = ["id", "status", "submitted_by", "review_notes", "reviewed_by", "reviewed_at", "created_at"]
+
+    def validate_file(self, value):
+        return validate_upload(value)
+
+
+class ApprovalConditionSerializer(serializers.ModelSerializer):
+    evidence = ConditionEvidenceSerializer(many=True, read_only=True)
+    is_overdue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApprovalCondition
+        fields = ["id", "title", "description", "due_date", "status", "is_overdue", "evidence", "created_at"]
+        read_only_fields = ["id", "status", "is_overdue", "evidence", "created_at"]
+
+    def validate_due_date(self, value):
+        return validate_due_date(value)
+
+    def get_is_overdue(self, obj) -> bool:
+        return obj.due_date < timezone.localdate() and obj.status != ApprovalCondition.Status.CLEARED
 
 
 ACTIVITY_DESCRIPTIONS = {
+    # Keys here must match the metadata each record_account_event call actually
+    # writes; a template naming a key that is not written falls back below.
     "compliance.application_created": "Application created",
     "compliance.section_saved": "Saved the {section} section",
     "compliance.personnel_added": "Added {full_name} to key personnel",
@@ -117,9 +184,12 @@ ACTIVITY_DESCRIPTIONS = {
     "compliance.personnel_removed": "Removed {full_name} from key personnel",
     "compliance.document_uploaded": "Uploaded {title}",
     "compliance.application_submitted": "Application submitted for review",
-    "compliance.application_decided": "Review decision recorded: {decision}",
-    "compliance.document_requested": "Reviewer requested {title}",
-    "compliance.document_reviewed": "{title_or_type} marked {outcome}",
+    "compliance.application_decided": "Review decision recorded: {status}",
+    "compliance.document_requested": "Reviewer requested an additional document",
+    "compliance.document_reviewed": "Document marked {status}",
+    "compliance.condition_created": "Reviewer added an approval condition",
+    "compliance.condition_evidence_submitted": "Evidence submitted for an approval condition",
+    "compliance.condition_evidence_reviewed": "Condition evidence marked {status}",
 }
 
 
@@ -153,7 +223,6 @@ class ApplicationActivitySerializer(serializers.ModelSerializer):
             key: value.replace("_", " ").replace("-", " ") if isinstance(value, str) else value
             for key, value in metadata.items()
         }
-        readable.setdefault("title_or_type", readable.get("title") or readable.get("document_type", "Document"))
 
         template = ACTIVITY_DESCRIPTIONS.get(obj.event_type)
         if not template:
@@ -166,6 +235,8 @@ class ApplicationActivitySerializer(serializers.ModelSerializer):
 
 
 class ComplianceApplicationSerializer(serializers.ModelSerializer):
+    conditions = ApprovalConditionSerializer(many=True, read_only=True)
+
     personnel = PersonnelSerializer(many=True, read_only=True)
     documents = ComplianceDocumentSerializer(many=True, read_only=True)
     progress = serializers.SerializerMethodField()
@@ -176,12 +247,12 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
             "id", "reference", "organisation", "status", "organisation_profile", "representative", "services",
             "professional_capability", "inspection_capability", "conflict_declaration", "declaration",
             "submitted_at", "reviewed_at", "review_notes", "conditional_requirements", "personnel",
-            "documents", "progress", "created_at", "updated_at",
+            "documents", "conditions", "progress", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "reference", "status", "organisation_profile", "representative", "services", "professional_capability",
             "inspection_capability", "conflict_declaration", "declaration", "submitted_at", "reviewed_at",
-            "review_notes", "conditional_requirements", "personnel", "documents", "progress", "created_at", "updated_at",
+            "review_notes", "conditional_requirements", "personnel", "documents", "conditions", "progress", "created_at", "updated_at",
         ]
 
     def validate_organisation(self, organisation):
@@ -252,6 +323,13 @@ class ServicesSectionSerializer(serializers.Serializer):
 
 
 class ProfessionalCapabilityDataSerializer(serializers.Serializer):
+    mineral_experience = serializers.ListField(child=serializers.CharField(max_length=100), max_length=100, required=False, default=list)
+
+    def validate_mineral_experience(self, value):
+        if len({item.casefold() for item in value}) != len(value):
+            raise serializers.ValidationError("Mineral experience must not contain duplicates.")
+        return value
+
     years_mining_experience = serializers.IntegerField(min_value=0)
     compliance_professionals = serializers.IntegerField(min_value=0, required=False, default=0)
     mining_engineers = serializers.IntegerField(min_value=0, required=False, default=0)
@@ -333,6 +411,12 @@ class ApplicationDecisionSerializer(serializers.Serializer):
     ])
     notes = serializers.CharField(required=False, allow_blank=True)
     conditional_requirements = serializers.CharField(required=False, allow_blank=True)
+    conditions = ApprovalConditionSerializer(many=True, required=False, allow_empty=False)
+
+    def validate(self, attrs):
+        if attrs["status"] != ApplicationStatus.CONDITIONALLY_APPROVED and "conditions" in attrs:
+            raise serializers.ValidationError({"conditions": "Conditions may only accompany conditional approval."})
+        return attrs
 
 
 class DashboardResponseSerializer(serializers.Serializer):
@@ -340,12 +424,18 @@ class DashboardResponseSerializer(serializers.Serializer):
 
 
 def application_progress(application):
-    submitted_types = set(application.documents.exclude(file="").values_list("document_type", flat=True))
+    documents = list(application.documents.all())
+    submitted_types = {doc.document_type for doc in documents if doc.file and doc.status in {"submitted", "verified"}}
+    outstanding = [doc.document_type for doc in documents if not doc.file or doc.status in {"requested", "rejected"}]
+    applicant = application.created_by
+    if applicant is None:
+        membership = application.organisation.memberships.filter(role="owner", is_active=True).select_related("user").first()
+        applicant = membership.user if membership else None
     required_types = {document_type for document_type, _ in REQUIRED_DOCUMENTS}
     sections = {
-        "account": bool(application.organisation_id),
+        "account": bool(applicant and applicant.is_active and applicant.email_verified_at),
         "organisation": bool(application.organisation_profile and application.representative and application.services and application.professional_capability),
-        "documents": required_types.issubset(submitted_types),
+        "documents": required_types.issubset(submitted_types) and not outstanding,
         "personnel": application.personnel.exists(),
         "inspection_capability": bool(application.inspection_capability),
         "conflict_declaration": bool(application.conflict_declaration),
@@ -354,5 +444,5 @@ def application_progress(application):
     completed = sum(sections.values())
     return {
         "percent": round(completed / len(sections) * 100), "completed": completed, "total": len(sections),
-        "sections": sections, "documents": {"submitted": len(required_types & submitted_types), "required": len(required_types)},
+        "sections": sections, "documents": {"submitted": len(required_types & submitted_types), "required": len(required_types), "outstanding": outstanding},
     }

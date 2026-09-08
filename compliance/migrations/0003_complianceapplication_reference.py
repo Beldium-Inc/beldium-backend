@@ -2,7 +2,15 @@
 
 from django.db import migrations, models
 
-from compliance.models import generate_application_reference
+import secrets
+
+from django.utils import timezone
+
+
+def generate_application_reference():
+    """Inlined rather than imported from compliance.models: a migration has to
+    keep replaying after the model module moves on."""
+    return f"BLD-APP-{timezone.now().year}-{secrets.token_hex(4).upper()}"
 
 
 def backfill_references(apps, schema_editor):
@@ -20,7 +28,7 @@ def backfill_references(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('compliance', '0001_initial'),
+        ('compliance', '0002_complianceapplication_created_by_and_more'),
     ]
 
     operations = [
