@@ -15,6 +15,11 @@ from accounts.tasks import send_email_verification
 
 
 class AuthenticationTests(APITestCase):
+    def setUp(self):
+        # Registration is rate limited per caller, and the locmem cache outlives
+        # a single test, so each one starts from a clean bucket.
+        cache.clear()
+
     def test_register_login_and_read_profile(self):
         response = self.client.post(reverse("register"), {
             "email": "owner@example.com",

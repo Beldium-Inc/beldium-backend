@@ -45,8 +45,12 @@ class OrganisationViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def directory(self, request):
-        organisations = Organisation.objects.filter(verification_status="verified").annotate(
-            member_count=Count("memberships", distinct=True)
+        # filter_queryset applies the search and filter fields declared above, so
+        # the register can be searched by name or registration number.
+        organisations = self.filter_queryset(
+            Organisation.objects.filter(verification_status="verified").annotate(
+                member_count=Count("memberships", distinct=True)
+            )
         ).order_by("name")
         page = self.paginate_queryset(organisations)
         serializer = self.get_serializer(page if page is not None else organisations, many=True)

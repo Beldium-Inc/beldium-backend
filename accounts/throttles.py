@@ -28,3 +28,24 @@ class VerificationIssueThrottle(EmailOrIPRateThrottle):
 
 class VerificationAttemptThrottle(EmailOrIPRateThrottle):
     scope = "verification_attempt"
+
+
+class IPRateThrottle(EmailOrIPRateThrottle):
+    """Keyed on the caller's address alone.
+
+    The email-scoped key above is right for endpoints that act on an existing
+    address, but wrong for ones that mint records: abuse there is a single
+    caller cycling through addresses, and an email-scoped bucket hands every
+    new address a fresh allowance.
+    """
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+
+class RegistrationThrottle(IPRateThrottle):
+    scope = "registration"
+
+
+class SocialAuthThrottle(IPRateThrottle):
+    scope = "social_auth"

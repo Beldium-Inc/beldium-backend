@@ -72,14 +72,18 @@ class OrganisationInvitationSerializer(serializers.ModelSerializer):
 
 class JoinRequestSerializer(serializers.ModelSerializer):
     requester = UserSerializer(read_only=True)
+    organisation_name = serializers.CharField(source="organisation.name", read_only=True)
 
     class Meta:
         model = JoinRequest
         fields = [
-            "id", "organisation", "requester", "requested_role", "job_title", "employee_id", "justification",
+            "id", "organisation", "organisation_name", "requester", "requested_role",
+            "job_title", "employee_id", "justification",
             "status", "decision_notes", "decided_at", "created_at",
         ]
-        read_only_fields = ["id", "requester", "status", "decision_notes", "decided_at", "created_at"]
+        read_only_fields = [
+            "id", "organisation_name", "requester", "status", "decision_notes", "decided_at", "created_at",
+        ]
 
     def validate_requested_role(self, value):
         if value in {MembershipRole.OWNER, MembershipRole.ADMIN}:

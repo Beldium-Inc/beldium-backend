@@ -1,19 +1,23 @@
+from pathlib import Path
+
 from django.db import transaction
+from django.http import FileResponse, HttpResponseRedirect
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 
 from accounts.audit import record_account_event
+from accounts.models import AccountAuditEvent
 from compliance.models import ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
 from compliance.permissions import IsApplicationMember
 from compliance.serializers import (
-    ApplicationDecisionSerializer, ApplicationMessageSerializer, ComplianceApplicationSerializer,
+    ApplicationActivitySerializer, ApplicationDecisionSerializer, ApplicationMessageSerializer, ComplianceApplicationSerializer,
     ComplianceDocumentSerializer, DocumentReviewSerializer, PersonnelSerializer,
     RequestedDocumentSerializer, application_progress,
     DashboardResponseSerializer,
@@ -30,9 +34,20 @@ EDIT_ROLES = {MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.COMPLIA
 class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     queryset = ComplianceApplication.objects.none()
     serializer_class = ComplianceApplicationSerializer
-    permission_classes = [IsApplicationMember]
+    # IsApplicationMember only implements has_object_permission, so on its own it
+    # leaves list and create ungated — it replaces the project-wide IsAuthenticated
+    # default rather than adding to it.
+    permission_classes = [IsAuthenticated, IsApplicationMember]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
-    http_method_names = ["get", "post", "patch", "head", "options"]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    # Without these the project's DjangoFilterBackend has nothing to act on and
+    # ?status= / ?organisation= are accepted but silently ignored.
+    filterset_fields = ["status", "organisation"]
+
+    def destroy(self, request, *args, **kwargs):
+        # DELETE is allowed on this viewset only so the personnel sub-route can
+        # serve it; an application itself is never deleted through the API.
+        raise MethodNotAllowed("DELETE")
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
@@ -41,6 +56,17 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if self.request.user.is_staff:
             return qs
         return qs.filter(organisation__memberships__user=self.request.user, organisation__memberships__is_active=True).distinct()
+
+    def _record(self, application, event, **metadata):
+        """Every compliance event is filed against both the organisation and the
+        application, so the organisation audit and the per-application activity
+        feed can each find it with one indexed lookup."""
+        record_account_event(
+            self.request, f"compliance.{event}",
+            organisation_id=str(application.organisation_id),
+            application_id=str(application.id),
+            **metadata,
+        )
 
     def _assert_editor(self, application):
         if self.request.user.is_staff:
@@ -59,6 +85,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         setattr(application, model_field, serializer.validated_data["data"])
         application.save(update_fields=[model_field, "updated_at"])
+        self._record(application, "section_saved", section=model_field)
         return Response(self.get_serializer(application).data)
 
     def perform_create(self, serializer):
@@ -66,7 +93,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_staff and not organisation.memberships.filter(user=self.request.user, is_active=True, role__in=EDIT_ROLES).exists():
             raise PermissionDenied("Your organisation role cannot create an application.")
         application = serializer.save()
-        record_account_event(self.request, "compliance.application_created", organisation_id=str(application.organisation_id), application_id=str(application.id))
+        self._record(application, "application_created")
 
     @extend_schema(request=OrganisationSectionSerializer, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
     @action(detail=True, methods=["patch"], url_path="sections/organisation", url_name="organisation-section")
@@ -94,6 +121,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
             "name", "organisation_type", "registration_number", "tax_identifier", "website",
             "address", "country", "state", "updated_at",
         ])
+        self._record(application, "section_saved", section="organisation_profile")
         return Response(self.get_serializer(application).data)
 
     @extend_schema(request=RepresentativeSectionSerializer, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
@@ -138,6 +166,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         serializer = PersonnelSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         person = serializer.save(application=application)
+        self._record(application, "personnel_added", personnel_id=str(person.id), full_name=person.full_name)
         return Response(PersonnelSerializer(person, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(
@@ -158,11 +187,14 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if not person:
             raise AppError("Personnel record not found.", code="not_found", status_code=404)
         if request.method == "DELETE":
+            full_name = person.full_name
             person.delete()
+            self._record(application, "personnel_removed", personnel_id=str(personnel_id), full_name=full_name)
             return Response(status=status.HTTP_204_NO_CONTENT)
         serializer = PersonnelSerializer(person, data=request.data, partial=True, context={"request": request})
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        self._record(application, "personnel_updated", personnel_id=str(person.id), full_name=person.full_name)
         return Response(serializer.data)
 
     @action(detail=True, methods=["get", "post"], parser_classes=[MultiPartParser, FormParser])
@@ -183,7 +215,65 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         serializer = ComplianceDocumentSerializer(existing, data=mutable_data, partial=bool(existing), context={"request": request})
         serializer.is_valid(raise_exception=True)
         document = serializer.save(application=application, status=ComplianceDocument.Status.SUBMITTED, review_notes="", reviewed_at=None, reviewed_by=None)
+        self._record(application, "document_uploaded", document_type=document.document_type, title=document.title)
         return Response(ComplianceDocumentSerializer(document, context={"request": request}).data, status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED)
+
+    def _serve(self, stored_file, filename):
+        """Hand back a stored file without exposing the storage layer.
+
+        S3-backed storage signs an absolute URL that is already access
+        controlled and expires on its own, so redirecting to it is both cheaper
+        and safer than proxying the bytes. Local storage returns a bare
+        site-relative path with nothing guarding it, so those bytes are streamed
+        through this view, which has already checked the caller.
+        """
+        url = stored_file.url
+        if url.startswith(("http://", "https://")):
+            return HttpResponseRedirect(url)
+        return FileResponse(stored_file.open("rb"), as_attachment=True, filename=filename)
+
+    @extend_schema(parameters=[OpenApiParameter("document_id", OpenApiTypes.UUID, OpenApiParameter.PATH)])
+    @action(detail=True, methods=["get"], url_path=r"documents/(?P<document_id>[^/.]+)/download", url_name="download-document")
+    def download_document(self, request, pk=None, document_id=None):
+        application = self.get_object()
+        document = application.documents.filter(id=document_id).first()
+        if not document or not document.file:
+            raise AppError("Document not found.", code="not_found", status_code=404)
+        return self._serve(document.file, document.original_name)
+
+    @extend_schema(parameters=[OpenApiParameter("personnel_id", OpenApiTypes.UUID, OpenApiParameter.PATH)])
+    @action(
+        detail=True, methods=["get"],
+        url_path=r"personnel/(?P<personnel_id>[^/.]+)/download/(?P<field>cv|certificate)",
+        url_name="download-personnel-file",
+    )
+    def download_personnel_file(self, request, pk=None, personnel_id=None, field=None):
+        application = self.get_object()
+        person = application.personnel.filter(id=personnel_id).first()
+        if not person:
+            raise AppError("Personnel record not found.", code="not_found", status_code=404)
+        stored_file = getattr(person, field)
+        if not stored_file:
+            raise AppError("No file has been uploaded for this record.", code="not_found", status_code=404)
+        return self._serve(stored_file, Path(stored_file.name).name)
+
+    @extend_schema(responses={status.HTTP_200_OK: ApplicationActivitySerializer(many=True)})
+    @action(detail=True, methods=["get"])
+    def activity(self, request, pk=None):
+        """What has happened to this application, readable by its own members.
+
+        Deliberately not the organisation audit endpoint: that one is scoped to
+        the organisation, restricted to its administrators, and serialises the
+        actor's email and IP address, none of which an applicant should be shown
+        about a reviewer.
+        """
+        application = self.get_object()
+        events = AccountAuditEvent.objects.filter(
+            metadata__application_id=str(application.id)
+        ).select_related("actor")
+        page = self.paginate_queryset(events)
+        serializer = ApplicationActivitySerializer(page if page is not None else events, many=True)
+        return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
 
     @action(detail=True, methods=["get"], url_path="document-requirements")
     def document_requirements(self, request, pk=None):
@@ -209,12 +299,20 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         application.organisation.verification_status = "under_review"
         application.organisation.submitted_at = application.submitted_at
         application.organisation.save(update_fields=["verification_status", "submitted_at", "updated_at"])
-        record_account_event(request, "compliance.application_submitted", organisation_id=str(application.organisation_id), application_id=str(application.id))
+        self._record(application, "application_submitted")
         return Response(self.get_serializer(application).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
     def decide(self, request, pk=None):
         application = self.get_object()
+        # Nothing can move an application back to draft, so draft means it was
+        # never submitted: there is no review to record a decision against, and
+        # its submitted_at would stay null while reviewed_at was set.
+        if application.status == ApplicationStatus.DRAFT:
+            raise ConflictError(
+                "This application has not been submitted for review.",
+                code="application_not_submitted",
+            )
         serializer = ApplicationDecisionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         application.status = serializer.validated_data["status"]
@@ -233,6 +331,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         application.organisation.verified_by = request.user
         application.organisation.rejection_reason = application.review_notes if application.status == ApplicationStatus.REJECTED else ""
         application.organisation.save(update_fields=["verification_status", "verified_at", "verified_by", "rejection_reason", "updated_at"])
+        self._record(application, "application_decided", decision=application.status)
         return Response(self.get_serializer(application).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsAdminUser], url_path="request-document")
@@ -246,6 +345,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         )
         application.status = ApplicationStatus.ACTION_REQUIRED
         application.save(update_fields=["status", "updated_at"])
+        self._record(application, "document_requested", document_type=document.document_type, title=document.title)
         return Response(RequestedDocumentSerializer(document).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(parameters=[OpenApiParameter("document_id", OpenApiTypes.UUID, OpenApiParameter.PATH)])
@@ -262,6 +362,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         document.reviewed_by = request.user
         document.reviewed_at = timezone.now()
         document.save(update_fields=["status", "review_notes", "reviewed_by", "reviewed_at", "updated_at"])
+        self._record(application, "document_reviewed", document_type=document.document_type, outcome=document.status)
         return Response(ComplianceDocumentSerializer(document, context={"request": request}).data)
 
     @action(detail=True, methods=["get", "post"])
@@ -296,7 +397,8 @@ class DashboardViewSet(viewsets.ViewSet):
         for application in applications:
             progress = application_progress(application)
             data.append({
-                "application_id": application.id, "organisation_id": application.organisation_id,
+                "application_id": application.id, "reference": application.reference,
+                "organisation_id": application.organisation_id,
                 "organisation_name": application.organisation.name, "status": application.status,
                 "progress": progress, "personnel_count": application.personnel.count(),
                 "documents_submitted": progress["documents"]["submitted"],

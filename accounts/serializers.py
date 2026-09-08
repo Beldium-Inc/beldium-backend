@@ -12,8 +12,11 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "email", "first_name", "last_name", "phone_number", "country", "onboarding_role", "email_verified_at", "phone_verified_at", "created_at"]
-        read_only_fields = ["id", "email", "email_verified_at", "phone_verified_at", "created_at"]
+        fields = ["id", "email", "first_name", "last_name", "phone_number", "country", "onboarding_role", "email_verified_at", "phone_verified_at", "is_staff", "created_at"]
+        # is_staff is what gates the reviewer-only compliance actions, and this
+        # endpoint accepts PATCH: leaving it writable would let any account
+        # grant itself staff, so it stays read-only.
+        read_only_fields = ["id", "email", "email_verified_at", "phone_verified_at", "is_staff", "created_at"]
 
 
 class AccountAuditEventSerializer(serializers.ModelSerializer):

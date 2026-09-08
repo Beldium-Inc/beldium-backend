@@ -38,6 +38,21 @@ python manage.py runserver
 
 SQLite is used by default for local development. Set `DB_ENGINE=postgresql` and the `DB_*` variables for PostgreSQL.
 
+## Connected frontend
+
+`../beldium-new-frontend` talks to this API. Its dev server runs on port 8080, which is the
+first entry in the default `CORS_ALLOWED_ORIGINS`; the frontend reads the API origin from
+`VITE_API_URL` (default `http://localhost:8000`). Run both to work on the connected app:
+
+```bash
+python manage.py runserver          # this project, port 8000
+bun run dev                         # beldium-new-frontend, port 8080
+```
+
+Registration, the six-digit email code, sign-in, the current-user profile, the organisation
+register and join requests are wired through. With the default console email backend the
+verification code is printed in this terminal, not emailed.
+
 ## API entry points
 
 | Method | Endpoint | Purpose |
@@ -85,8 +100,11 @@ SQLite is used by default for local development. Set `DB_ENGINE=postgresql` and 
 | PATCH | `/api/v1/compliance-applications/{id}/sections/declaration/` | Save final declarations |
 | GET/POST | `/api/v1/compliance-applications/{id}/personnel/` | List or add key personnel |
 | PATCH/DELETE | `/api/v1/compliance-applications/{id}/personnel/{personnel_id}/` | Update or remove personnel |
+| GET | `/api/v1/compliance-applications/{id}/personnel/{personnel_id}/download/{cv\|certificate}/` | Download a personnel file |
 | GET/POST | `/api/v1/compliance-applications/{id}/documents/` | List or upload compliance documents |
+| GET | `/api/v1/compliance-applications/{id}/documents/{document_id}/download/` | Download an uploaded document |
 | GET | `/api/v1/compliance-applications/{id}/document-requirements/` | Read checklist status |
+| GET | `/api/v1/compliance-applications/{id}/activity/` | Read this application's activity feed |
 | POST | `/api/v1/compliance-applications/{id}/submit/` | Submit a complete application |
 | POST | `/api/v1/compliance-applications/{id}/decide/` | Record a staff review decision |
 | POST | `/api/v1/compliance-applications/{id}/request-document/` | Request an additional document |
@@ -106,9 +124,11 @@ The onboarding section identifiers are `organisation`, `representative`, `servic
 
 ## File storage and external identity
 
-Uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Local development stores files under `media/`. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
+Uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Local development stores files under `media/`, which is deliberately not routed: uploads are private, so they are read only through the authenticated download endpoints above, which apply the same membership check as the rest of the application. With an S3-compatible backend those endpoints redirect to a signed URL instead of streaming the file. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
 
 Phone OTP delivery uses `SMS_WEBHOOK_URL` and `SMS_WEBHOOK_TOKEN`. Google requires `GOOGLE_OAUTH_CLIENT_ID`; Microsoft requires `MICROSOFT_OAUTH_CLIENT_ID` and `MICROSOFT_OAUTH_TENANT_ID`. Provider tokens are validated server-side. Existing password accounts must authenticate before linking a social identity; an email match never silently links an account.
+
+`/api/v1/organisations/` and `/api/v1/organisations/directory/` accept `?search=` (name or registration number), `?organisation_type=`, `?country=`, `?state=`, `?ordering=`, and `?page=`/`?page_size=`. The directory only ever returns verified organisations.
 
 New accounts must verify their email before using the token endpoint. Registration sends a six-digit code that expires after 10 minutes. A code is single-use, is invalidated after five failed attempts, and requesting another code invalidates earlier codes. Resend requests are limited to five per email/IP pair every 10 minutes.
 

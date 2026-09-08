@@ -9,7 +9,7 @@ SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key-change-this-be
 DEBUG = str(config("DEBUG", default="true")).strip().lower() in {"1", "true", "yes", "on", "debug", "development"}
 ENVIRONMENT = str(config("ENVIRONMENT", default="local")).strip().lower()
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
-CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:3000,http://localhost:5173", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 
 if ENVIRONMENT == "production":
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
@@ -101,7 +101,7 @@ EMAIL_BACKEND = config(
     ),
 )
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@beldium.com")
-FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:5173")
+FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:8080")
 SMS_WEBHOOK_URL = config("SMS_WEBHOOK_URL", default="")
 SMS_WEBHOOK_TOKEN = config("SMS_WEBHOOK_TOKEN", default="")
 GOOGLE_OAUTH_CLIENT_ID = config("GOOGLE_OAUTH_CLIENT_ID", default="")
@@ -132,6 +132,8 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "verification_issue": "5/10m",
         "verification_attempt": "10/10m",
+        "registration": "10/1h",
+        "social_auth": "20/10m",
     },
     "PAGE_SIZE": 20,
 }
