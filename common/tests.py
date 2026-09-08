@@ -1,8 +1,9 @@
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from rest_framework import exceptions, status
 
+from common.checks import secret_key_is_strong
 from common.exception_handler import custom_exception_handler
 from common.exceptions import ConflictError
 
@@ -42,3 +43,37 @@ class ExceptionHandlerTests(SimpleTestCase):
         self.assertEqual(response.data["error"]["code"], "internal_server_error")
         self.assertNotIn("password", response.data["message"])
         logger.assert_called_once()
+
+
+class SecretKeyCheckTests(SimpleTestCase):
+    """SECRET_KEY signs the JWTs, so a placeholder must not reach a deployment."""
+
+    STRONG = "l4Nn8x-QaZ7vB2yTf0KpR9wMhCsE6uJdG3iOaVzXtYbQnLmPrSkFdHjWgU5cAe1o"
+
+    @override_settings(SECRET_KEY=STRONG, ENVIRONMENT="production")
+    def test_a_strong_key_passes(self):
+        self.assertEqual(secret_key_is_strong(None), [])
+
+    @override_settings(SECRET_KEY="change-me", ENVIRONMENT="local")
+    def test_the_repository_placeholder_warns_in_development(self):
+        messages = secret_key_is_strong(None)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].id, "beldium.W001")
+
+    @override_settings(SECRET_KEY="change-me", ENVIRONMENT="production")
+    def test_the_repository_placeholder_is_fatal_in_production(self):
+        messages = secret_key_is_strong(None)
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].id, "beldium.E001")
+        self.assertTrue(messages[0].is_serious())
+
+    @override_settings(SECRET_KEY="unsafe-development-key-change-this-before-any-real-deployment-2026", ENVIRONMENT="production")
+    def test_the_settings_fallback_is_also_rejected(self):
+        # Long enough to pass a length test, so it has to be matched by name.
+        self.assertEqual(secret_key_is_strong(None)[0].id, "beldium.E001")
+
+    @override_settings(SECRET_KEY="short", ENVIRONMENT="production")
+    def test_a_short_key_is_rejected(self):
+        self.assertEqual(secret_key_is_strong(None)[0].id, "beldium.E001")

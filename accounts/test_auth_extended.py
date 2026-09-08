@@ -176,3 +176,58 @@ class EmailVerificationEdgeCaseTests(APITestCase):
 
         self.assertEqual(wrong.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(wrong.data, unknown.data)
+
+
+class CurrentUserStaffFlagTests(APITestCase):
+    """`is_staff` gates the reviewer-only compliance actions, so it is readable but never writable."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("member@example.com", "SafePassword-2026!", email_verified_at=timezone.now())
+
+    def test_is_staff_is_returned(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get(reverse("current-user"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIs(response.data["is_staff"], False)
+
+        reviewer = User.objects.create_user("reviewer@example.com", "SafePassword-2026!", is_staff=True, email_verified_at=timezone.now())
+        self.client.force_authenticate(reviewer)
+        self.assertIs(self.client.get(reverse("current-user")).data["is_staff"], True)
+
+    def test_a_user_cannot_promote_themselves_to_staff(self):
+        self.client.force_authenticate(self.user)
+
+        response = self.client.patch(reverse("current-user"), {"is_staff": True}, format="json")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_staff)
+
+
+class RegistrationThrottleTests(APITestCase):
+    """Registration mints records, so its throttle keys on the caller's address:
+    an email-keyed bucket would give every new address a fresh allowance."""
+
+    def setUp(self):
+        cache.clear()
+
+    def _register(self, index):
+        return self.client.post(reverse("register"), {
+            "email": f"flood{index}@example.com",
+            "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
+        }, format="json")
+
+    def test_repeated_registration_from_one_caller_is_refused(self):
+        codes = [self._register(i).status_code for i in range(12)]
+
+        # Every address is different, so this only trips if the key ignores email.
+        self.assertEqual(codes.count(status.HTTP_201_CREATED), 10)
+        self.assertEqual(codes[10], status.HTTP_429_TOO_MANY_REQUESTS)
+        self.assertEqual(codes[11], status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_a_single_registration_is_unaffected(self):
+        self.assertEqual(self._register(0).status_code, status.HTTP_201_CREATED)

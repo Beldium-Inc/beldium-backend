@@ -1,10 +1,17 @@
+import secrets
 from pathlib import Path
 
 from django.conf import settings
 from django.core.validators import FileExtensionValidator
 from django.db import models
+from django.utils import timezone
 
 from common.models import TimeStampedModel
+
+
+def generate_application_reference():
+    """Mirrors the organisation's BLD-ORG- id, so both read alike in support."""
+    return f"BLD-APP-{timezone.now().year}-{secrets.token_hex(4).upper()}"
 
 
 class ApplicationStatus(models.TextChoices):
@@ -36,6 +43,9 @@ REQUIRED_DOCUMENTS = (
 
 
 class ComplianceApplication(TimeStampedModel):
+    # A UUID is unusable over the phone or in an email subject; this is the
+    # reference an applicant and a reviewer actually quote to each other.
+    reference = models.CharField(max_length=32, unique=True, null=True, blank=True, editable=False)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="created_compliance_applications")
     organisation = models.OneToOneField(
         "organisations.Organisation", on_delete=models.CASCADE, related_name="compliance_application"
@@ -56,6 +66,11 @@ class ComplianceApplication(TimeStampedModel):
     )
     review_notes = models.TextField(blank=True)
     conditional_requirements = models.TextField(blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = generate_application_reference()
+        return super().save(*args, **kwargs)
 
 
 class Personnel(TimeStampedModel):

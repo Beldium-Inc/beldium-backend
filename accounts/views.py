@@ -36,7 +36,12 @@ from accounts.services import (
     issue_phone_verification,
     verify_phone_code,
 )
-from accounts.throttles import VerificationAttemptThrottle, VerificationIssueThrottle
+from accounts.throttles import (
+    RegistrationThrottle,
+    SocialAuthThrottle,
+    VerificationAttemptThrottle,
+    VerificationIssueThrottle,
+)
 from common.exceptions import AppError
 from accounts.audit import record_account_event
 from accounts.social import verify_social_token
@@ -46,6 +51,7 @@ class RegistrationView(generics.CreateAPIView):
     serializer_class = RegistrationSerializer
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = [RegistrationThrottle]
 
     def create(self, request, *args, **kwargs):
         response = super().create(request, *args, **kwargs)
@@ -245,6 +251,7 @@ class SocialLoginView(generics.GenericAPIView):
     serializer_class = SocialLoginSerializer
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = [SocialAuthThrottle]
 
     @transaction.atomic
     def post(self, request):

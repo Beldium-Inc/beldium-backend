@@ -70,6 +70,29 @@ class OrganisationAuthorizationTests(APITestCase):
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["id"], str(self.organisation.id))
 
+    def test_directory_can_be_searched_by_name_and_registration_number(self):
+        self.organisation.verification_status = "verified"
+        self.organisation.save(update_fields=["verification_status"])
+        other = Organisation.objects.create(
+            name="Kogi Mineral Resources",
+            organisation_type="mining_company",
+            registration_number="RC-200",
+            verification_status="verified",
+        )
+        self.client.force_authenticate(self.outsider)
+        url = reverse("organisation-directory")
+
+        by_name = self.client.get(url, {"search": "Kogi"})
+        self.assertEqual(by_name.data["count"], 1)
+        self.assertEqual(by_name.data["results"][0]["id"], str(other.id))
+
+        by_registration = self.client.get(url, {"search": "RC-100"})
+        self.assertEqual(by_registration.data["count"], 1)
+        self.assertEqual(by_registration.data["results"][0]["id"], str(self.organisation.id))
+
+        by_type = self.client.get(url, {"organisation_type": "regulator"})
+        self.assertEqual(by_type.data["count"], 0)
+
     def test_registration_number_is_unique_within_country(self):
         self.client.force_authenticate(self.outsider)
         response = self.client.post(reverse("organisation-list"), {
@@ -184,3 +207,4 @@ class InvitationAndJoinRequestTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
         self.assertEqual(response.data["results"][0]["id"], str(mine.id))
+        self.assertEqual(response.data["results"][0]["organisation_name"], self.organisation.name)

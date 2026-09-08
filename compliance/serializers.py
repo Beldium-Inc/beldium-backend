@@ -1,8 +1,10 @@
+from django.urls import reverse
 from django.utils import timezone
 from rest_framework import serializers
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 
+from accounts.models import AccountAuditEvent
 from compliance.models import ApprovalCondition, ConditionEvidence, ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
 from organisations.models import OrganisationType
 
@@ -39,19 +41,26 @@ class PersonnelSerializer(serializers.ModelSerializer):
     def validate_certificate(self, value):
         return validate_upload(value)
 
-    def _url(self, file):
-        if not file:
+    def _url(self, obj, field):
+        # Point at the authenticated download action rather than the storage
+        # URL: a local-storage path has nothing guarding it, and the API should
+        # read the same whichever backend is configured.
+        if not getattr(obj, field):
             return None
+        url = reverse(
+            "compliance-application-download-personnel-file",
+            args=[obj.application_id, obj.id, field],
+        )
         request = self.context.get("request")
-        return request.build_absolute_uri(file.url) if request else file.url
+        return request.build_absolute_uri(url) if request else url
 
     @extend_schema_field(OpenApiTypes.URI)
     def get_cv_url(self, obj) -> str | None:
-        return self._url(obj.cv)
+        return self._url(obj, "cv")
 
     @extend_schema_field(OpenApiTypes.URI)
     def get_certificate_url(self, obj) -> str | None:
-        return self._url(obj.certificate)
+        return self._url(obj, "certificate")
 
 
 def validate_due_date(value):
@@ -82,8 +91,12 @@ class ComplianceDocumentSerializer(serializers.ModelSerializer):
     def get_file_url(self, obj) -> str | None:
         if not obj.file:
             return None
+        url = reverse(
+            "compliance-application-download-document",
+            args=[obj.application_id, obj.id],
+        )
         request = self.context.get("request")
-        return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+        return request.build_absolute_uri(url) if request else url
 
 
 class ComplianceDocumentUploadSerializer(serializers.ModelSerializer):
@@ -161,6 +174,66 @@ class ApprovalConditionSerializer(serializers.ModelSerializer):
         return obj.due_date < timezone.localdate() and obj.status != ApprovalCondition.Status.CLEARED
 
 
+ACTIVITY_DESCRIPTIONS = {
+    # Keys here must match the metadata each record_account_event call actually
+    # writes; a template naming a key that is not written falls back below.
+    "compliance.application_created": "Application created",
+    "compliance.section_saved": "Saved the {section} section",
+    "compliance.personnel_added": "Added {full_name} to key personnel",
+    "compliance.personnel_updated": "Updated {full_name}'s details",
+    "compliance.personnel_removed": "Removed {full_name} from key personnel",
+    "compliance.document_uploaded": "Uploaded {title}",
+    "compliance.application_submitted": "Application submitted for review",
+    "compliance.application_decided": "Review decision recorded: {status}",
+    "compliance.document_requested": "Reviewer requested an additional document",
+    "compliance.document_reviewed": "Document marked {status}",
+    "compliance.condition_created": "Reviewer added an approval condition",
+    "compliance.condition_evidence_submitted": "Evidence submitted for an approval condition",
+    "compliance.condition_evidence_reviewed": "Condition evidence marked {status}",
+}
+
+
+class ApplicationActivitySerializer(serializers.ModelSerializer):
+    """One entry in an application's activity feed, for its own members.
+
+    AccountAuditEvent stores the actor's email, IP address and user agent. This
+    is read by applicants, so none of those are serialised and the raw metadata
+    is not passed through either — only a rendered sentence built from it.
+    """
+
+    actor = serializers.SerializerMethodField()
+    description = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AccountAuditEvent
+        fields = ["id", "event_type", "actor", "description", "created_at"]
+
+    def get_actor(self, obj) -> str:
+        if obj.actor is None:
+            return "System"
+        # A reviewer is shown as the team. Naming them invites the applicant to
+        # contact them directly and exposes staff identity on every decision.
+        if obj.actor.is_staff:
+            return "Beldium review team"
+        return obj.actor.full_name or obj.actor.email
+
+    def get_description(self, obj) -> str:
+        metadata = obj.metadata or {}
+        readable = {
+            key: value.replace("_", " ").replace("-", " ") if isinstance(value, str) else value
+            for key, value in metadata.items()
+        }
+
+        template = ACTIVITY_DESCRIPTIONS.get(obj.event_type)
+        if not template:
+            return obj.event_type.removeprefix("compliance.").replace("_", " ").capitalize()
+        try:
+            return template.format(**readable)
+        except KeyError:
+            # Older rows may predate a metadata key the template wants.
+            return obj.event_type.removeprefix("compliance.").replace("_", " ").capitalize()
+
+
 class ComplianceApplicationSerializer(serializers.ModelSerializer):
     conditions = ApprovalConditionSerializer(many=True, read_only=True)
 
@@ -171,13 +244,13 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ComplianceApplication
         fields = [
-            "id", "organisation", "status", "organisation_profile", "representative", "services",
+            "id", "reference", "organisation", "status", "organisation_profile", "representative", "services",
             "professional_capability", "inspection_capability", "conflict_declaration", "declaration",
             "submitted_at", "reviewed_at", "review_notes", "conditional_requirements", "personnel",
             "documents", "conditions", "progress", "created_at", "updated_at",
         ]
         read_only_fields = [
-            "id", "status", "organisation_profile", "representative", "services", "professional_capability",
+            "id", "reference", "status", "organisation_profile", "representative", "services", "professional_capability",
             "inspection_capability", "conflict_declaration", "declaration", "submitted_at", "reviewed_at",
             "review_notes", "conditional_requirements", "personnel", "documents", "conditions", "progress", "created_at", "updated_at",
         ]
@@ -313,6 +386,11 @@ class DeclarationDataSerializer(serializers.Serializer):
     signatory_name = serializers.CharField(max_length=200, required=False, allow_blank=True)
     signatory_position = serializers.CharField(max_length=150, required=False, allow_blank=True)
     declaration_date = serializers.DateField(required=False)
+
+    def validate_declaration_date(self, value):
+        # The section is stored in a JSONField, which cannot serialise a date
+        # object; keep DateField's parsing but hand back an ISO string.
+        return value.isoformat()
 
     def validate(self, attrs):
         confirmations = ["accuracy_confirmed", "documents_genuine", "compliance_agreed", "disclose_changes", "authorised", "confirmed"]
