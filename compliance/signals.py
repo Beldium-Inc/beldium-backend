@@ -1,7 +1,8 @@
+from django.db import transaction
 from django.db.models.signals import post_delete, pre_save
 from django.dispatch import receiver
 
-from compliance.models import ComplianceDocument, Personnel
+from compliance.models import ConditionEvidence, ComplianceDocument, Personnel
 
 
 def _delete_replaced(instance, field_name):
@@ -13,7 +14,7 @@ def _delete_replaced(instance, field_name):
     old_file = getattr(old, field_name)
     new_file = getattr(instance, field_name)
     if old_file and old_file.name != getattr(new_file, "name", ""):
-        old_file.delete(save=False)
+        transaction.on_commit(lambda: old_file.storage.delete(old_file.name))
 
 
 @receiver(pre_save, sender=ComplianceDocument)
@@ -30,12 +31,18 @@ def delete_replaced_personnel_files(sender, instance, **kwargs):
 @receiver(post_delete, sender=ComplianceDocument)
 def delete_document_file(sender, instance, **kwargs):
     if instance.file:
-        instance.file.delete(save=False)
+        transaction.on_commit(lambda: instance.file.storage.delete(instance.file.name))
 
 
 @receiver(post_delete, sender=Personnel)
 def delete_personnel_files(sender, instance, **kwargs):
     if instance.cv:
-        instance.cv.delete(save=False)
+        transaction.on_commit(lambda: instance.cv.storage.delete(instance.cv.name))
     if instance.certificate:
-        instance.certificate.delete(save=False)
+        transaction.on_commit(lambda: instance.certificate.storage.delete(instance.certificate.name))
+
+
+@receiver(post_delete, sender=ConditionEvidence)
+def delete_condition_evidence_file(sender, instance, **kwargs):
+    if instance.file:
+        transaction.on_commit(lambda: instance.file.storage.delete(instance.file.name))

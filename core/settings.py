@@ -142,6 +142,7 @@ SIMPLE_JWT = {
     "BLACKLIST_AFTER_ROTATION": True,
 }
 SPECTACULAR_SETTINGS = {
+    "COMPONENT_SPLIT_REQUEST": True,
     "TITLE": "Beldium Mining Compliance API",
     "DESCRIPTION": "API for mining organisations, compliance partners, and regulators.",
     "VERSION": "1.0.0",

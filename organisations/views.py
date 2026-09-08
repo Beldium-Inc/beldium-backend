@@ -199,6 +199,8 @@ class OrganisationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], permission_classes=[IsAdminUser])
     def decide(self, request, pk=None):
         organisation = self.get_object()
+        if hasattr(organisation, "compliance_application"):
+            raise ConflictError("Use the compliance application decision endpoint.", code="compliance_review_required")
         if organisation.verification_status != "under_review":
             raise ConflictError("Only organisations under review can be decided.", code="organisation_not_under_review")
         serializer = OrganisationDecisionSerializer(data=request.data)
