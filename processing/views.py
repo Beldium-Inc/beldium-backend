@@ -8,6 +8,7 @@ reads a role from the request, so a client cannot widen its own access.
 from collections import OrderedDict
 from datetime import timedelta
 
+from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import Count, Q
 from django.http import FileResponse, HttpResponseRedirect
@@ -23,7 +24,7 @@ from rest_framework.views import APIView
 
 from accounts.models import AccountAuditEvent
 from common.exceptions import AppError, ConflictError
-from processing import audit, checklist, scoring
+from processing import audit, checklist, reports, scoring
 from processing.models import (
     EXPIRY_WARNING_DAYS,
     ApplicationDecision,
@@ -43,6 +44,7 @@ from processing.models import (
     ReviewState,
     SectionKey,
     TraceabilityRun,
+    generate_report_reference,
 )
 from processing.permissions import (
     OPERATOR,
@@ -63,6 +65,7 @@ from processing.serializers import (
     ApplicationSectionSerializer,
     ComplianceReportSerializer,
     DashboardSerializer,
+    ReportRequestSerializer,
     ProcessingDocumentReviewSerializer,
     EnvironmentalAlertSerializer,
     ExpiringDocumentSerializer,
@@ -836,13 +839,67 @@ class ProcessingDocumentViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelVi
 
 
 class ComplianceReportViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelViewSet):
+    """Published oversight reports, and the endpoint that compiles new ones."""
+
     serializer_class = ComplianceReportSerializer
     queryset = ComplianceReport.objects.all()
     permission_classes = [IsProcessingParticipant]
-    filterset_fields = ["scope"]
+    filterset_fields = ["scope", "kind"]
     search_fields = ["title", "reference", "period_label"]
     ordering_fields = ["generated_on", "title"]
-    ordering = ["-generated_on"]
+    ordering = ["-generated_on", "-created_at"]
+
+    @extend_schema(
+        request=ReportRequestSerializer,
+        responses={status.HTTP_201_CREATED: ComplianceReportSerializer},
+        description=(
+            "Compile a report from the register and store the PDF. A report is a "
+            "point-in-time extract: its figures are those held at the moment of "
+            "compilation and are never restated."
+        ),
+    )
+    @action(detail=False, methods=["post"], url_path="generate", url_name="generate")
+    def generate(self, request):
+        # A report spans companies, so only the desk and the oversight role can
+        # compile one; a processor would be reading everyone else's register.
+        if not self.sees_whole_register():
+            raise PermissionDenied("Only the compliance desk and regulators can compile reports.")
+
+        serializer = ReportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        kind = serializer.validated_data["kind"]
+        scope = serializer.validated_data["scope"]
+        period = serializer.validated_data["period"]
+
+        report = ComplianceReport(
+            kind=kind,
+            title=reports.ReportKind.LABELS[kind],
+            scope=scope,
+            generated_by=request.user,
+            generated_on=timezone.localdate(),
+        )
+        # The reference is stamped on every page, so it has to exist before the
+        # document is rendered.
+        report.reference = report.reference or generate_report_reference()
+
+        pdf, pages, period_label = reports.build(
+            kind, scope, period, reference=report.reference, generated_by=request.user
+        )
+        report.period_label = period_label
+        report.pages = pages
+        report.save()
+        report.file.save(f"{report.reference}.pdf", ContentFile(pdf), save=True)
+
+        self.record(
+            "report_generated",
+            target=report.reference,
+            detail=f"{report.title} · {scope} · {period_label} ({pages} pages).",
+            report_id=str(report.id),
+        )
+        return Response(
+            ComplianceReportSerializer(report, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @extend_schema(responses={200: OpenApiTypes.BINARY})
     @action(detail=True, methods=["get"], url_path="download", url_name="download")

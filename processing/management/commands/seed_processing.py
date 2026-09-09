@@ -19,6 +19,7 @@ from django.utils import timezone
 
 from organisations.models import Organisation, OrganisationType
 from processing import checklist
+from processing.reports import ReportKind, build as build_report
 from processing.models import (
     ApplicationDecision,
     ApplicationSection,
@@ -34,6 +35,7 @@ from processing.models import (
     ProcessingDocument,
     ProcessingType,
     Processor,
+    generate_report_reference,
     ProcessorStatus,
     ReviewState,
     RiskCause,
@@ -203,11 +205,13 @@ INSPECTIONS = [
     ("Enugu Coal Preparation Ltd", "Udi Coal Wash Plant", "Enugu", 27, "Mrs. Halima Yusuf", Inspection.Type.INCIDENT_TRIGGERED, Inspection.Status.SCHEDULED, ""),
 ]
 
+# (report kind, scope, period, days since it was generated). The seed compiles
+# these for real, so the demo library downloads actual documents.
 REPORTS = [
-    ("RPT-2026-Q2-NAT", "Quarterly National Processing Compliance Report", "Last quarter", "All regions", 48, -59),
-    ("RPT-2026-07-ENV", "Monthly Environmental Exceedance Summary", "Last month", "Environmental", 16, -37),
-    ("RPT-2026-H1-INSP", "Half-year Inspection Programme Review", "First half", "Inspections", 31, -66),
-    ("RPT-2026-06-SW", "South West Regional Compliance Brief", "Last month", "South West", 12, -70),
+    (ReportKind.NATIONAL, "All regions", "last_quarter", 59),
+    (ReportKind.ENVIRONMENTAL, "All regions", "last_month", 37),
+    (ReportKind.INSPECTIONS, "All regions", "year_to_date", 66),
+    (ReportKind.NATIONAL, "South West", "last_month", 70),
 ]
 
 
@@ -463,17 +467,20 @@ class Command(BaseCommand):
                 completed_at=now if status == Inspection.Status.COMPLETED else None,
             )
 
-        for reference, title, period, scope, pages, generated_offset in REPORTS:
-            ComplianceReport.objects.update_or_create(
-                reference=reference,
-                defaults={
-                    "title": title,
-                    "period_label": period,
-                    "scope": scope,
-                    "pages": pages,
-                    "generated_on": today + timedelta(days=generated_offset),
-                },
+        ComplianceReport.objects.all().delete()
+        for kind, scope, period, generated_days_ago in REPORTS:
+            report = ComplianceReport(
+                kind=kind,
+                title=ReportKind.LABELS[kind],
+                scope=scope,
+                generated_on=today - timedelta(days=generated_days_ago),
             )
+            report.reference = generate_report_reference()
+            pdf, pages, period_label = build_report(kind, scope, period, reference=report.reference)
+            report.period_label = period_label
+            report.pages = pages
+            report.save()
+            report.file.save(f"{report.reference}.pdf", ContentFile(pdf), save=True)
 
         self.stdout.write(
             self.style.SUCCESS(

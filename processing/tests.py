@@ -7,8 +7,10 @@ from rest_framework.test import APITestCase
 from accounts.models import User
 from organisations.models import MembershipRole, Organisation, OrganisationMembership, OrganisationType
 from processing import checklist
+from processing.reports import ReportKind
 from processing.models import (
     ApplicationDecision,
+    ComplianceReport,
     ApplicationSection,
     ApplicationStage,
     EnvironmentalAlert,
@@ -1041,3 +1043,121 @@ class RiskCauseTests(ProcessingTestCase):
             reverse("processing-application-detail", args=[self.application_row.id])
         )
         self.assertEqual(response.status_code, 405)
+
+
+class ReportGenerationTests(ProcessingTestCase):
+    """Reports are compiled from the register and stored as they were issued."""
+
+    def setUp(self):
+        super().setUp()
+        self.processor.region = "South West"
+        self.processor.save(update_fields=["region"])
+        self.application_row = self.application(stage=ApplicationStage.IN_REVIEW)
+        NonConformity.objects.create(
+            application=self.application_row,
+            processor=self.processor,
+            section=SectionKey.WASTE,
+            severity=NonConformity.Severity.MAJOR,
+            title="Slag outside containment",
+            due_on=timezone.localdate() + timedelta(days=10),
+        )
+        EnvironmentalAlert.objects.create(
+            processor=self.processor,
+            facility_name="Ilesa Refining Plant A",
+            parameter="Effluent pH",
+            reading="5.4",
+            threshold="6.0 - 9.0",
+            severity=EnvironmentalAlert.Severity.WARNING,
+        )
+        Inspection.objects.create(
+            processor=self.processor,
+            facility_name="Ilesa Refining Plant A",
+            scheduled_for=timezone.localdate() + timedelta(days=7),
+            status=Inspection.Status.SCHEDULED,
+        )
+
+    def _generate(self, **overrides):
+        payload = {"kind": "national_compliance", "scope": "All regions", "period": "year_to_date"}
+        payload.update(overrides)
+        return self.client.post(reverse("processing-report-generate"), payload, format="json")
+
+    def test_every_kind_compiles_a_stored_pdf(self):
+        self.client.force_authenticate(self.operator)
+        for kind, label in ReportKind.CHOICES:
+            with self.subTest(kind=kind):
+                response = self._generate(kind=kind)
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.data["title"], label)
+                self.assertGreaterEqual(response.data["pages"], 1)
+                self.assertIsNotNone(response.data["file_url"])
+
+                report = ComplianceReport.objects.get(id=response.data["id"])
+                self.assertTrue(report.file)
+                with report.file.open("rb") as stored:
+                    self.assertTrue(stored.read(5).startswith(b"%PDF-"))
+
+    def test_the_stored_document_downloads(self):
+        self.client.force_authenticate(self.operator)
+        created = self._generate()
+        response = self.client.get(
+            reverse("processing-report-download", args=[created.data["id"]])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(b"".join(response.streaming_content).startswith(b"%PDF-"))
+
+    def test_the_reference_is_stamped_before_the_document_is_rendered(self):
+        """It appears on every page, so it cannot be assigned after the build."""
+        self.client.force_authenticate(self.operator)
+        report = ComplianceReport.objects.get(id=self._generate().data["id"])
+        with report.file.open("rb") as stored:
+            self.assertIn(report.reference.encode(), stored.read())
+
+    def test_a_regulator_may_compile_one(self):
+        self.client.force_authenticate(self.regulator)
+        self.assertEqual(self._generate().status_code, 201)
+
+    def test_a_processor_cannot_compile_a_register_wide_report(self):
+        self.client.force_authenticate(self.applicant)
+        self.assertEqual(self._generate().status_code, 403)
+
+    def test_an_unknown_region_is_refused(self):
+        self.client.force_authenticate(self.operator)
+        response = self._generate(scope="Atlantis")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("scope", response.data["error"]["details"])
+
+    def test_a_known_region_is_accepted_and_recorded(self):
+        self.client.force_authenticate(self.operator)
+        response = self._generate(scope="South West")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["scope"], "South West")
+
+    def test_an_unknown_kind_is_refused(self):
+        self.client.force_authenticate(self.operator)
+        self.assertEqual(self._generate(kind="astrology").status_code, 400)
+
+    def test_the_period_label_describes_the_range(self):
+        self.client.force_authenticate(self.operator)
+        self.assertEqual(self._generate(period="all_time").data["period_label"], "All time")
+        self.assertIn(
+            str(timezone.localdate().year), self._generate(period="year_to_date").data["period_label"]
+        )
+
+    def test_generation_is_written_to_the_audit_trail(self):
+        self.client.force_authenticate(self.operator)
+        created = self._generate()
+        response = self.client.get(reverse("processing-audit-list"))
+        entry = next(
+            row for row in response.data["results"] if row["target"] == created.data["reference"]
+        )
+        self.assertEqual(entry["action"], "Report generated")
+
+    def test_an_empty_register_still_produces_a_readable_report(self):
+        """A period with nothing in it must not render a broken document."""
+        NonConformity.objects.all().delete()
+        EnvironmentalAlert.objects.all().delete()
+        Inspection.objects.all().delete()
+        self.client.force_authenticate(self.operator)
+        for kind, _ in ReportKind.CHOICES:
+            with self.subTest(kind=kind):
+                self.assertEqual(self._generate(kind=kind, period="last_month").status_code, 201)

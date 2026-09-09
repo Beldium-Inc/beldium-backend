@@ -13,5 +13,6 @@ redis==7.1.0
 sendgrid==6.11.0
 uvicorn==0.40.0
 django-storages[s3]==1.14.6
+reportlab==4.4.10
 google-auth==2.40.3
 PyJWT[crypto]==2.10.1

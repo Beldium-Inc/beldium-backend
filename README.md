@@ -146,7 +146,9 @@ python manage.py seed_processing --flush
 | GET | `/api/v1/processing/documents/expiring/` | Documents expired or lapsing within 60 days |
 | POST | `/api/v1/processing/documents/{id}/review/` | Accept or reject one piece of evidence |
 | GET | `/api/v1/processing/documents/{id}/download/` | Download stored evidence |
-| GET | `/api/v1/processing/reports/` | Generated oversight reports |
+| GET | `/api/v1/processing/reports/` | Published oversight reports |
+| POST | `/api/v1/processing/reports/generate/` | Compile a report from the register |
+| GET | `/api/v1/processing/reports/{id}/download/` | Download a stored report PDF |
 | GET | `/api/v1/processing/audit/` | The processing audit trail |
 | GET | `/api/docs/` | Swagger UI |
 
@@ -302,6 +304,31 @@ go stale between writes:
   60 days, otherwise `valid`. A document's *validity* is separate from the desk's *verdict*
   on it (`review_state`).
 - **Run yield** comes from masses held in kilograms, so reconciliation is exact.
+
+### Reports
+
+`POST /api/v1/processing/reports/generate/` compiles a PDF from the register and stores it:
+
+```json
+{ "kind": "environmental_exceedances", "scope": "South West", "period": "last_quarter" }
+```
+
+Four kinds — `national_compliance`, `environmental_exceedances`, `inspection_programme` and
+`non_conformity_register` — each answering one question, so the desk is not handed a single
+document that buries the thing it needed. `scope` is `All regions` or a region the register
+actually uses; `period` is `last_month`, `last_quarter`, `year_to_date` or `all_time`.
+
+A report is a **point-in-time extract**. Its figures are those held at the moment of
+compilation and are never restated, because a report that changed after it was issued would
+be worthless as a record of what was known when a decision was taken against it. Generating
+again produces a new document rather than updating the old one.
+
+Only the desk and regulators may compile one: a report spans companies, so a processor would
+be reading everyone else's register.
+
+Rendering uses `reportlab`. `processing/reports.py` holds the four report bodies and the
+shared page furniture; `seed_processing` compiles its demo library for real, so the seeded
+reports download actual documents.
 
 ### Audit
 
