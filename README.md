@@ -24,6 +24,7 @@ The first domain slice includes:
 - Phone OTP verification and Google/Microsoft sign-in
 - Full compliance onboarding sections, personnel, declarations, and a 15-item document checklist
 - S3-compatible uploads, requested-document review, applicant messaging, and dashboard aggregates
+- Processing Compliance register: processors, facilities, ten-section applications, findings, inspections, environmental alerts, incidents and batch traceability
 
 ## Local setup
 
@@ -52,6 +53,14 @@ bun run dev                         # beldium-new-frontend, port 8080
 Registration, the six-digit email code, sign-in, the current-user profile, the organisation
 register and join requests are wired through. With the default console email backend the
 verification code is printed in this terminal, not emailed.
+
+The Processing Compliance dashboard is fully wired: every screen under `/processing` reads
+this API and every review action writes to it. Seed a demo register first, or the screens
+open empty:
+
+```bash
+python manage.py seed_processing --flush
+```
 
 ## API entry points
 
@@ -112,6 +121,32 @@ verification code is printed in this terminal, not emailed.
 | GET/POST | `/api/v1/compliance-applications/{id}/messages/` | Read or send application messages |
 | POST | `/api/v1/compliance-applications/{id}/messages/mark-read/` | Mark visible messages as read |
 | GET | `/api/v1/dashboard/` | Read application progress and requested actions |
+| GET | `/api/v1/processing/me/` | Read the caller's processing audience and capabilities |
+| GET | `/api/v1/processing/dashboard/` | Read every aggregate the processing dashboards show |
+| GET/POST | `/api/v1/processing/processors/` | The register of processing companies |
+| GET/POST | `/api/v1/processing/processors/{id}/facilities/` | List or add a processor's facilities |
+| GET/POST | `/api/v1/processing/applications/` | List or start processor applications |
+| PATCH | `/api/v1/processing/applications/{id}/sections/{key}/` | Applicant saves one evidence section |
+| POST | `/api/v1/processing/applications/{id}/sections/{key}/review/` | Operator records a verdict on a section |
+| GET/POST | `/api/v1/processing/applications/{id}/documents/` | List or upload section evidence |
+| GET/POST | `/api/v1/processing/applications/{id}/risk-causes/` | Read or add weighted risk causes |
+| POST | `/api/v1/processing/applications/{id}/submit/` | Submit a complete application |
+| POST | `/api/v1/processing/applications/{id}/decide/` | Record the desk's decision |
+| POST | `/api/v1/processing/applications/{id}/request-inspection/` | Raise a site inspection |
+| GET | `/api/v1/processing/applications/{id}/activity/` | This application's activity feed |
+| GET/POST | `/api/v1/processing/non-conformities/` | Read or raise findings |
+| POST | `/api/v1/processing/non-conformities/{id}/evidence/` | Submit corrective-action evidence |
+| POST | `/api/v1/processing/non-conformities/{id}/close/` | Accept the evidence, or reject and reopen |
+| GET/POST | `/api/v1/processing/inspections/` | Inspection queue |
+| GET/POST | `/api/v1/processing/environmental-alerts/` | Threshold exceedances |
+| POST | `/api/v1/processing/environmental-alerts/{id}/status/` | Acknowledge or resolve an alert |
+| GET/POST | `/api/v1/processing/incidents/` | Reportable facility events |
+| GET/POST | `/api/v1/processing/runs/` | Batch traceability runs |
+| GET | `/api/v1/processing/documents/expiring/` | Documents expired or lapsing within 60 days |
+| POST | `/api/v1/processing/documents/{id}/review/` | Accept or reject one piece of evidence |
+| GET | `/api/v1/processing/documents/{id}/download/` | Download stored evidence |
+| GET | `/api/v1/processing/reports/` | Generated oversight reports |
+| GET | `/api/v1/processing/audit/` | The processing audit trail |
 | GET | `/api/docs/` | Swagger UI |
 
 Registration, verification, resend, and token issuance are public endpoints. All other endpoints require a bearer access token.
@@ -167,6 +202,72 @@ Standard codes include `validation_error`, `not_authenticated`, `authentication_
 python manage.py check
 python manage.py test
 ```
+
+## Processing Compliance
+
+The `processing` app is the backend for the Processing Compliance vertical: companies that
+crush, refine, smelt or sort mineral feedstock.
+
+A **processor** is admitted to the register through an **application** carrying ten evidence
+sections — corporate, regulatory, facility, environmental, health & safety, equipment,
+operational, quality, waste and inspection. The desk reviews each section and each document
+individually, then decides. After admission the register keeps accumulating evidence against
+the processor: inspections, findings, environmental alerts, incidents and traceability runs.
+
+### Audiences
+
+Access follows organisation membership, never a request parameter. The frontend stores a
+chosen dashboard role in the browser, and that choice must not be able to grant anything.
+
+| Audience | Who | May |
+|---|---|---|
+| `operator` | Platform staff, or a member of a compliance-partner / inspection-body organisation | Review sections and documents, raise and close findings, schedule inspections, decide |
+| `regulator` | A member of a regulator organisation | Read the whole register; change nothing |
+| `processor` | A member of any other organisation | Read only its own records; submit its own evidence and incident reports |
+
+Within the operator desk, acting on a review additionally requires an owner, administrator,
+reviewer, inspector, compliance-manager or mining-compliance-officer role. `GET
+/api/v1/processing/me/` returns the caller's audience and capabilities so the UI can render
+against real permissions.
+
+### Application stages
+
+| Stage | Meaning | Moves on |
+|---|---|---|
+| `new` | Applicant is still filling it in | `submit/`, or the first section review |
+| `in_review` | With the desk | A verdict, an inspection request, or `decide/` |
+| `awaiting_info` | Back with the applicant | The applicant edits and resubmits |
+| `inspection` | A site visit has been raised | `decide/` |
+| `decided` | Final | Nothing |
+
+`submit/` is refused with 409 `application_incomplete` unless completeness reaches 100%: every
+section must carry data, and every document it lists must carry a file. `decide/` with
+`approved` is refused while any section is unverified (`sections_not_verified`) or any finding
+is open (`non_conformities_open`). `more_info_required` is not an outcome — it returns the
+application to `awaiting_info` and the desk decides again later. Approval promotes the
+processor on the register and scores it at `100 - risk_score`.
+
+### Derived values
+
+Risk, completeness and document validity are computed on read, never stored, so they cannot
+go stale between writes:
+
+- **Risk score** is the sum of an application's weighted `risk_causes`, capped at 100. The
+  band matches the badge the desk reads: 55+ is high, 30+ medium, below that low.
+- **Completeness** is the percentage of the ten sections that are complete.
+- **Document validity** is `missing` with no file, `expired` past its date, `expiring` within
+  60 days, otherwise `valid`. A document's *validity* is separate from the desk's *verdict*
+  on it (`review_state`).
+- **Run yield** comes from masses held in kilograms, so reconciliation is exact.
+
+### Audit
+
+Every processing action is written to the shared `AccountAuditEvent` table with a
+`processing.` prefix, alongside the account and compliance trails, so one query answers "what
+has this user done" across the platform. `GET /api/v1/processing/audit/` renders it for
+operators and regulators; a single processor sees nothing there, because the trail spans
+companies. The per-application feed at `applications/{id}/activity/` is the view its own
+members get.
 
 ## Planned domain sequence beyond onboarding
 

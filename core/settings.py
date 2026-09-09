@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "accounts",
     "organisations",
     "compliance",
+    "processing",
 ]
 
 MIDDLEWARE = [
@@ -145,6 +146,18 @@ SIMPLE_JWT = {
 }
 SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
+    # Several apps model a "status" or a "section" of their own. Without these
+    # the generator invents names like "Status80bEnum" for each collision, and
+    # a generated client ends up with unreadable, unstable type names.
+    "ENUM_NAME_OVERRIDES": {
+        "ProcessingApplicationStage": "processing.models.ApplicationStage.choices",
+        "ProcessingApplicationDecision": "processing.models.ApplicationDecision.choices",
+        "ProcessingProcessorStatus": "processing.models.ProcessorStatus.choices",
+        "ProcessingSectionKey": "processing.models.SectionKey.choices",
+        "ProcessingReviewState": "processing.models.ReviewState.choices",
+        "ProcessingType": "processing.models.ProcessingType.choices",
+        "OrganisationMembershipRole": "organisations.models.MembershipRole.choices",
+    },
     "TITLE": "Beldium Mining Compliance API",
     "DESCRIPTION": "API for mining organisations, compliance partners, and regulators.",
     "VERSION": "1.0.0",
