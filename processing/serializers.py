@@ -259,13 +259,20 @@ class ProcessingApplicationSerializer(serializers.ModelSerializer):
 class ProcessingApplicationDetailSerializer(ProcessingApplicationSerializer):
     sections = ApplicationSectionSerializer(many=True, read_only=True)
     review = serializers.SerializerMethodField()
+    outstanding = serializers.SerializerMethodField()
 
     class Meta(ProcessingApplicationSerializer.Meta):
-        fields = ProcessingApplicationSerializer.Meta.fields + ["sections", "review"]
-        read_only_fields = ProcessingApplicationSerializer.Meta.read_only_fields + ["sections", "review"]
+        fields = ProcessingApplicationSerializer.Meta.fields + ["sections", "review", "outstanding"]
+        read_only_fields = ProcessingApplicationSerializer.Meta.read_only_fields + [
+            "sections", "review", "outstanding",
+        ]
 
     def get_review(self, obj) -> dict:
         return scoring.review_summary(obj)
+
+    def get_outstanding(self, obj) -> list:
+        """Every unanswered prompt and unsupplied document, section by section."""
+        return scoring.outstanding(obj)
 
 
 class ProcessingSectionReviewSerializer(serializers.Serializer):

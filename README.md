@@ -122,6 +122,7 @@ python manage.py seed_processing --flush
 | POST | `/api/v1/compliance-applications/{id}/messages/mark-read/` | Mark visible messages as read |
 | GET | `/api/v1/dashboard/` | Read application progress and requested actions |
 | GET | `/api/v1/processing/me/` | Read the caller's processing audience and capabilities |
+| GET | `/api/v1/processing/checklist/` | Read the evidence checklist for a processing type |
 | GET | `/api/v1/processing/dashboard/` | Read every aggregate the processing dashboards show |
 | GET/POST | `/api/v1/processing/processors/` | The register of processing companies |
 | GET/POST | `/api/v1/processing/processors/{id}/facilities/` | List or add a processor's facilities |
@@ -247,6 +248,45 @@ is open (`non_conformities_open`). `more_info_required` is not an outcome — it
 application to `awaiting_info` and the desk decides again later. Approval promotes the
 processor on the register and scores it at `100 - risk_score`.
 
+### The applicant path
+
+A company joins the register by filing an application, filling it in, and submitting it:
+
+| Step | Endpoint |
+|---|---|
+| Read what is required | `GET checklist/?processing_type=…` |
+| Start an application | `POST applications/` |
+| Answer a section | `PATCH applications/{id}/sections/{key}/` |
+| Upload evidence | `POST applications/{id}/documents/` |
+| Check what is still missing | `GET applications/{id}/` → `outstanding` |
+| Submit | `POST applications/{id}/submit/` |
+| Answer a finding | `POST non-conformities/{id}/evidence/` |
+
+A first-time applicant names neither an organisation nor a processor — it has no register
+record yet — and the application is attributed to the caller's own organisation. A caller who
+belongs to more than one must say which (`400 organisation_required`); naming *another*
+company's organisation or processor is refused outright.
+
+Uploads are keyed on section plus document name, so re-uploading the same evidence replaces
+it rather than leaving two rows the desk has to choose between, and clears whatever verdict
+had been reached on the old file. Saving a section likewise returns it to the review queue: a
+verdict on the previous content says nothing about the new content.
+
+### The checklist
+
+`processing/checklist.py` defines what each application must answer and evidence. It lives on
+the server because completeness is computed from it — the definition of "complete" cannot be
+a client's opinion of it — and because the requirements differ by processing type, which is a
+policy question rather than a presentation one.
+
+Every applicant answers the same prompts and supplies the same base documents. On top of
+that, each process class evidences its own hazards: a chemical refinery adds an effluent
+discharge permit, a reagent bund certification and a spill response plan; a smelter adds
+stack emission monitoring, a slag disposal agreement and thermal PPE certification.
+
+`GET /api/v1/processing/checklist/?processing_type=…` returns it, so the applicant form asks
+for exactly what the server will judge.
+
 ### Derived values
 
 Risk, completeness and document validity are computed on read, never stored, so they cannot
@@ -254,7 +294,10 @@ go stale between writes:
 
 - **Risk score** is the sum of an application's weighted `risk_causes`, capped at 100. The
   band matches the badge the desk reads: 55+ is high, 30+ medium, below that low.
-- **Completeness** is the percentage of the ten sections that are complete.
+- **Completeness** is the percentage of the ten sections that are complete: every required
+  prompt answered, and every required document supplied with a file. A document row with no
+  file is a declared-but-unsupplied gap, which is exactly what completeness exists to expose,
+  so an absent row and an empty one count the same.
 - **Document validity** is `missing` with no file, `expired` past its date, `expiring` within
   60 days, otherwise `valid`. A document's *validity* is separate from the desk's *verdict*
   on it (`review_state`).

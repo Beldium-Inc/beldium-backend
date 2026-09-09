@@ -23,7 +23,7 @@ from rest_framework.views import APIView
 
 from accounts.models import AccountAuditEvent
 from common.exceptions import AppError, ConflictError
-from processing import audit, scoring
+from processing import audit, checklist, scoring
 from processing.models import (
     EXPIRY_WARNING_DAYS,
     ApplicationDecision,
@@ -37,6 +37,7 @@ from processing.models import (
     NonConformityEvidence,
     ProcessingApplication,
     ProcessingDocument,
+    ProcessingType,
     Processor,
     ProcessorStatus,
     ReviewState,
@@ -233,15 +234,32 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
         return application
 
     def _assert_owns_subject(self, data):
-        """An applicant files for its own organisation, never for another's."""
+        """An applicant files for its own organisation, never for another's.
+
+        Naming neither is fine and is the ordinary first-time case: a company
+        applying to join the register has no processor record yet, and its
+        organisation is inferred below. Only *naming someone else* is refused.
+        """
         if is_operator(self.request.user):
             return
         allowed = set(organisation_ids(self.request.user))
         organisation_id = getattr(data.get("organisation"), "id", None)
         if organisation_id and organisation_id not in allowed:
             raise PermissionDenied("You cannot file an application for another organisation.")
-        if not owns_processor(self.request.user, data.get("processor")):
+        processor = data.get("processor")
+        if processor and not owns_processor(self.request.user, processor):
             raise PermissionDenied("You cannot file an application for another processor.")
+
+    def _own_organisation(self):
+        """The single organisation to attribute an unattributed application to.
+
+        With more than one membership the applicant has to say which, rather
+        than have the server guess and file against the wrong company.
+        """
+        ids = organisation_ids(self.request.user)
+        if len(ids) == 1:
+            return ids[0]
+        return None
 
     def assert_editor(self, application):
         if not can_edit_application(self.request.user, application):
@@ -260,7 +278,16 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
 
     def perform_create(self, serializer):
         self._assert_owns_subject(serializer.validated_data)
-        application = serializer.save(created_by=self.request.user)
+        extra = {}
+        if not serializer.validated_data.get("organisation") and not is_operator(self.request.user):
+            organisation_id = self._own_organisation()
+            if organisation_id is None:
+                raise AppError(
+                    "Name the organisation this application is for.",
+                    code="organisation_required",
+                )
+            extra["organisation_id"] = organisation_id
+        application = serializer.save(created_by=self.request.user, **extra)
         # Every application carries all ten sections from the start, so the
         # checklist is complete on the first read rather than appearing as the
         # applicant fills it in.
@@ -347,12 +374,27 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
             )
         self.assert_editor(application)
         self.assert_editable(application)
-        serializer = ProcessingDocumentSerializer(data=request.data, context={"request": request})
+        # A re-upload replaces the evidence rather than leaving two rows the
+        # desk would have to choose between, and clears the previous verdict:
+        # a verdict on the old file says nothing about the new one.
+        existing = application.documents.filter(
+            section=request.data.get("section", ""), name=request.data.get("name", "")
+        ).first()
+        serializer = ProcessingDocumentSerializer(existing, data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
-        document = serializer.save(application=application, processor=application.processor, uploaded_by=request.user)
+        document = serializer.save(
+            application=application,
+            processor=application.processor,
+            uploaded_by=request.user,
+            review_state=ReviewState.PENDING,
+            review_note="",
+            reviewed_by=None,
+            reviewed_at=None,
+        )
         self.record("document_uploaded", target=f"{application.reference} · {document.name}", detail=f"Uploaded against {SectionKey(document.section).label}.", application_id=str(application.id), document_id=str(document.id))
         return Response(
-            ProcessingDocumentSerializer(document, context={"request": request}).data, status=status.HTTP_201_CREATED
+            ProcessingDocumentSerializer(document, context={"request": request}).data,
+            status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED,
         )
 
     @extend_schema(methods=["GET"], responses=RiskCauseSerializer(many=True))
@@ -396,7 +438,7 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
                 "Complete every evidence section before submitting.",
                 code="application_incomplete",
                 status_code=409,
-                details={"completeness": percent},
+                details={"completeness": percent, "outstanding": scoring.outstanding(application)},
             )
         application.stage = ApplicationStage.IN_REVIEW
         application.submitted_on = application.submitted_on or timezone.localdate()
@@ -1002,6 +1044,30 @@ class ProcessingDashboardView(APIView):
                 "kind": "info",
             })
         return sorted(items, key=lambda item: item["at"], reverse=True)[:8]
+
+
+class ProcessingChecklistView(APIView):
+    """What an application of a given process class must answer and evidence.
+
+    Served rather than duplicated in the client: completeness is computed from
+    this, so the definition of "complete" cannot be a client's opinion of it.
+    """
+
+    permission_classes = [IsProcessingParticipant]
+
+    @extend_schema(
+        parameters=[OpenApiParameter("processing_type", OpenApiTypes.STR, OpenApiParameter.QUERY)],
+        responses=OpenApiTypes.OBJECT,
+    )
+    def get(self, request):
+        processing_type = request.query_params.get("processing_type", "")
+        valid = {value for value, _ in ProcessingType.choices}
+        if processing_type and processing_type not in valid:
+            raise AppError("Unknown processing type.", code="unknown_processing_type")
+        return Response({
+            "processing_type": processing_type,
+            "sections": checklist.checklist(processing_type),
+        })
 
 
 class ProcessingCapabilityView(APIView):
