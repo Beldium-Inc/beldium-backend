@@ -297,7 +297,8 @@ class VerificationDeadEndTests(APITestCase):
             reverse("verify-email"), {"email": user.email, "code": "123456"}, format="json"
         )
         self.assertEqual(response.status_code, 400)
-        # Still one answer for every failure, so accounts cannot be enumerated…
+        # One answer for every failure, so accounts cannot be enumerated. The
+        # way out — "already verified, sign in instead" — is offered by the
+        # client against this code, rather than repeated in the message.
         self.assertEqual(response.data["error"]["code"], "invalid_verification_code")
-        # …but it now tells the user where to go instead of nowhere.
-        self.assertIn("sign in", response.data["message"].lower())
+        self.assertEqual(response.data["message"], "That code is invalid or has expired.")
