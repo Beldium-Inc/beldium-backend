@@ -16,7 +16,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -198,7 +198,9 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
     queryset = ProcessingApplication.objects.none()
     permission_classes = [IsProcessingParticipant]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
-    http_method_names = ["get", "post", "patch", "head", "options"]
+    # DELETE is allowed so the risk-cause sub-resource can be reached; the
+    # application itself is not deletable — see `destroy` below.
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
     filterset_fields = ["stage", "decision", "processing_type", "state", "processor"]
     search_fields = ["company", "reference", "rc_number", "state", "facility_name"]
     ordering_fields = ["submitted_on", "created_at", "company"]
@@ -206,6 +208,11 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
 
     def get_serializer_class(self):
         return ProcessingApplicationDetailSerializer if self.action == "retrieve" else ProcessingApplicationSerializer
+
+    @extend_schema(exclude=True)
+    def destroy(self, request, *args, **kwargs):
+        """An application is a compliance record; it is never deleted."""
+        raise MethodNotAllowed("DELETE")
 
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):

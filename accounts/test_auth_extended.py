@@ -231,3 +231,73 @@ class RegistrationThrottleTests(APITestCase):
 
     def test_a_single_registration_is_unaffected(self):
         self.assertEqual(self._register(0).status_code, status.HTTP_201_CREATED)
+
+
+class PhoneNumberFormatTests(APITestCase):
+    """Registration must capture a number the OTP endpoint can actually verify."""
+
+    def _register(self, phone):
+        return self.client.post(
+            reverse("register"),
+            {
+                "email": f"phone-{abs(hash(phone)) % 10000}@example.test",
+                "password": "Str0ng-Passw0rd!",
+                "confirm_password": "Str0ng-Passw0rd!",
+                "agreed_terms": True,
+                "phone_number": phone,
+            },
+            format="json",
+        )
+
+    def test_a_number_without_a_country_code_is_refused(self):
+        response = self._register("324324242")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("phone_number", response.data["error"]["details"])
+
+    def test_an_e164_number_is_accepted(self):
+        self.assertEqual(self._register("+2348034412290").status_code, 201)
+
+    def test_the_number_may_be_omitted(self):
+        response = self.client.post(
+            reverse("register"),
+            {
+                "email": "nophone@example.test",
+                "password": "Str0ng-Passw0rd!",
+                "confirm_password": "Str0ng-Passw0rd!",
+                "agreed_terms": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_registration_captures_a_number_the_otp_endpoint_accepts(self):
+        """The two used to disagree, so a captured number could never be verified."""
+        number = "+2348034412290"
+        self.assertEqual(self._register(number).status_code, 201)
+        user = User.objects.get(phone_number=number)
+        user.email_verified_at = timezone.now()
+        user.save(update_fields=["email_verified_at"])
+
+        self.client.force_authenticate(user)
+        response = self.client.post(
+            reverse("phone-verification-request"), {"phone_number": number}, format="json"
+        )
+        self.assertEqual(response.status_code, 200)
+
+
+class VerificationDeadEndTests(APITestCase):
+    """An already-verified address must not strand someone on the verify screen."""
+
+    def test_the_failure_points_at_signing_in(self):
+        user = User.objects.create_user(email="done@example.test", password="Str0ng-Passw0rd!")
+        user.email_verified_at = timezone.now()
+        user.save(update_fields=["email_verified_at"])
+
+        response = self.client.post(
+            reverse("verify-email"), {"email": user.email, "code": "123456"}, format="json"
+        )
+        self.assertEqual(response.status_code, 400)
+        # Still one answer for every failure, so accounts cannot be enumerated…
+        self.assertEqual(response.data["error"]["code"], "invalid_verification_code")
+        # …but it now tells the user where to go instead of nowhere.
+        self.assertIn("sign in", response.data["message"].lower())

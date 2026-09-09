@@ -985,3 +985,59 @@ class FirstApplicationTests(ProcessingTestCase):
         )
         self.client.force_authenticate(self.outsider)
         self.assertEqual(self.client.get(reverse("processing-application-list")).data["count"], 0)
+
+
+class RiskCauseTests(ProcessingTestCase):
+    """The score is the sum of its causes, so the desk must be able to edit them."""
+
+    def setUp(self):
+        super().setUp()
+        self.application_row = self.application(stage=ApplicationStage.IN_REVIEW)
+        self.cause = RiskCause.objects.create(
+            application=self.application_row, cause="Expiring registration", weight=16
+        )
+
+    def test_the_desk_adds_a_cause_and_the_score_follows(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(
+            reverse("processing-application-risk-causes", args=[self.application_row.id]),
+            {"cause": "Chemical process class", "weight": 22, "detail": "Acid leaching on site."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        detail = self.client.get(
+            reverse("processing-application-detail", args=[self.application_row.id])
+        )
+        self.assertEqual(detail.data["risk_score"], 38)
+        self.assertEqual(detail.data["risk_band"], "medium")
+
+    def test_the_desk_withdraws_a_cause(self):
+        """This route was unreachable while DELETE was off the viewset."""
+        self.client.force_authenticate(self.operator)
+        response = self.client.delete(
+            reverse(
+                "processing-application-risk-cause-detail",
+                args=[self.application_row.id, self.cause.id],
+            )
+        )
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(self.application_row.risk_causes.count(), 0)
+
+    def test_an_applicant_cannot_edit_its_own_risk_causes(self):
+        self.client.force_authenticate(self.applicant)
+        self.assertEqual(
+            self.client.delete(
+                reverse(
+                    "processing-application-risk-cause-detail",
+                    args=[self.application_row.id, self.cause.id],
+                )
+            ).status_code,
+            403,
+        )
+
+    def test_the_application_itself_cannot_be_deleted(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.delete(
+            reverse("processing-application-detail", args=[self.application_row.id])
+        )
+        self.assertEqual(response.status_code, 405)

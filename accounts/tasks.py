@@ -111,7 +111,19 @@ def send_phone_verification(user_id, phone_number, code):
     """Send through a configurable SMS webhook; log safely in local development."""
     webhook = getattr(settings, "SMS_WEBHOOK_URL", "")
     if not webhook:
-        logger.info("Phone verification generated", extra={"user_id": user_id, "phone_number": phone_number[-4:]})
+        # No gateway configured. In development, print the code the way the
+        # console email backend prints the signup code — otherwise the phone
+        # step cannot be completed locally at all. Never outside DEBUG: an
+        # OTP in a production log is an OTP in whatever ships those logs.
+        if settings.DEBUG:
+            logger.warning(
+                "SMS gateway not configured; phone verification code for %s is %s", phone_number, code
+            )
+        else:
+            logger.info(
+                "Phone verification generated",
+                extra={"user_id": user_id, "phone_number": phone_number[-4:]},
+            )
         return
     payload = json.dumps({"to": phone_number, "message": f"Your Beldium verification code is {code}. It expires in 10 minutes."}).encode()
     request = Request(webhook, data=payload, headers={"Content-Type": "application/json", "Authorization": f"Bearer {getattr(settings, 'SMS_WEBHOOK_TOKEN', '')}"}, method="POST")
