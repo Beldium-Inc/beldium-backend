@@ -90,8 +90,21 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("Your organisation role cannot edit this application.")
 
     def _assert_editable(self, application):
+        """The onboarding form itself. Locked once the desk has it, so a
+        reviewer's verdict is never against content that changed underneath."""
         if application.status not in {ApplicationStatus.DRAFT, ApplicationStatus.ACTION_REQUIRED, ApplicationStatus.REJECTED}:
             raise ConflictError("This application cannot currently be edited.", code="application_locked")
+
+    def _assert_evidence_editable(self, application):
+        """Documents and personnel, which stay open for longer.
+
+        An incomplete application may be submitted, so the applicant has to be
+        able to supply what was missing without waiting for the desk to request
+        each item individually. Adding evidence cannot invalidate a review the
+        way an edited declaration would. Only a verified application is closed.
+        """
+        if application.status == ApplicationStatus.VERIFIED:
+            raise ConflictError("This application has been verified and can no longer be changed.", code="application_locked")
 
     def _save_section(self, request, application, serializer_class, model_field):
         self._assert_editor(application)
@@ -177,7 +190,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if request.method == "GET":
             return Response(PersonnelSerializer(application.personnel.all(), many=True, context={"request": request}).data)
         self._assert_editor(application)
-        self._assert_editable(application)
+        self._assert_evidence_editable(application)
         serializer = PersonnelSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         person = serializer.save(application=application)
@@ -197,7 +210,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     def personnel_detail(self, request, pk=None, personnel_id=None):
         application = self.get_object()
         self._assert_editor(application)
-        self._assert_editable(application)
+        self._assert_evidence_editable(application)
         person = application.personnel.filter(id=personnel_id).first()
         if not person:
             raise AppError("Personnel record not found.", code="not_found", status_code=404)
@@ -224,7 +237,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if request.method == "GET":
             return Response(ComplianceDocumentSerializer(application.documents.all(), many=True, context={"request": request}).data)
         self._assert_editor(application)
-        self._assert_editable(application)
+        self._assert_evidence_editable(application)
         if "file" not in request.FILES:
             raise AppError("A replacement file is required.", code="validation_error")
         document_type = request.data.get("document_type", "")
@@ -317,11 +330,21 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         self._assert_editor(application)
         self._assert_editable(application)
         progress = application_progress(application)
-        if progress["percent"] != 100:
-            raise AppError("Complete every onboarding section before submitting.", code="application_incomplete", status_code=409, details=progress)
+        if progress["blocking"]:
+            raise AppError(
+                "Verify your email address before submitting this application.",
+                code="applicant_not_verified", status_code=409, details=progress,
+            )
         application.submitted_at = timezone.now()
         transition(application, ApplicationStatus.UNDER_REVIEW)
-        record_account_event(request, "compliance.application_submitted", organisation_id=str(application.organisation_id), application_id=str(application.id))
+        # An incomplete file may be submitted, so what was missing at that
+        # moment is recorded: the reviewer needs to see what they were handed,
+        # and completeness recomputed later would not tell them.
+        record_account_event(
+            request, "compliance.application_submitted",
+            organisation_id=str(application.organisation_id), application_id=str(application.id),
+            percent=progress["percent"], outstanding=progress["outstanding_sections"],
+        )
         return Response(self.get_serializer(application).data)
 
     @extend_schema(request=ApplicationDecisionSerializer, responses=ComplianceApplicationSerializer)

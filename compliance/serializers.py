@@ -423,6 +423,15 @@ class DashboardResponseSerializer(serializers.Serializer):
     applications = serializers.ListField(child=serializers.DictField())
 
 
+# The only thing that blocks handing an application to a reviewer. Everything
+# else — documents, personnel, the onboarding sections — is reported as
+# outstanding and left to the desk to chase through `request-document`, so an
+# applicant can submit what they have rather than being stuck behind paperwork
+# they are still gathering. Identity is different: an unverified applicant is
+# not a person the reviewer can correspond with.
+SUBMISSION_BLOCKING_SECTIONS = ("account",)
+
+
 def application_progress(application):
     documents = list(application.documents.all())
     submitted_types = {doc.document_type for doc in documents if doc.file and doc.status in {"submitted", "verified"}}
@@ -444,5 +453,10 @@ def application_progress(application):
     completed = sum(sections.values())
     return {
         "percent": round(completed / len(sections) * 100), "completed": completed, "total": len(sections),
-        "sections": sections, "documents": {"submitted": len(required_types & submitted_types), "required": len(required_types), "outstanding": outstanding},
+        "sections": sections,
+        # What is still missing, and the subset of that which actually prevents
+        # a submission. The frontend shows the first and gates on the second.
+        "outstanding_sections": [name for name, done in sections.items() if not done],
+        "blocking": [name for name in SUBMISSION_BLOCKING_SECTIONS if not sections[name]],
+        "documents": {"submitted": len(required_types & submitted_types), "required": len(required_types), "outstanding": outstanding},
     }

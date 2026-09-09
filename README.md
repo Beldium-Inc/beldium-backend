@@ -362,7 +362,13 @@ Application review now enforces these transitions:
 
 Application editors are active owners, administrators, compliance managers, or platform staff. General onboarding edits are allowed only in draft, action-required, and rejected applications. Staff document requests/reviews are available only while review is open. An organisation with a compliance application must use the application decision endpoint; the older organisation decision endpoint cannot bypass compliance checks.
 
-Submission requires verified applicant email, all onboarding sections, personnel, all 15 standard documents, and every additional requested document. Requested or rejected documents do not count as complete, even if an older file is still present. Approval additionally requires staff to verify every document. Uploading corrections does not automatically resubmit: call `submit/` after completing them.
+Submission requires only a verified applicant email. An incomplete application may be handed
+to a reviewer: what was outstanding at that moment is written to the audit trail, and the desk
+requests what is missing. Approval is unchanged and still requires everything.
+
+Documents and personnel stay editable after submission, so an applicant can supply the gaps
+without waiting for each one to be requested; the onboarding sections lock, so a reviewer's
+verdict is never against content that changed underneath them. Requested or rejected documents do not count as complete, even if an older file is still present. Approval additionally requires staff to verify every document. Uploading corrections does not automatically resubmit: call `submit/` after completing them.
 
 ### Document deadlines
 

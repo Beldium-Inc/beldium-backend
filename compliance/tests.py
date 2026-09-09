@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import User
+from accounts.models import AccountAuditEvent, User
 from compliance.models import ApplicationStatus, ComplianceApplication, ComplianceDocument, REQUIRED_DOCUMENTS
 from organisations.models import Organisation
 
@@ -70,11 +70,49 @@ class ComplianceApplicationLifecycleTests(APITestCase):
         self.assertEqual(submitted.status_code, status.HTTP_200_OK, submitted.data)
         self.assertEqual(ComplianceDocument.objects.get().status, ComplianceDocument.Status.SUBMITTED)
 
-    def test_incomplete_section_and_submission_are_rejected(self):
-        application = ComplianceApplication.objects.create(organisation=self.organisation)
+    def test_an_incomplete_section_is_still_rejected_on_save(self):
+        """Relaxing submission does not relax what a section itself must contain."""
+        application = ComplianceApplication.objects.create(organisation=self.organisation, created_by=self.owner)
         section = self.client.patch(reverse("compliance-application-declaration-section", args=[application.id]), {"data": {"confirmed": True}}, format="json")
         self.assertEqual(section.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(section.data["error"]["code"], "validation_error")
+
+    def test_an_incomplete_application_may_still_be_submitted(self):
+        """The desk chases what is missing; the applicant is not held behind it."""
+        application = ComplianceApplication.objects.create(organisation=self.organisation, created_by=self.owner)
+        submitted = self.client.post(reverse("compliance-application-submit", args=[application.id]))
+        self.assertEqual(submitted.status_code, status.HTTP_200_OK, submitted.data)
+        self.assertEqual(submitted.data["status"], ApplicationStatus.UNDER_REVIEW)
+        self.assertLess(submitted.data["progress"]["percent"], 100)
+
+    def test_what_was_missing_at_submission_is_recorded(self):
+        application = ComplianceApplication.objects.create(organisation=self.organisation, created_by=self.owner)
+        self.client.post(reverse("compliance-application-submit", args=[application.id]))
+        event = AccountAuditEvent.objects.filter(
+            event_type="compliance.application_submitted", metadata__application_id=str(application.id)
+        ).first()
+        self.assertIsNotNone(event)
+        self.assertIn("documents", event.metadata["outstanding"])
+        self.assertIn("personnel", event.metadata["outstanding"])
+
+    def test_an_unverified_applicant_cannot_submit(self):
+        """Identity is the one gate that stays: the reviewer has to be able to reply."""
+        unverified = User.objects.create_user("unverified@example.com", "SafePassword-2026!")
+        self.organisation.memberships.create(user=unverified, role="owner")
+        application = ComplianceApplication.objects.create(organisation=self.organisation, created_by=unverified)
+        self.client.force_authenticate(unverified)
         submitted = self.client.post(reverse("compliance-application-submit", args=[application.id]))
         self.assertEqual(submitted.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(submitted.data["error"]["code"], "application_incomplete")
+        self.assertEqual(submitted.data["error"]["code"], "applicant_not_verified")
+
+    def test_approval_still_requires_a_complete_application(self):
+        """Submission relaxed; approval did not. An incomplete file cannot pass."""
+        application = ComplianceApplication.objects.create(organisation=self.organisation, created_by=self.owner)
+        self.client.post(reverse("compliance-application-submit", args=[application.id]))
+        self.client.force_authenticate(self.admin)
+        decided = self.client.post(
+            reverse("compliance-application-decide", args=[application.id]),
+            {"status": ApplicationStatus.VERIFIED}, format="json",
+        )
+        self.assertEqual(decided.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(decided.data["error"]["code"], "application_incomplete")
