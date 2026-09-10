@@ -13,10 +13,23 @@ choice must not be able to grant anything.
 """
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
-from organisations.models import MembershipRole, OrganisationMembership, OrganisationType
+from organisations.access import (
+    MEMBER,
+    OPERATOR,
+    REGULATOR,
+    can_decide as _can_decide,
+    is_operator,
+    is_regulator,
+    memberships as _memberships,
+    organisation_ids,
+)
+from organisations.access import audience as _audience
+from organisations.models import MembershipRole
 
-OPERATOR = "operator"
-REGULATOR = "regulator"
+# processing's own name for the "applicant" audience — organisations.access
+# calls this generic role ``member``, since not every vertical's applicant is
+# a processor. audience() below translates one to the other so every existing
+# caller (frontend included) keeps seeing "processor" on the wire.
 PROCESSOR = "processor"
 
 # Desk roles that may act on a review, as opposed to merely reading it.
@@ -37,84 +50,16 @@ APPLICANT_ROLES = {
     MembershipRole.MINING_COMPLIANCE_OFFICER,
 }
 
-# Types whose membership grants desk or oversight power. That power must wait
-# for the platform to have actually verified the organisation is what it
-# claims: organisation_type is a field the applicant fills in themselves, so
-# an unverified claim of one of these types is worth nothing.
-PRIVILEGED_TYPES = {
-    OrganisationType.COMPLIANCE_PARTNER,
-    OrganisationType.INSPECTION_BODY,
-    OrganisationType.REGULATOR,
-}
-
-
-def _memberships(user):
-    if not hasattr(user, "_processing_memberships"):
-        user._processing_memberships = list(
-            OrganisationMembership.objects.filter(user=user, is_active=True)
-            .select_related("organisation")
-            .only(
-                "role",
-                "organisation__id",
-                "organisation__organisation_type",
-                "organisation__verification_status",
-            )
-        )
-    return user._processing_memberships
-
-
-def organisation_ids(user):
-    """Every organisation the caller is an active member of."""
-    if not user.is_authenticated:
-        return []
-    return [m.organisation_id for m in _memberships(user)]
-
 
 def audience(user):
-    """``operator``, ``regulator``, ``processor``, or None.
-
-    Staff are operators. An operator membership outranks a regulator one so a
-    person seconded to the desk keeps their review powers.
-
-    A membership in a compliance-partner, inspection-body or regulator
-    organisation only counts once that organisation is verified: the type is
-    self-declared at signup, so an unverified claim of it must not itself
-    unlock desk or oversight access.
-    """
-    if not user.is_authenticated:
-        return None
-    if user.is_staff or user.is_superuser:
-        return OPERATOR
-    types = {
-        m.organisation.organisation_type
-        for m in _memberships(user)
-        if m.organisation.organisation_type not in PRIVILEGED_TYPES
-        or m.organisation.verification_status == "verified"
-    }
-    if OrganisationType.COMPLIANCE_PARTNER in types or OrganisationType.INSPECTION_BODY in types:
-        return OPERATOR
-    if OrganisationType.REGULATOR in types:
-        return REGULATOR
-    if types:
-        return PROCESSOR
-    return None
-
-
-def is_operator(user):
-    return audience(user) == OPERATOR
-
-
-def is_regulator(user):
-    return audience(user) == REGULATOR
+    """``operator``, ``regulator``, ``processor``, or None. See organisations.access.audience."""
+    role = _audience(user)
+    return PROCESSOR if role == MEMBER else role
 
 
 def can_decide(user):
     """May take a review action: verify a section, raise a finding, decide."""
-    if not is_operator(user):
-        return False
-    if user.is_staff or user.is_superuser:
-        return True
-    return any(m.role in DECISION_ROLES for m in _memberships(user))
+    return _can_decide(user, DECISION_ROLES)
 
 
 def can_edit_application(user, application):
