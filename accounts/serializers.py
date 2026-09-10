@@ -29,6 +29,17 @@ class RegistrationSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, validators=[validate_password])
     confirm_password = serializers.CharField(write_only=True)
     agreed_terms = serializers.BooleanField(write_only=True)
+    # The phone OTP endpoint requires E.164, so a number captured in any other
+    # shape could never be verified. Optional here, but validated when supplied.
+    phone_number = serializers.RegexField(
+        r"^\+[1-9]\d{7,14}$",
+        max_length=16,
+        required=False,
+        allow_blank=True,
+        error_messages={
+            "invalid": "Enter the number in international format, including the country code, e.g. +2348030000000."
+        },
+    )
 
     class Meta:
         model = User

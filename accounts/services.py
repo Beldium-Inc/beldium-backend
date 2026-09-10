@@ -90,8 +90,14 @@ def verify_email_code(email, submitted_code):
                 verification.save(update_fields=["consumed_at", "updated_at"])
 
     if not verified_user:
+        # Deliberately the same answer whether the address is unknown, already
+        # verified, or the code is simply wrong: an unauthenticated caller must
+        # not be able to enumerate accounts here. The pointer to signing in is
+        # what keeps an already-verified user from being stuck on this screen.
+        # The client offers the "already verified, sign in instead" way out, so
+        # this stays a plain statement rather than repeating it.
         raise AppError(
-            "Invalid or expired verification code.",
+            "That code is invalid or has expired.",
             code="invalid_verification_code",
         )
     return verified_user

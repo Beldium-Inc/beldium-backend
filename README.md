@@ -122,6 +122,7 @@ python manage.py seed_processing --flush
 | POST | `/api/v1/compliance-applications/{id}/messages/mark-read/` | Mark visible messages as read |
 | GET | `/api/v1/dashboard/` | Read application progress and requested actions |
 | GET | `/api/v1/processing/me/` | Read the caller's processing audience and capabilities |
+| GET | `/api/v1/processing/checklist/` | Read the evidence checklist for a processing type |
 | GET | `/api/v1/processing/dashboard/` | Read every aggregate the processing dashboards show |
 | GET/POST | `/api/v1/processing/processors/` | The register of processing companies |
 | GET/POST | `/api/v1/processing/processors/{id}/facilities/` | List or add a processor's facilities |
@@ -145,7 +146,9 @@ python manage.py seed_processing --flush
 | GET | `/api/v1/processing/documents/expiring/` | Documents expired or lapsing within 60 days |
 | POST | `/api/v1/processing/documents/{id}/review/` | Accept or reject one piece of evidence |
 | GET | `/api/v1/processing/documents/{id}/download/` | Download stored evidence |
-| GET | `/api/v1/processing/reports/` | Generated oversight reports |
+| GET | `/api/v1/processing/reports/` | Published oversight reports |
+| POST | `/api/v1/processing/reports/generate/` | Compile a report from the register |
+| GET | `/api/v1/processing/reports/{id}/download/` | Download a stored report PDF |
 | GET | `/api/v1/processing/audit/` | The processing audit trail |
 | GET | `/api/docs/` | Swagger UI |
 
@@ -247,6 +250,45 @@ is open (`non_conformities_open`). `more_info_required` is not an outcome — it
 application to `awaiting_info` and the desk decides again later. Approval promotes the
 processor on the register and scores it at `100 - risk_score`.
 
+### The applicant path
+
+A company joins the register by filing an application, filling it in, and submitting it:
+
+| Step | Endpoint |
+|---|---|
+| Read what is required | `GET checklist/?processing_type=…` |
+| Start an application | `POST applications/` |
+| Answer a section | `PATCH applications/{id}/sections/{key}/` |
+| Upload evidence | `POST applications/{id}/documents/` |
+| Check what is still missing | `GET applications/{id}/` → `outstanding` |
+| Submit | `POST applications/{id}/submit/` |
+| Answer a finding | `POST non-conformities/{id}/evidence/` |
+
+A first-time applicant names neither an organisation nor a processor — it has no register
+record yet — and the application is attributed to the caller's own organisation. A caller who
+belongs to more than one must say which (`400 organisation_required`); naming *another*
+company's organisation or processor is refused outright.
+
+Uploads are keyed on section plus document name, so re-uploading the same evidence replaces
+it rather than leaving two rows the desk has to choose between, and clears whatever verdict
+had been reached on the old file. Saving a section likewise returns it to the review queue: a
+verdict on the previous content says nothing about the new content.
+
+### The checklist
+
+`processing/checklist.py` defines what each application must answer and evidence. It lives on
+the server because completeness is computed from it — the definition of "complete" cannot be
+a client's opinion of it — and because the requirements differ by processing type, which is a
+policy question rather than a presentation one.
+
+Every applicant answers the same prompts and supplies the same base documents. On top of
+that, each process class evidences its own hazards: a chemical refinery adds an effluent
+discharge permit, a reagent bund certification and a spill response plan; a smelter adds
+stack emission monitoring, a slag disposal agreement and thermal PPE certification.
+
+`GET /api/v1/processing/checklist/?processing_type=…` returns it, so the applicant form asks
+for exactly what the server will judge.
+
 ### Derived values
 
 Risk, completeness and document validity are computed on read, never stored, so they cannot
@@ -254,11 +296,39 @@ go stale between writes:
 
 - **Risk score** is the sum of an application's weighted `risk_causes`, capped at 100. The
   band matches the badge the desk reads: 55+ is high, 30+ medium, below that low.
-- **Completeness** is the percentage of the ten sections that are complete.
+- **Completeness** is the percentage of the ten sections that are complete: every required
+  prompt answered, and every required document supplied with a file. A document row with no
+  file is a declared-but-unsupplied gap, which is exactly what completeness exists to expose,
+  so an absent row and an empty one count the same.
 - **Document validity** is `missing` with no file, `expired` past its date, `expiring` within
   60 days, otherwise `valid`. A document's *validity* is separate from the desk's *verdict*
   on it (`review_state`).
 - **Run yield** comes from masses held in kilograms, so reconciliation is exact.
+
+### Reports
+
+`POST /api/v1/processing/reports/generate/` compiles a PDF from the register and stores it:
+
+```json
+{ "kind": "environmental_exceedances", "scope": "South West", "period": "last_quarter" }
+```
+
+Four kinds — `national_compliance`, `environmental_exceedances`, `inspection_programme` and
+`non_conformity_register` — each answering one question, so the desk is not handed a single
+document that buries the thing it needed. `scope` is `All regions` or a region the register
+actually uses; `period` is `last_month`, `last_quarter`, `year_to_date` or `all_time`.
+
+A report is a **point-in-time extract**. Its figures are those held at the moment of
+compilation and are never restated, because a report that changed after it was issued would
+be worthless as a record of what was known when a decision was taken against it. Generating
+again produces a new document rather than updating the old one.
+
+Only the desk and regulators may compile one: a report spans companies, so a processor would
+be reading everyone else's register.
+
+Rendering uses `reportlab`. `processing/reports.py` holds the four report bodies and the
+shared page furniture; `seed_processing` compiles its demo library for real, so the seeded
+reports download actual documents.
 
 ### Audit
 
@@ -292,7 +362,25 @@ Application review now enforces these transitions:
 
 Application editors are active owners, administrators, compliance managers, or platform staff. General onboarding edits are allowed only in draft, action-required, and rejected applications. Staff document requests/reviews are available only while review is open. An organisation with a compliance application must use the application decision endpoint; the older organisation decision endpoint cannot bypass compliance checks.
 
-Submission requires verified applicant email, all onboarding sections, personnel, all 15 standard documents, and every additional requested document. Requested or rejected documents do not count as complete, even if an older file is still present. Approval additionally requires staff to verify every document. Uploading corrections does not automatically resubmit: call `submit/` after completing them.
+Submission requires a verified applicant email and no unreplaced rejected documents. An
+otherwise incomplete application may be handed to a reviewer: what was outstanding at that
+moment is written to the audit trail, and the desk requests what is missing. Approval is
+unchanged and still requires everything.
+
+A document that has not arrived and a document the desk rejected are treated differently.
+"Still gathering it" does not block a submission; "I read it and it is wrong" does, or the
+applicant could hand the same file straight back and the review would go round again.
+Re-requesting a document is a `requested` status rather than a `rejected` one, so it does not
+block — the same endpoint is how the desk asks for something new that was never on the
+checklist, and that is the gathering case.
+
+`progress.blocking` names why a submission would be refused (`account`,
+`rejected_documents`) and is empty when it would be accepted;
+`progress.documents.rejected` lists the documents to replace.
+
+Documents and personnel stay editable after submission, so an applicant can supply the gaps
+without waiting for each one to be requested; the onboarding sections lock, so a reviewer's
+verdict is never against content that changed underneath them. Requested or rejected documents do not count as complete, even if an older file is still present. Approval additionally requires staff to verify every document. Uploading corrections does not automatically resubmit: call `submit/` after completing them.
 
 ### Document deadlines
 

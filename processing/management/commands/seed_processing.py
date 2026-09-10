@@ -18,6 +18,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from organisations.models import Organisation, OrganisationType
+from processing import checklist
+from processing.reports import ReportKind, build as build_report
 from processing.models import (
     ApplicationDecision,
     ApplicationSection,
@@ -33,6 +35,7 @@ from processing.models import (
     ProcessingDocument,
     ProcessingType,
     Processor,
+    generate_report_reference,
     ProcessorStatus,
     ReviewState,
     RiskCause,
@@ -60,78 +63,76 @@ FACILITY_NAMES = {
     "Jos Tin Sorting Enterprises": ["Jos South Sorting Shed"],
 }
 
-SECTION_FIELDS = {
-    SectionKey.CORPORATE: [
-        ("Company type", "Private Limited (Ltd)", None),
-        ("Directors declared", "4", None),
-        ("Beneficial ownership disclosed", "Yes", "ok"),
-    ],
-    SectionKey.REGULATORY: [
-        ("Issuing authority", "Mining Cadastre Office", None),
-        ("NESREA registration", "Registered", "ok"),
-        ("State environmental permit", "Held", "ok"),
-    ],
-    SectionKey.FACILITY: [
-        ("Land title / C of O", "Held", "ok"),
-        ("Perimeter security", "Fenced, 24h manned gate", None),
-        ("Weighbridge", "Calibrated 60t bridge", None),
-    ],
-    SectionKey.ENVIRONMENTAL: [
-        ("EIA / EMP status", "EMP approved", None),
-        ("Effluent discharge route", "Closed loop, no surface discharge", "ok"),
-        ("Air quality monitoring", "Quarterly, third-party", None),
-    ],
-    SectionKey.HEALTH_SAFETY: [
-        ("HSE officer appointed", "Yes: full-time", None),
-        ("Lost-time injuries (12 mo)", "1", "warn"),
-        ("Emergency drill frequency", "Quarterly", None),
-    ],
-    SectionKey.EQUIPMENT: [
-        ("Maintenance regime", "Planned preventive, monthly", None),
-        ("Calibration programme", "Annual, third-party", None),
-    ],
-    SectionKey.OPERATIONAL: [
-        ("Batch traceability system", "Beldium Batch ID enabled", "ok"),
-        ("Chain of custody", "Documented per run", None),
-        ("Reconciliation frequency", "Per production run", None),
-    ],
-    SectionKey.QUALITY: [
-        ("On-site laboratory", "Yes", None),
-        ("Assay method", "XRF + wet chemistry cross-check", None),
-        ("Retention sample policy", "90 days per output batch", None),
-    ],
-    SectionKey.WASTE: [
-        ("Waste streams identified", "Slag, wash sludge, packaging", None),
-        ("Licensed waste handler", "Contracted", None),
-        ("Tailings storage", "Lined containment cell", None),
-    ],
-    SectionKey.INSPECTION: [
-        ("Preferred inspection window", "Weekdays, 09:00-15:00", None),
-        ("Site access constraints", "Escort required beyond gatehouse", None),
-        ("Self-declared readiness", "Ready", "ok"),
-    ],
+# Plausible answers keyed by prompt. Anything the checklist asks for that is
+# not named here is answered generically, so the seed follows the checklist
+# rather than restating it.
+ANSWERS = {
+    "Registered name": None,  # filled from the company
+    "CAC RC number": None,
+    "Tax Identification Number (TIN)": None,
+    "Company type": "Private Limited (Ltd)",
+    "Directors declared": "4",
+    "Beneficial ownership disclosed": "Yes",
+    "Mining/Processing licence class": "Mineral Processing Licence",
+    "Issuing authority": "Mining Cadastre Office",
+    "NESREA registration": "Registered",
+    "State environmental permit": "Held",
+    "Site address": None,
+    "Land title / C of O": "Held",
+    "Site area": "4.8 hectares",
+    "Perimeter security": "Fenced, 24h manned gate",
+    "Weighbridge": "Calibrated 60t bridge",
+    "Power source": "Grid + 500kVA standby",
+    "EIA / EMP status": "EMP approved",
+    "Effluent discharge route": "Closed loop, no surface discharge",
+    "Air quality monitoring": "Quarterly, third-party",
+    "Last effluent test": "Most recent quarter",
+    "Community grievance log": "Maintained",
+    "HSE officer appointed": "Yes: full-time",
+    "PPE issuance register": "Maintained",
+    "Lost-time injuries (12 mo)": "1",
+    "Emergency drill frequency": "Quarterly",
+    "Workforce medical screening": "Annual",
+    "Primary process line": None,
+    "Installed capacity": None,
+    "Maintenance regime": "Planned preventive, monthly",
+    "Calibration programme": "Annual, third-party",
+    "Batch traceability system": "Beldium Batch ID enabled",
+    "Input source verification": "Supplier due-diligence file",
+    "Shift logging": "Digital run sheets",
+    "Chain of custody": "Documented per run",
+    "Reconciliation frequency": "Per production run",
+    "On-site laboratory": "Yes",
+    "Assay method": "XRF + wet chemistry cross-check",
+    "Third-party verification lab": "Engaged",
+    "Retention sample policy": "90 days per output batch",
+    "Waste streams identified": "Slag, wash sludge, packaging",
+    "Licensed waste handler": "Contracted",
+    "Tailings storage": "Lined containment cell",
+    "Waste manifest system": "In use",
+    "Preferred inspection window": "Weekdays, 09:00-15:00",
+    "Site access constraints": "Escort required beyond gatehouse",
+    "Previous inspection": "None on record",
+    "Self-declared readiness": "Ready",
 }
 
-# (section, name, issuer, days until expiry or None for no expiry, supplied)
-# Two rows are deliberately unsupplied so the "missing evidence" path — and the
-# completeness figure it drives — is visible in the demo register.
-DOCUMENTS = [
-    (SectionKey.CORPORATE, "CAC Certificate of Incorporation", "CAC", None, True),
-    (SectionKey.CORPORATE, "FIRS Tax Clearance Certificate", "FIRS", 200, True),
-    (SectionKey.REGULATORY, "Mineral Processing Licence", "Mining Cadastre Office", 900, True),
-    (SectionKey.REGULATORY, "NESREA Facility Registration", "NESREA", 51, True),
-    (SectionKey.FACILITY, "Weighbridge Calibration Certificate", "SON Approved Calibrator", 300, True),
-    (SectionKey.ENVIRONMENTAL, "Environmental Management Plan", "Accredited Consultant", 700, True),
-    (SectionKey.HEALTH_SAFETY, "Fire Safety Certificate", "State Fire Service", 42, True),
-    (SectionKey.EQUIPMENT, "Pressure Vessel Integrity Test", "Certified Inspector", -8, True),
-    (SectionKey.OPERATIONAL, "Standard Operating Procedures Pack", "Applicant", None, True),
-    (SectionKey.QUALITY, "XRF Calibration Certificate", "OEM Service", 420, True),
-    (SectionKey.WASTE, "Waste Handler Contract", "Licensed Handler", 120, False),
-    (SectionKey.INSPECTION, "Site Access & Induction Pack", "Applicant", None, False),
-]
+# Prompts whose answer is a green flag rather than a neutral statement.
+POSITIVE_FLAGS = {
+    "Beneficial ownership disclosed",
+    "NESREA registration",
+    "State environmental permit",
+    "Land title / C of O",
+    "Effluent discharge route",
+    "Batch traceability system",
+}
 
-# (company, stage, decision, days since submission, days since decision)
-# Decided rows sit inside the six-month KPI window so the trend chart has data.
+WARN_FLAGS = {"Lost-time injuries (12 mo)"}
+
+# Sections left deliberately short of evidence on the two in-flight
+# applications, so the "missing evidence" path and the completeness figure it
+# drives are both visible in the demo register.
+INCOMPLETE_SECTIONS = {SectionKey.WASTE, SectionKey.INSPECTION}
+
 APPLICATIONS = [
     ("Ilesa Mineral Processing Ltd", ApplicationStage.IN_REVIEW, "", 28, None),
     ("Port Harcourt Metal Recovery Ltd", ApplicationStage.INSPECTION, "", 44, None),
@@ -204,12 +205,24 @@ INSPECTIONS = [
     ("Enugu Coal Preparation Ltd", "Udi Coal Wash Plant", "Enugu", 27, "Mrs. Halima Yusuf", Inspection.Type.INCIDENT_TRIGGERED, Inspection.Status.SCHEDULED, ""),
 ]
 
+# (report kind, scope, period, days since it was generated). The seed compiles
+# these for real, so the demo library downloads actual documents.
 REPORTS = [
-    ("RPT-2026-Q2-NAT", "Quarterly National Processing Compliance Report", "Last quarter", "All regions", 48, -59),
-    ("RPT-2026-07-ENV", "Monthly Environmental Exceedance Summary", "Last month", "Environmental", 16, -37),
-    ("RPT-2026-H1-INSP", "Half-year Inspection Programme Review", "First half", "Inspections", 31, -66),
-    ("RPT-2026-06-SW", "South West Regional Compliance Brief", "Last month", "South West", 12, -70),
+    (ReportKind.NATIONAL, "All regions", "last_quarter", 59),
+    (ReportKind.ENVIRONMENTAL, "All regions", "last_month", 37),
+    (ReportKind.INSPECTIONS, "All regions", "year_to_date", 66),
+    (ReportKind.NATIONAL, "South West", "last_month", 70),
 ]
+
+
+# Days to expiry, spread so the register shows valid, expiring and expired
+# evidence side by side. Deterministic per document name, so re-seeding does
+# not reshuffle which certificate is the lapsed one.
+EXPIRY_SPREAD = [720, 400, 200, 51, 42, -8, 900, 120]
+
+
+def name_hash(name):
+    return sum(ord(character) for character in name)
 
 
 def placeholder_pdf(title):
@@ -315,11 +328,26 @@ class Command(BaseCommand):
             )
             applications[company] = application
 
+            # Answers follow the checklist rather than a second copy of it, so
+            # a change to the compliance requirements is reflected here too.
+            per_company = {
+                "Registered name": company,
+                "CAC RC number": processor.rc_number,
+                "Tax Identification Number (TIN)": processor.tin,
+                "Site address": f"{application.facility_name}, {processor.lga} LGA, {processor.state} State",
+                "Primary process line": processor.get_processing_type_display(),
+                "Installed capacity": application.capacity,
+            }
+            short = stage in {ApplicationStage.NEW, ApplicationStage.AWAITING_INFO}
             for key, _label in SectionKey.choices:
-                fields = [
-                    {"label": label, "value": value, **({"flag": flag} if flag else {})}
-                    for label, value, flag in SECTION_FIELDS[key]
-                ]
+                leave_short = short and key in INCOMPLETE_SECTIONS
+                fields = []
+                for label, required in checklist.PROMPTS[key]:
+                    if leave_short and required:
+                        continue
+                    value = per_company.get(label) or ANSWERS.get(label) or "Confirmed"
+                    flag = "ok" if label in POSITIVE_FLAGS else ("warn" if label in WARN_FLAGS else None)
+                    fields.append({"label": label, "value": value, **({"flag": flag} if flag else {})})
                 review_state = ReviewState.VERIFIED if stage == ApplicationStage.DECIDED else ReviewState.PENDING
                 ApplicationSection.objects.update_or_create(
                     application=application,
@@ -333,18 +361,18 @@ class Command(BaseCommand):
             )
 
             application.documents.all().delete()
-            for section, name, issuer, expires_in, supplied in DOCUMENTS:
+            for section, name, issuer, expires in checklist.documents_for(processor.processing_type):
                 document = ProcessingDocument.objects.create(
                     application=application,
                     processor=processor,
                     section=section,
                     name=name,
-                    reference=f"{name.split()[0].upper()}-{random.randint(1000, 9999)}",
+                    reference=f"{name.split()[0].upper()[:8]}-{random.randint(1000, 9999)}",
                     issuer=issuer,
                     issued_on=today - timedelta(days=random.randint(60, 900)),
-                    expires_on=None if expires_in is None else today + timedelta(days=expires_in),
+                    expires_on=today + timedelta(days=EXPIRY_SPREAD[name_hash(name) % len(EXPIRY_SPREAD)]) if expires else None,
                 )
-                if supplied:
+                if not (short and section in INCOMPLETE_SECTIONS):
                     # Validity and completeness both key off a file being
                     # present, so a demo without one reads as 0% everywhere.
                     document.file.save(f"{document.reference}.pdf", ContentFile(placeholder_pdf(name)), save=True)
@@ -439,17 +467,20 @@ class Command(BaseCommand):
                 completed_at=now if status == Inspection.Status.COMPLETED else None,
             )
 
-        for reference, title, period, scope, pages, generated_offset in REPORTS:
-            ComplianceReport.objects.update_or_create(
-                reference=reference,
-                defaults={
-                    "title": title,
-                    "period_label": period,
-                    "scope": scope,
-                    "pages": pages,
-                    "generated_on": today + timedelta(days=generated_offset),
-                },
+        ComplianceReport.objects.all().delete()
+        for kind, scope, period, generated_days_ago in REPORTS:
+            report = ComplianceReport(
+                kind=kind,
+                title=ReportKind.LABELS[kind],
+                scope=scope,
+                generated_on=today - timedelta(days=generated_days_ago),
             )
+            report.reference = generate_report_reference()
+            pdf, pages, period_label = build_report(kind, scope, period, reference=report.reference)
+            report.period_label = period_label
+            report.pages = pages
+            report.save()
+            report.file.save(f"{report.reference}.pdf", ContentFile(pdf), save=True)
 
         self.stdout.write(
             self.style.SUCCESS(

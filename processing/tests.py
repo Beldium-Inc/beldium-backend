@@ -6,8 +6,11 @@ from rest_framework.test import APITestCase
 
 from accounts.models import User
 from organisations.models import MembershipRole, Organisation, OrganisationMembership, OrganisationType
+from processing import checklist
+from processing.reports import ReportKind
 from processing.models import (
     ApplicationDecision,
+    ComplianceReport,
     ApplicationSection,
     ApplicationStage,
     EnvironmentalAlert,
@@ -89,12 +92,27 @@ class ProcessingTestCase(APITestCase):
         return application
 
     def complete(self, application, review_state=None):
-        """Fill every section so completeness reaches 100%."""
+        """Answer every required prompt and supply every required document.
+
+        Completeness is defined by the checklist, so a test that wants a
+        submittable application has to satisfy the checklist rather than write
+        one arbitrary field.
+        """
         for section in application.sections.all():
-            section.fields = [{"label": "Declared", "value": "Yes", "flag": "ok"}]
+            section.fields = [
+                {"label": prompt, "value": "Declared"}
+                for prompt in checklist.required_prompts(section.key)
+            ]
             if review_state:
                 section.review_state = review_state
             section.save()
+        for section, name, _issuer, _expires in checklist.documents_for(application.processing_type):
+            ProcessingDocument.objects.update_or_create(
+                application=application,
+                section=section,
+                name=name,
+                defaults={"processor": application.processor, "file": "processing/documents/test.pdf"},
+            )
         return application
 
 
@@ -186,15 +204,36 @@ class ApplicationLifecycleTests(ProcessingTestCase):
         self.assertEqual(response.data["stage"], ApplicationStage.IN_REVIEW)
         self.assertEqual(response.data["completeness"], 100)
 
-    def test_a_section_with_an_unsupplied_document_is_not_complete(self):
+    def test_a_section_missing_a_required_document_is_not_complete(self):
         application = self.complete(self.application())
-        ProcessingDocument.objects.create(
-            application=application, processor=self.processor, section=SectionKey.WASTE, name="Waste handler contract"
-        )
+        application.documents.filter(section=SectionKey.WASTE).update(file="")
         self.client.force_authenticate(self.applicant)
         response = self.client.post(reverse("processing-application-submit", args=[application.id]))
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["error"]["details"]["completeness"], 90)
+        details = response.data["error"]["details"]
+        self.assertEqual(details["completeness"], 90)
+        gap = next(row for row in details["outstanding"] if row["section"] == SectionKey.WASTE)
+        self.assertIn("Waste Handler Contract", gap["missing_documents"])
+
+    def test_a_section_missing_a_required_answer_is_not_complete(self):
+        application = self.complete(self.application())
+        section = application.sections.get(key=SectionKey.QUALITY)
+        section.fields = [field for field in section.fields if field["label"] != "Assay method"]
+        section.save()
+        self.client.force_authenticate(self.applicant)
+        response = self.client.post(reverse("processing-application-submit", args=[application.id]))
+        self.assertEqual(response.status_code, 409)
+        gap = next(
+            row for row in response.data["error"]["details"]["outstanding"] if row["section"] == SectionKey.QUALITY
+        )
+        self.assertEqual(gap["missing_prompts"], ["Assay method"])
+
+    def test_a_refinery_must_evidence_more_than_a_crushing_plant(self):
+        """The checklist is per process class, so the gap list differs by type."""
+        refinery = set(checklist.required_documents_by_section(ProcessingType.CHEMICAL_REFINING)[SectionKey.REGULATORY])
+        crusher = set(checklist.required_documents_by_section(ProcessingType.CRUSHING_MILLING)[SectionKey.REGULATORY])
+        self.assertIn("NESREA effluent discharge permit", refinery)
+        self.assertNotIn("NESREA effluent discharge permit", crusher)
 
     def test_editing_a_section_returns_it_to_the_review_queue(self):
         application = self.complete(self.application())
@@ -735,3 +774,390 @@ class CrossCompanyWriteTests(ProcessingTestCase):
             format="json",
         )
         self.assertEqual(response.status_code, 201)
+
+
+class ApplicantFlowTests(ProcessingTestCase):
+    """The path a processor drives: start, fill in, evidence, submit, respond."""
+
+    def test_the_checklist_is_served_per_process_class(self):
+        self.client.force_authenticate(self.applicant)
+        response = self.client.get(reverse("processing-checklist"), {"processing_type": "chemical_refining"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["sections"]), 10)
+        regulatory = next(s for s in response.data["sections"] if s["key"] == SectionKey.REGULATORY)
+        self.assertIn("NESREA effluent discharge permit", regulatory["required_documents"])
+        self.assertIn("Issuing authority", regulatory["required_prompts"])
+
+    def test_an_unknown_process_class_is_refused(self):
+        self.client.force_authenticate(self.applicant)
+        response = self.client.get(reverse("processing-checklist"), {"processing_type": "alchemy"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["error"]["code"], "unknown_processing_type")
+
+    def test_an_applicant_answers_a_section(self):
+        application = self.application()
+        self.client.force_authenticate(self.applicant)
+        response = self.client.patch(
+            reverse("processing-application-section", args=[application.id, SectionKey.CORPORATE]),
+            {
+                "fields": [
+                    {"label": "Registered name", "value": "Ilesa Mineral Processing Ltd"},
+                    {"label": "Beneficial ownership disclosed", "value": "Yes", "flag": "ok"},
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["fields"]), 2)
+
+    def test_a_malformed_field_is_refused(self):
+        application = self.application()
+        self.client.force_authenticate(self.applicant)
+        response = self.client.patch(
+            reverse("processing-application-section", args=[application.id, SectionKey.CORPORATE]),
+            {"fields": [{"value": "no label"}]},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_re_uploading_a_document_replaces_it_and_clears_the_verdict(self):
+        application = self.application()
+        self.client.force_authenticate(self.applicant)
+        payload = {
+            "section": SectionKey.CORPORATE,
+            "name": "CAC Certificate of Incorporation",
+            "reference": "RC 1428907",
+            "issuer": "CAC",
+        }
+        first = self.client.post(
+            reverse("processing-application-documents", args=[application.id]), payload, format="multipart"
+        )
+        self.assertEqual(first.status_code, 201)
+
+        # The desk accepts it, then the applicant replaces the file.
+        document = application.documents.get(name=payload["name"])
+        document.file = "processing/documents/test.pdf"
+        document.review_state = ReviewState.VERIFIED
+        document.save()
+
+        second = self.client.post(
+            reverse("processing-application-documents", args=[application.id]), payload, format="multipart"
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(application.documents.filter(name=payload["name"]).count(), 1)
+        self.assertEqual(second.data["review_state"], ReviewState.PENDING)
+
+    def test_the_gap_list_names_what_is_still_outstanding(self):
+        application = self.application()
+        self.client.force_authenticate(self.applicant)
+        response = self.client.get(reverse("processing-application-detail", args=[application.id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["completeness"], 0)
+        self.assertEqual(len(response.data["outstanding"]), 10)
+        corporate = next(row for row in response.data["outstanding"] if row["section"] == SectionKey.CORPORATE)
+        self.assertIn("Registered name", corporate["missing_prompts"])
+        self.assertIn("CAC Certificate of Incorporation", corporate["missing_documents"])
+
+    def test_a_full_applicant_round_trip(self):
+        """Start, complete, submit, get sent back, fix, resubmit."""
+        self.client.force_authenticate(self.applicant)
+        created = self.client.post(
+            reverse("processing-application-list"),
+            {
+                "company": "Ilesa Mineral Processing Ltd",
+                "processing_type": ProcessingType.CHEMICAL_REFINING,
+                "state": "Osun",
+                "organisation": str(self.processor_org.id),
+                "processor": str(self.processor.id),
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        application = ProcessingApplication.objects.get(id=created.data["id"])
+
+        self.assertEqual(
+            self.client.post(reverse("processing-application-submit", args=[application.id])).status_code, 409
+        )
+
+        self.complete(application)
+        submitted = self.client.post(reverse("processing-application-submit", args=[application.id]))
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(submitted.data["stage"], ApplicationStage.IN_REVIEW)
+        self.assertEqual(submitted.data["outstanding"], [])
+
+        # The desk wants more on one section.
+        self.client.force_authenticate(self.operator)
+        self.client.post(
+            reverse("processing-application-review-section", args=[application.id, SectionKey.WASTE]),
+            {"review_state": "info_requested", "note": "Name the licensed handler."},
+            format="json",
+        )
+        application.refresh_from_db()
+        self.assertEqual(application.stage, ApplicationStage.AWAITING_INFO)
+
+        # The applicant can edit again, and resubmitting returns it to the desk.
+        self.client.force_authenticate(self.applicant)
+        answered = self.client.patch(
+            reverse("processing-application-section", args=[application.id, SectionKey.WASTE]),
+            {
+                "fields": [
+                    {"label": prompt, "value": "Declared"}
+                    for prompt in checklist.required_prompts(SectionKey.WASTE)
+                ]
+            },
+            format="json",
+        )
+        self.assertEqual(answered.status_code, 200)
+        resubmitted = self.client.post(reverse("processing-application-submit", args=[application.id]))
+        self.assertEqual(resubmitted.status_code, 200)
+        self.assertEqual(resubmitted.data["stage"], ApplicationStage.IN_REVIEW)
+
+    def test_an_applicant_submits_corrective_action_evidence(self):
+        application = self.application(stage=ApplicationStage.AWAITING_INFO)
+        finding = NonConformity.objects.create(
+            application=application,
+            processor=self.processor,
+            section=SectionKey.WASTE,
+            severity=NonConformity.Severity.MAJOR,
+            title="Slag outside containment",
+            due_on=timezone.localdate() + timedelta(days=10),
+        )
+        self.client.force_authenticate(self.applicant)
+        response = self.client.post(
+            reverse("processing-non-conformity-evidence", args=[finding.id]),
+            {"name": "Relocation photo set", "note": "Moved to the lined cell."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["submitted_by_name"], self.applicant.email)
+        finding.refresh_from_db()
+        self.assertEqual(finding.status, NonConformity.Status.EVIDENCE_SUBMITTED)
+
+
+class FirstApplicationTests(ProcessingTestCase):
+    """A company joining the register has no processor record yet."""
+
+    def test_a_first_time_applicant_files_without_naming_anything(self):
+        self.client.force_authenticate(self.applicant)
+        response = self.client.post(
+            reverse("processing-application-list"),
+            {"company": "Ilesa Thermal Recovery Ltd", "processing_type": ProcessingType.SMELTING},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        application = ProcessingApplication.objects.get(id=response.data["id"])
+        # Attributed to their own organisation rather than left unowned.
+        self.assertEqual(application.organisation_id, self.processor_org.id)
+        self.assertIsNone(application.processor_id)
+        self.assertEqual(application.sections.count(), len(SectionKey.choices))
+
+    def test_naming_another_organisation_is_still_refused(self):
+        self.client.force_authenticate(self.applicant)
+        response = self.client.post(
+            reverse("processing-application-list"),
+            {
+                "company": "Someone else",
+                "processing_type": ProcessingType.SMELTING,
+                "organisation": str(self.other_org.id),
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_an_applicant_in_two_organisations_must_say_which(self):
+        second = make_org("Ilesa Holdings Ltd", OrganisationType.MINING_COMPANY)
+        OrganisationMembership.objects.create(
+            organisation=second, user=self.applicant, role=MembershipRole.OWNER
+        )
+        self.client.force_authenticate(self.applicant)
+        response = self.client.post(
+            reverse("processing-application-list"),
+            {"company": "Ambiguous Ltd", "processing_type": ProcessingType.SMELTING},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["error"]["code"], "organisation_required")
+
+    def test_the_first_application_is_scoped_to_its_filer(self):
+        self.client.force_authenticate(self.applicant)
+        self.client.post(
+            reverse("processing-application-list"),
+            {"company": "Ilesa Thermal Recovery Ltd", "processing_type": ProcessingType.SMELTING},
+            format="json",
+        )
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.get(reverse("processing-application-list")).data["count"], 0)
+
+
+class RiskCauseTests(ProcessingTestCase):
+    """The score is the sum of its causes, so the desk must be able to edit them."""
+
+    def setUp(self):
+        super().setUp()
+        self.application_row = self.application(stage=ApplicationStage.IN_REVIEW)
+        self.cause = RiskCause.objects.create(
+            application=self.application_row, cause="Expiring registration", weight=16
+        )
+
+    def test_the_desk_adds_a_cause_and_the_score_follows(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(
+            reverse("processing-application-risk-causes", args=[self.application_row.id]),
+            {"cause": "Chemical process class", "weight": 22, "detail": "Acid leaching on site."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        detail = self.client.get(
+            reverse("processing-application-detail", args=[self.application_row.id])
+        )
+        self.assertEqual(detail.data["risk_score"], 38)
+        self.assertEqual(detail.data["risk_band"], "medium")
+
+    def test_the_desk_withdraws_a_cause(self):
+        """This route was unreachable while DELETE was off the viewset."""
+        self.client.force_authenticate(self.operator)
+        response = self.client.delete(
+            reverse(
+                "processing-application-risk-cause-detail",
+                args=[self.application_row.id, self.cause.id],
+            )
+        )
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(self.application_row.risk_causes.count(), 0)
+
+    def test_an_applicant_cannot_edit_its_own_risk_causes(self):
+        self.client.force_authenticate(self.applicant)
+        self.assertEqual(
+            self.client.delete(
+                reverse(
+                    "processing-application-risk-cause-detail",
+                    args=[self.application_row.id, self.cause.id],
+                )
+            ).status_code,
+            403,
+        )
+
+    def test_the_application_itself_cannot_be_deleted(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.delete(
+            reverse("processing-application-detail", args=[self.application_row.id])
+        )
+        self.assertEqual(response.status_code, 405)
+
+
+class ReportGenerationTests(ProcessingTestCase):
+    """Reports are compiled from the register and stored as they were issued."""
+
+    def setUp(self):
+        super().setUp()
+        self.processor.region = "South West"
+        self.processor.save(update_fields=["region"])
+        self.application_row = self.application(stage=ApplicationStage.IN_REVIEW)
+        NonConformity.objects.create(
+            application=self.application_row,
+            processor=self.processor,
+            section=SectionKey.WASTE,
+            severity=NonConformity.Severity.MAJOR,
+            title="Slag outside containment",
+            due_on=timezone.localdate() + timedelta(days=10),
+        )
+        EnvironmentalAlert.objects.create(
+            processor=self.processor,
+            facility_name="Ilesa Refining Plant A",
+            parameter="Effluent pH",
+            reading="5.4",
+            threshold="6.0 - 9.0",
+            severity=EnvironmentalAlert.Severity.WARNING,
+        )
+        Inspection.objects.create(
+            processor=self.processor,
+            facility_name="Ilesa Refining Plant A",
+            scheduled_for=timezone.localdate() + timedelta(days=7),
+            status=Inspection.Status.SCHEDULED,
+        )
+
+    def _generate(self, **overrides):
+        payload = {"kind": "national_compliance", "scope": "All regions", "period": "year_to_date"}
+        payload.update(overrides)
+        return self.client.post(reverse("processing-report-generate"), payload, format="json")
+
+    def test_every_kind_compiles_a_stored_pdf(self):
+        self.client.force_authenticate(self.operator)
+        for kind, label in ReportKind.CHOICES:
+            with self.subTest(kind=kind):
+                response = self._generate(kind=kind)
+                self.assertEqual(response.status_code, 201)
+                self.assertEqual(response.data["title"], label)
+                self.assertGreaterEqual(response.data["pages"], 1)
+                self.assertIsNotNone(response.data["file_url"])
+
+                report = ComplianceReport.objects.get(id=response.data["id"])
+                self.assertTrue(report.file)
+                with report.file.open("rb") as stored:
+                    self.assertTrue(stored.read(5).startswith(b"%PDF-"))
+
+    def test_the_stored_document_downloads(self):
+        self.client.force_authenticate(self.operator)
+        created = self._generate()
+        response = self.client.get(
+            reverse("processing-report-download", args=[created.data["id"]])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(b"".join(response.streaming_content).startswith(b"%PDF-"))
+
+    def test_the_reference_is_stamped_before_the_document_is_rendered(self):
+        """It appears on every page, so it cannot be assigned after the build."""
+        self.client.force_authenticate(self.operator)
+        report = ComplianceReport.objects.get(id=self._generate().data["id"])
+        with report.file.open("rb") as stored:
+            self.assertIn(report.reference.encode(), stored.read())
+
+    def test_a_regulator_may_compile_one(self):
+        self.client.force_authenticate(self.regulator)
+        self.assertEqual(self._generate().status_code, 201)
+
+    def test_a_processor_cannot_compile_a_register_wide_report(self):
+        self.client.force_authenticate(self.applicant)
+        self.assertEqual(self._generate().status_code, 403)
+
+    def test_an_unknown_region_is_refused(self):
+        self.client.force_authenticate(self.operator)
+        response = self._generate(scope="Atlantis")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("scope", response.data["error"]["details"])
+
+    def test_a_known_region_is_accepted_and_recorded(self):
+        self.client.force_authenticate(self.operator)
+        response = self._generate(scope="South West")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["scope"], "South West")
+
+    def test_an_unknown_kind_is_refused(self):
+        self.client.force_authenticate(self.operator)
+        self.assertEqual(self._generate(kind="astrology").status_code, 400)
+
+    def test_the_period_label_describes_the_range(self):
+        self.client.force_authenticate(self.operator)
+        self.assertEqual(self._generate(period="all_time").data["period_label"], "All time")
+        self.assertIn(
+            str(timezone.localdate().year), self._generate(period="year_to_date").data["period_label"]
+        )
+
+    def test_generation_is_written_to_the_audit_trail(self):
+        self.client.force_authenticate(self.operator)
+        created = self._generate()
+        response = self.client.get(reverse("processing-audit-list"))
+        entry = next(
+            row for row in response.data["results"] if row["target"] == created.data["reference"]
+        )
+        self.assertEqual(entry["action"], "Report generated")
+
+    def test_an_empty_register_still_produces_a_readable_report(self):
+        """A period with nothing in it must not render a broken document."""
+        NonConformity.objects.all().delete()
+        EnvironmentalAlert.objects.all().delete()
+        Inspection.objects.all().delete()
+        self.client.force_authenticate(self.operator)
+        for kind, _ in ReportKind.CHOICES:
+            with self.subTest(kind=kind):
+                self.assertEqual(self._generate(kind=kind, period="last_month").status_code, 201)

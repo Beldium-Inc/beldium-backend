@@ -10,6 +10,7 @@ from processing.views import (
     ProcessingApplicationViewSet,
     ProcessingAuditViewSet,
     ProcessingCapabilityView,
+    ProcessingChecklistView,
     ProcessingDashboardView,
     ProcessingDocumentViewSet,
     ProcessorViewSet,
@@ -31,5 +32,6 @@ router.register("audit", ProcessingAuditViewSet, basename="processing-audit")
 urlpatterns = [
     path("dashboard/", ProcessingDashboardView.as_view(), name="processing-dashboard"),
     path("me/", ProcessingCapabilityView.as_view(), name="processing-capabilities"),
+    path("checklist/", ProcessingChecklistView.as_view(), name="processing-checklist"),
 ]
 urlpatterns += router.urls

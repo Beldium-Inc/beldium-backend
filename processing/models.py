@@ -675,10 +675,20 @@ class TraceabilityRun(TimeStampedModel):
         return self.reference
 
 
-class ComplianceReport(TimeStampedModel):
-    """A generated periodic report held for download by the oversight desk."""
+def generate_report_reference():
+    return _reference("BPC-RPT")
 
-    reference = models.CharField(max_length=40, unique=True)
+
+class ComplianceReport(TimeStampedModel):
+    """A point-in-time extract of the register, rendered to PDF and stored.
+
+    Kept rather than recomputed on read: a report that changed after it was
+    issued would be worthless as a record of what was known when a decision was
+    taken against it.
+    """
+
+    reference = models.CharField(max_length=40, unique=True, blank=True)
+    kind = models.CharField(max_length=40, blank=True, db_index=True)
     title = models.CharField(max_length=255)
     period_label = models.CharField(max_length=100, blank=True)
     scope = models.CharField(max_length=100, blank=True)
@@ -696,7 +706,12 @@ class ComplianceReport(TimeStampedModel):
     )
 
     class Meta:
-        ordering = ["-generated_on"]
+        ordering = ["-generated_on", "-created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = generate_report_reference()
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return self.title

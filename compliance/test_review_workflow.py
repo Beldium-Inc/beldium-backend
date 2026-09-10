@@ -81,27 +81,37 @@ class ReviewWorkflowTests(APITestCase):
         self.assertEqual(requested.status_code, 201, requested.data)
         self.assertEqual(requested.data['due_date'], self.deadline)
         self.client.force_authenticate(self.owner)
+        # A requested document no longer blocks a resubmission; it is reported
+        # as outstanding and left to the desk to chase.
         response = self.client.post(self.url('submit'))
-        self.assertEqual(response.status_code, 409)
-        self.assertIn('insurance', response.data['error']['details']['documents']['outstanding'])
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn('insurance', response.data['progress']['documents']['outstanding'])
+        # An upload with no file is still a validation error, not a lock.
         self.assertEqual(self.client.post(self.url('documents'), {'document_type': 'insurance'}, format='multipart').status_code, 400)
+        # The gap can be filled while the desk already has the application:
+        # evidence stays open even though the form itself has locked.
         upload = self.client.post(self.url('documents'), {'document_type': 'insurance', 'file': self.upload()}, format='multipart')
         self.assertEqual(upload.status_code, 200, upload.data)
-        self.assertEqual(self.client.post(self.url('submit')).status_code, 200)
+        # Submitting again is refused: it is already under review.
+        self.assertEqual(self.client.post(self.url('submit')).status_code, 409)
         self.client.force_authenticate(self.staff)
         self.assertEqual(self.client.post(self.url('decide'), {'status': 'verified'}).data['error']['code'], 'documents_not_verified')
         self.assertEqual(self.client.post(self.url('review-document', upload.data['id']), {'status': 'verified'}).status_code, 200)
         self.assertEqual(self.client.post(self.url('decide'), {'status': 'verified'}).status_code, 200)
 
-    def test_rejected_document_blocks_resubmission_and_preserves_old_file(self):
+    def test_rerequesting_a_document_preserves_the_old_file(self):
         doc = self.app.documents.first()
         old_name = doc.file.name
         requested = self.client.post(self.url('request-document'), {'document_type': doc.document_type, 'title': doc.title})
         self.assertEqual(requested.status_code, 201)
         doc.refresh_from_db()
+        # The previous file stays readable until a replacement lands.
         self.assertEqual(doc.file.name, old_name)
         self.client.force_authenticate(self.owner)
-        self.assertEqual(self.client.post(self.url('submit')).status_code, 409)
+        # Resubmission is allowed; the re-request is reported, not enforced.
+        resubmitted = self.client.post(self.url('submit'))
+        self.assertEqual(resubmitted.status_code, 200, resubmitted.data)
+        self.assertIn(doc.document_type, resubmitted.data['progress']['documents']['outstanding'])
 
     def test_messages_are_read_per_user_and_internal_messages_remain_private(self):
         message = ApplicationMessage.objects.create(application=self.app, author=self.staff, body='Please respond')
@@ -209,7 +219,19 @@ class ReviewWorkflowTests(APITestCase):
         self.app.refresh_from_db()
         self.assertEqual(self.app.status, 'action_required')
         self.client.force_authenticate(self.owner)
-        self.assertEqual(self.client.post(self.url('submit')).status_code, 409)
+        # A rejected document has to be answered. Handing the same file back
+        # unchanged would send the review round again.
+        refused = self.client.post(self.url('submit'))
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.data['error']['code'], 'documents_rejected')
+        self.assertIn(doc.document_type, refused.data['error']['details']['documents']['rejected'])
+
+        # Replacing it clears the block.
+        replaced = self.client.post(
+            self.url('documents'), {'document_type': doc.document_type, 'file': self.upload()}, format='multipart'
+        )
+        self.assertEqual(replaced.status_code, 200, replaced.data)
+        self.assertEqual(self.client.post(self.url('submit')).status_code, 200)
 
     def test_failed_request_rolls_back_document_changes(self):
         from unittest.mock import patch

@@ -12,7 +12,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from accounts.models import AccountAuditEvent
-from processing import scoring
+from processing import reports, scoring
 from processing.models import (
     ApplicationSection,
     ComplianceReport,
@@ -259,13 +259,20 @@ class ProcessingApplicationSerializer(serializers.ModelSerializer):
 class ProcessingApplicationDetailSerializer(ProcessingApplicationSerializer):
     sections = ApplicationSectionSerializer(many=True, read_only=True)
     review = serializers.SerializerMethodField()
+    outstanding = serializers.SerializerMethodField()
 
     class Meta(ProcessingApplicationSerializer.Meta):
-        fields = ProcessingApplicationSerializer.Meta.fields + ["sections", "review"]
-        read_only_fields = ProcessingApplicationSerializer.Meta.read_only_fields + ["sections", "review"]
+        fields = ProcessingApplicationSerializer.Meta.fields + ["sections", "review", "outstanding"]
+        read_only_fields = ProcessingApplicationSerializer.Meta.read_only_fields + [
+            "sections", "review", "outstanding",
+        ]
 
     def get_review(self, obj) -> dict:
         return scoring.review_summary(obj)
+
+    def get_outstanding(self, obj) -> list:
+        """Every unanswered prompt and unsupplied document, section by section."""
+        return scoring.outstanding(obj)
 
 
 class ProcessingSectionReviewSerializer(serializers.Serializer):
@@ -588,13 +595,38 @@ class TraceabilityRunSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class ReportRequestSerializer(serializers.Serializer):
+    """What to compile. Everything else is read from the register."""
+
+    kind = serializers.ChoiceField(choices=reports.ReportKind.CHOICES)
+    scope = serializers.CharField(max_length=100, required=False, default=reports.ALL_REGIONS)
+    period = serializers.ChoiceField(choices=list(reports.PERIODS.items()), default="last_quarter")
+
+    def validate_scope(self, value):
+        """A region has to be one the register actually uses."""
+        value = (value or reports.ALL_REGIONS).strip()
+        if value == reports.ALL_REGIONS:
+            return value
+        known = set(Processor.objects.exclude(region="").values_list("region", flat=True))
+        if value not in known:
+            raise serializers.ValidationError("No processors are registered in that region.")
+        return value
+
+
 class ComplianceReportSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
+    kind_label = serializers.SerializerMethodField()
 
     class Meta:
         model = ComplianceReport
-        fields = ["id", "reference", "title", "period_label", "scope", "generated_on", "pages", "file_url", "created_at"]
+        fields = [
+            "id", "reference", "kind", "kind_label", "title", "period_label", "scope",
+            "generated_on", "pages", "file_url", "created_at",
+        ]
         read_only_fields = fields
+
+    def get_kind_label(self, obj) -> str:
+        return reports.ReportKind.LABELS.get(obj.kind, obj.title)
 
     @extend_schema_field(OpenApiTypes.URI)
     def get_file_url(self, obj) -> str | None:
