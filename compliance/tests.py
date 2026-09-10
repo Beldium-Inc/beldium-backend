@@ -95,6 +95,29 @@ class ComplianceApplicationLifecycleTests(APITestCase):
         self.assertIn("documents", event.metadata["outstanding"])
         self.assertIn("personnel", event.metadata["outstanding"])
 
+    def test_a_missing_document_does_not_block_but_a_rejected_one_does(self):
+        """The distinction the relaxed gate turns on, in one place."""
+        application = ComplianceApplication.objects.create(organisation=self.organisation, created_by=self.owner)
+        # Nothing supplied at all: submission is fine.
+        self.assertEqual(self.client.post(reverse("compliance-application-submit", args=[application.id])).status_code, status.HTTP_200_OK)
+
+        # The desk asks for something, the applicant supplies it, the desk rejects it.
+        self.client.force_authenticate(self.admin)
+        self.client.post(reverse("compliance-application-request-document", args=[application.id]), {"document_type": "insurance", "title": "Insurance"})
+        self.client.force_authenticate(self.owner)
+        upload = SimpleUploadedFile("insurance.pdf", b"%PDF-1.4 test", content_type="application/pdf")
+        document = self.client.post(reverse("compliance-application-documents", args=[application.id]), {"document_type": "insurance", "file": upload}, format="multipart")
+        self.assertEqual(document.status_code, status.HTTP_200_OK, document.data)
+        self.client.force_authenticate(self.admin)
+        self.client.post(reverse("compliance-application-review-document", args=[application.id, document.data["id"]]), {"status": "rejected", "notes": "Expired cover."}, format="json")
+
+        # Now it blocks, and says which document.
+        self.client.force_authenticate(self.owner)
+        refused = self.client.post(reverse("compliance-application-submit", args=[application.id]))
+        self.assertEqual(refused.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(refused.data["error"]["code"], "documents_rejected")
+        self.assertIn("insurance", refused.data["message"])
+
     def test_an_unverified_applicant_cannot_submit(self):
         """Identity is the one gate that stays: the reviewer has to be able to reply."""
         unverified = User.objects.create_user("unverified@example.com", "SafePassword-2026!")

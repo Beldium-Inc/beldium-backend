@@ -330,10 +330,20 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         self._assert_editor(application)
         self._assert_editable(application)
         progress = application_progress(application)
-        if progress["blocking"]:
+        if "account" in progress["blocking"]:
             raise AppError(
                 "Verify your email address before submitting this application.",
                 code="applicant_not_verified", status_code=409, details=progress,
+            )
+        if "rejected_documents" in progress["blocking"]:
+            rejected = progress["documents"]["rejected"]
+            raise AppError(
+                "Replace the rejected document"
+                + ("s" if len(rejected) > 1 else "")
+                + " before submitting again: "
+                + ", ".join(name.replace("_", " ") for name in rejected)
+                + ".",
+                code="documents_rejected", status_code=409, details=progress,
             )
         application.submitted_at = timezone.now()
         transition(application, ApplicationStatus.UNDER_REVIEW)

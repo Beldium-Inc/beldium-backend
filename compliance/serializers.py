@@ -423,12 +423,12 @@ class DashboardResponseSerializer(serializers.Serializer):
     applications = serializers.ListField(child=serializers.DictField())
 
 
-# The only thing that blocks handing an application to a reviewer. Everything
-# else — documents, personnel, the onboarding sections — is reported as
-# outstanding and left to the desk to chase through `request-document`, so an
-# applicant can submit what they have rather than being stuck behind paperwork
-# they are still gathering. Identity is different: an unverified applicant is
-# not a person the reviewer can correspond with.
+# Sections whose absence blocks handing an application to a reviewer. The rest
+# — documents, personnel, the onboarding form — is reported as outstanding and
+# left to the desk to chase through `request-document`, so an applicant can
+# submit what they have rather than being stuck behind paperwork they are still
+# gathering. Identity is different: an unverified applicant is not a person the
+# reviewer can correspond with.
 SUBMISSION_BLOCKING_SECTIONS = ("account",)
 
 
@@ -450,6 +450,12 @@ def application_progress(application):
         "conflict_declaration": bool(application.conflict_declaration),
         "declaration": bool(application.declaration.get("confirmed")),
     }
+    # A document the desk has looked at and rejected is not the same as one that
+    # has not arrived yet. "Still gathering it" is fine to submit alongside;
+    # "I read it and it is wrong" has to be answered, or the applicant can hand
+    # the same file straight back and the review goes round again.
+    rejected = [doc.document_type for doc in documents if doc.status == ComplianceDocument.Status.REJECTED]
+
     completed = sum(sections.values())
     return {
         "percent": round(completed / len(sections) * 100), "completed": completed, "total": len(sections),
@@ -457,6 +463,12 @@ def application_progress(application):
         # What is still missing, and the subset of that which actually prevents
         # a submission. The frontend shows the first and gates on the second.
         "outstanding_sections": [name for name, done in sections.items() if not done],
-        "blocking": [name for name in SUBMISSION_BLOCKING_SECTIONS if not sections[name]],
-        "documents": {"submitted": len(required_types & submitted_types), "required": len(required_types), "outstanding": outstanding},
+        "blocking": (
+            [name for name in SUBMISSION_BLOCKING_SECTIONS if not sections[name]]
+            + (["rejected_documents"] if rejected else [])
+        ),
+        "documents": {
+            "submitted": len(required_types & submitted_types), "required": len(required_types),
+            "outstanding": outstanding, "rejected": rejected,
+        },
     }

@@ -362,9 +362,21 @@ Application review now enforces these transitions:
 
 Application editors are active owners, administrators, compliance managers, or platform staff. General onboarding edits are allowed only in draft, action-required, and rejected applications. Staff document requests/reviews are available only while review is open. An organisation with a compliance application must use the application decision endpoint; the older organisation decision endpoint cannot bypass compliance checks.
 
-Submission requires only a verified applicant email. An incomplete application may be handed
-to a reviewer: what was outstanding at that moment is written to the audit trail, and the desk
-requests what is missing. Approval is unchanged and still requires everything.
+Submission requires a verified applicant email and no unreplaced rejected documents. An
+otherwise incomplete application may be handed to a reviewer: what was outstanding at that
+moment is written to the audit trail, and the desk requests what is missing. Approval is
+unchanged and still requires everything.
+
+A document that has not arrived and a document the desk rejected are treated differently.
+"Still gathering it" does not block a submission; "I read it and it is wrong" does, or the
+applicant could hand the same file straight back and the review would go round again.
+Re-requesting a document is a `requested` status rather than a `rejected` one, so it does not
+block — the same endpoint is how the desk asks for something new that was never on the
+checklist, and that is the gathering case.
+
+`progress.blocking` names why a submission would be refused (`account`,
+`rejected_documents`) and is empty when it would be accepted;
+`progress.documents.rejected` lists the documents to replace.
 
 Documents and personnel stay editable after submission, so an applicant can supply the gaps
 without waiting for each one to be requested; the onboarding sections lock, so a reviewer's

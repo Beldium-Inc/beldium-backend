@@ -219,11 +219,19 @@ class ReviewWorkflowTests(APITestCase):
         self.app.refresh_from_db()
         self.assertEqual(self.app.status, 'action_required')
         self.client.force_authenticate(self.owner)
-        # The applicant may hand it back without replacing the document first;
-        # the rejection stays on the record for the reviewer.
-        resubmitted = self.client.post(self.url('submit'))
-        self.assertEqual(resubmitted.status_code, 200, resubmitted.data)
-        self.assertIn(doc.document_type, resubmitted.data['progress']['documents']['outstanding'])
+        # A rejected document has to be answered. Handing the same file back
+        # unchanged would send the review round again.
+        refused = self.client.post(self.url('submit'))
+        self.assertEqual(refused.status_code, 409)
+        self.assertEqual(refused.data['error']['code'], 'documents_rejected')
+        self.assertIn(doc.document_type, refused.data['error']['details']['documents']['rejected'])
+
+        # Replacing it clears the block.
+        replaced = self.client.post(
+            self.url('documents'), {'document_type': doc.document_type, 'file': self.upload()}, format='multipart'
+        )
+        self.assertEqual(replaced.status_code, 200, replaced.data)
+        self.assertEqual(self.client.post(self.url('submit')).status_code, 200)
 
     def test_failed_request_rolls_back_document_changes(self):
         from unittest.mock import patch
