@@ -1072,7 +1072,12 @@ class ProcessingDashboardView(APIView):
         return sorted(result, key=lambda r: -r["processors"])
 
     def _notifications(self, open_findings, alerts, expiring, inspections):
-        """The handful of items the shell's bell should surface, newest first."""
+        """The handful of items the shell's bell should surface, newest first.
+
+        Each carries what it is about, so the bell can link through to the
+        record rather than being a dead-end summary. The reference is what the
+        register's own screens address a row by, so that is what travels.
+        """
         items = []
         for finding in open_findings.filter(status=NonConformity.Status.EVIDENCE_SUBMITTED)[:3]:
             items.append({
@@ -1081,31 +1086,58 @@ class ProcessingDashboardView(APIView):
                 "body": f"{finding.title} is awaiting review.",
                 "at": finding.updated_at,
                 "kind": "info",
+                "entity": "non_conformity",
+                "entity_id": str(finding.id),
+                "reference": finding.reference,
             })
         for alert in alerts.filter(status=EnvironmentalAlert.Status.OPEN, severity=EnvironmentalAlert.Severity.CRITICAL)[:3]:
             items.append({
                 "id": f"env-{alert.id}",
                 "title": "Critical environmental alert",
-                "body": f"{alert.parameter} at {alert.facility_name or 'a registered facility'} read {alert.reading}.",
+                "body": f"{alert.parameter} at {alert.facility_name or 'a registered facility'} read {alert.reading} against a {alert.threshold} limit.",
                 "at": alert.updated_at,
                 "kind": "error",
+                "entity": "environmental_alert",
+                "entity_id": str(alert.id),
+                "reference": alert.reference,
             })
         for document in expiring[:3]:
             days = document.days_to_expiry
+            # Several processors hold the same certificate, so the company is
+            # what tells two of these apart.
+            holder = (
+                document.processor.name if document.processor_id
+                else (document.application.company if document.application_id else "")
+            )
             items.append({
                 "id": f"doc-{document.id}",
-                "title": "Document expiring",
-                "body": f"{document.name} {'expired' if days is not None and days < 0 else 'expires'} on {document.expires_on:%d %b %Y}.",
+                "title": f"{document.name} {'expired' if days is not None and days < 0 else 'expiring'}",
+                "body": (
+                    f"{holder + ': ' if holder else ''}"
+                    f"{'expired' if days is not None and days < 0 else 'expires'} on {document.expires_on:%d %b %Y}."
+                ),
                 "at": document.updated_at,
                 "kind": "warn",
+                "entity": "document",
+                "entity_id": str(document.id),
+                # A document is read inside the application that supplied it.
+                "reference": document.application.reference if document.application_id else "",
             })
         for inspection in inspections.filter(status=Inspection.Status.SCHEDULED)[:2]:
             items.append({
                 "id": f"ins-{inspection.id}",
                 "title": "Inspection scheduled",
-                "body": f"{inspection.reference} at {inspection.facility_name or 'a registered facility'}.",
+                "body": (
+                    f"{inspection.get_inspection_type_display()} at "
+                    f"{inspection.facility_name or 'a registered facility'}"
+                    + (f" on {inspection.scheduled_for:%d %b %Y}" if inspection.scheduled_for else "")
+                    + "."
+                ),
                 "at": inspection.updated_at,
                 "kind": "info",
+                "entity": "inspection",
+                "entity_id": str(inspection.id),
+                "reference": inspection.reference,
             })
         return sorted(items, key=lambda item: item["at"], reverse=True)[:8]
 

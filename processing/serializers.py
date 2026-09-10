@@ -700,6 +700,12 @@ class NotificationSerializer(serializers.Serializer):
     body = serializers.CharField()
     at = serializers.DateTimeField()
     kind = serializers.ChoiceField(choices=["info", "warn", "error"])
+    # What the item is about, so the bell can link through to the record.
+    entity = serializers.ChoiceField(
+        choices=["non_conformity", "environmental_alert", "document", "inspection"]
+    )
+    entity_id = serializers.CharField()
+    reference = serializers.CharField(allow_blank=True)
 
 
 class DashboardTotalsSerializer(serializers.Serializer):
