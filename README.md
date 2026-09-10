@@ -25,6 +25,7 @@ The first domain slice includes:
 - Full compliance onboarding sections, personnel, declarations, and a 15-item document checklist
 - S3-compatible uploads, requested-document review, applicant messaging, and dashboard aggregates
 - Processing Compliance register: processors, facilities, ten-section applications, findings, inspections, environmental alerts, incidents and batch traceability
+- Logistics Compliance register: logistics companies, depots, fleet, drivers, nine-domain applications, evidence review, information requests, restrictions, alerts, notifications and CSV reports
 
 ## Local setup
 
@@ -60,6 +61,13 @@ open empty:
 
 ```bash
 python manage.py seed_processing --flush
+```
+
+The Logistics Compliance backend has its own demo register with company, reviewer and
+regulator users, applications, fleet, driver, evidence, restriction, alert and report data:
+
+```bash
+python manage.py seed_logistics --flush
 ```
 
 ## API entry points
@@ -150,6 +158,48 @@ python manage.py seed_processing --flush
 | POST | `/api/v1/processing/reports/generate/` | Compile a report from the register |
 | GET | `/api/v1/processing/reports/{id}/download/` | Download a stored report PDF |
 | GET | `/api/v1/processing/audit/` | The processing audit trail |
+| GET | `/api/v1/logistics/me/` | Read the caller's logistics companies and capabilities |
+| GET | `/api/v1/logistics/dashboard/` | Portfolio/company progress, fleet, driver, request, expiry, alert and restriction metrics |
+| GET | `/api/v1/logistics/risk/` | Logistics application risk scores and domain statuses |
+| GET | `/api/v1/logistics/audit/` | Logistics audit trail visible to the caller |
+| GET/POST | `/api/v1/logistics/companies/` | List or register logistics companies |
+| GET/PATCH | `/api/v1/logistics/companies/{id}/` | Read or update a logistics company profile |
+| GET/POST | `/api/v1/logistics/locations/` | List or create operating depots/locations |
+| GET/PATCH | `/api/v1/logistics/locations/{id}/` | Read or update an operating location |
+| GET/POST | `/api/v1/logistics/vehicles/` | List or create fleet records |
+| GET/PATCH | `/api/v1/logistics/vehicles/{id}/` | Read or update a vehicle |
+| GET/POST | `/api/v1/logistics/drivers/` | List or create driver records with protected identity fields |
+| GET/PATCH | `/api/v1/logistics/drivers/{id}/` | Read or update a driver |
+| GET/POST | `/api/v1/logistics/applications/` | List or create logistics compliance applications |
+| GET | `/api/v1/logistics/applications/{id}/` | Read application progress, risk, sections and conditions |
+| PATCH | `/api/v1/logistics/applications/{id}/sections/{key}/` | Applicant saves one logistics domain section |
+| POST | `/api/v1/logistics/applications/{id}/submit/` | Submit a complete logistics application |
+| POST | `/api/v1/logistics/applications/{id}/assign-reviewer/` | Assign an eligible logistics reviewer |
+| POST | `/api/v1/logistics/applications/{id}/start-review/` | Move a submitted application into review |
+| POST | `/api/v1/logistics/applications/{id}/sections/{key}/review/` | Review one logistics domain |
+| GET/POST | `/api/v1/logistics/applications/{id}/documents/` | List or upload versioned logistics evidence |
+| GET/POST | `/api/v1/logistics/applications/{id}/requests/` | List or raise information requests |
+| GET/POST | `/api/v1/logistics/applications/{id}/conditions/` | List or add approval conditions |
+| POST | `/api/v1/logistics/applications/{id}/decide/` | Approve, conditionally approve or reject an application |
+| GET | `/api/v1/logistics/applications/{id}/activity/` | Read case activity |
+| GET | `/api/v1/logistics/documents/` | List visible logistics evidence |
+| GET | `/api/v1/logistics/documents/expiring/` | Current logistics evidence expiring within 30 days |
+| GET | `/api/v1/logistics/documents/{id}/download/` | Download private logistics evidence |
+| POST | `/api/v1/logistics/documents/{id}/review/` | Verify or reject logistics evidence |
+| GET/POST | `/api/v1/logistics/documents/{id}/notes/` | List or add document notes |
+| GET | `/api/v1/logistics/requests/` | List visible information requests |
+| POST | `/api/v1/logistics/requests/{id}/responses/` | Respond to an information request with evidence |
+| POST | `/api/v1/logistics/requests/{id}/review-response/` | Accept or reopen an information response |
+| GET | `/api/v1/logistics/conditions/` | List approval conditions |
+| POST | `/api/v1/logistics/conditions/{id}/evidence/` | Upload evidence directly against an approval condition |
+| POST | `/api/v1/logistics/conditions/{id}/review/` | Clear a condition after verified evidence |
+| GET/POST | `/api/v1/logistics/restrictions/` | List or apply service-scope restrictions |
+| POST | `/api/v1/logistics/restrictions/{id}/resolve/` | Resolve a logistics restriction |
+| GET | `/api/v1/logistics/notifications/` | List current user's logistics notifications |
+| POST | `/api/v1/logistics/notifications/{id}/mark-read/` | Mark one notification read |
+| GET | `/api/v1/logistics/alerts/` | List logistics monitoring events |
+| GET/POST | `/api/v1/logistics/reports/` | List or generate logistics CSV reports |
+| GET | `/api/v1/logistics/reports/{id}/download/` | Download a generated logistics report |
 | GET | `/api/docs/` | Swagger UI |
 
 Registration, verification, resend, and token issuance are public endpoints. All other endpoints require a bearer access token.
@@ -162,7 +212,7 @@ The onboarding section identifiers are `organisation`, `representative`, `servic
 
 ## File storage and external identity
 
-Uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Local development stores files under `media/`, which is deliberately not routed: uploads are private, so they are read only through the authenticated download endpoints above, which apply the same membership check as the rest of the application. With an S3-compatible backend those endpoints redirect to a signed URL instead of streaming the file. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
+Compliance uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Logistics evidence accepts PDF, Word, JPEG, PNG, XLSX and ZIP files up to 20 MB. Local development stores files under `media/`, which is deliberately not routed: uploads are private, so they are read only through the authenticated download endpoints above, which apply the same membership check as the rest of the application. With an S3-compatible backend those endpoints redirect to a signed URL instead of streaming the file. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
 
 Phone OTP delivery uses `SMS_WEBHOOK_URL` and `SMS_WEBHOOK_TOKEN`. Google requires `GOOGLE_OAUTH_CLIENT_ID`; Microsoft requires `MICROSOFT_OAUTH_CLIENT_ID` and `MICROSOFT_OAUTH_TENANT_ID`. Provider tokens are validated server-side. Existing password accounts must authenticate before linking a social identity; an email match never silently links an account.
 
