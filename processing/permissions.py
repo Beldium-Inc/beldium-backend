@@ -37,13 +37,28 @@ APPLICANT_ROLES = {
     MembershipRole.MINING_COMPLIANCE_OFFICER,
 }
 
+# Types whose membership grants desk or oversight power. That power must wait
+# for the platform to have actually verified the organisation is what it
+# claims: organisation_type is a field the applicant fills in themselves, so
+# an unverified claim of one of these types is worth nothing.
+PRIVILEGED_TYPES = {
+    OrganisationType.COMPLIANCE_PARTNER,
+    OrganisationType.INSPECTION_BODY,
+    OrganisationType.REGULATOR,
+}
+
 
 def _memberships(user):
     if not hasattr(user, "_processing_memberships"):
         user._processing_memberships = list(
             OrganisationMembership.objects.filter(user=user, is_active=True)
             .select_related("organisation")
-            .only("role", "organisation__id", "organisation__organisation_type")
+            .only(
+                "role",
+                "organisation__id",
+                "organisation__organisation_type",
+                "organisation__verification_status",
+            )
         )
     return user._processing_memberships
 
@@ -60,12 +75,22 @@ def audience(user):
 
     Staff are operators. An operator membership outranks a regulator one so a
     person seconded to the desk keeps their review powers.
+
+    A membership in a compliance-partner, inspection-body or regulator
+    organisation only counts once that organisation is verified: the type is
+    self-declared at signup, so an unverified claim of it must not itself
+    unlock desk or oversight access.
     """
     if not user.is_authenticated:
         return None
     if user.is_staff or user.is_superuser:
         return OPERATOR
-    types = {m.organisation.organisation_type for m in _memberships(user)}
+    types = {
+        m.organisation.organisation_type
+        for m in _memberships(user)
+        if m.organisation.organisation_type not in PRIVILEGED_TYPES
+        or m.organisation.verification_status == "verified"
+    }
     if OrganisationType.COMPLIANCE_PARTNER in types or OrganisationType.INSPECTION_BODY in types:
         return OPERATOR
     if OrganisationType.REGULATOR in types:

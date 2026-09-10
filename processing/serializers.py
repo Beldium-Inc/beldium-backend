@@ -255,6 +255,16 @@ class ProcessingApplicationSerializer(serializers.ModelSerializer):
     def get_open_non_conformities(self, obj) -> int:
         return sum(1 for nc in obj.non_conformities.all() if nc.status != NonConformity.Status.CLOSED)
 
+    def validate_organisation(self, value):
+        if self.instance and value != self.instance.organisation:
+            raise serializers.ValidationError("An application's organisation cannot be changed.")
+        return value
+
+    def validate_processor(self, value):
+        if self.instance and value != self.instance.processor:
+            raise serializers.ValidationError("An application's processor cannot be changed.")
+        return value
+
 
 class ProcessingApplicationDetailSerializer(ProcessingApplicationSerializer):
     sections = ApplicationSectionSerializer(many=True, read_only=True)
@@ -540,7 +550,10 @@ class IncidentSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "reference", "company", "closed_at", "created_at", "updated_at"]
+        # status starts at its model default and only the desk may move it
+        # (see IncidentViewSet.perform_update) — a reporter naming a status at
+        # creation could file an incident that is already "closed".
+        read_only_fields = ["id", "reference", "company", "status", "closed_at", "created_at", "updated_at"]
 
     def get_company(self, obj) -> str:
         return obj.processor.name if obj.processor_id else ""
@@ -579,6 +592,11 @@ class TraceabilityRunSerializer(serializers.ModelSerializer):
 
     def get_company(self, obj) -> str:
         return obj.processor.name if obj.processor_id else ""
+
+    def validate_processor(self, value):
+        if self.instance and value != self.instance.processor:
+            raise serializers.ValidationError("A run cannot be moved to a different processor.")
+        return value
 
     def validate(self, attrs):
         instance = self.instance

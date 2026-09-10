@@ -309,6 +309,11 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
     def perform_update(self, serializer):
         self.assert_editor(serializer.instance)
         self.assert_editable(serializer.instance)
+        # organisation/processor are writable fields on the serializer for the
+        # first-time-applicant case in perform_create; on an existing
+        # application the same check keeps an editor from reassigning their
+        # submission onto someone else's organisation or processor record.
+        self._assert_owns_subject(serializer.validated_data)
         application = serializer.save()
         self.record("application_updated", target=application.reference, detail="Applicant updated the submission header.", application_id=str(application.id))
 
@@ -771,6 +776,22 @@ class TraceabilityRunViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet):
         run = serializer.save()
         self.record("run_recorded", target=run.reference, detail=f"{run.input_batch} → {run.output_batch} at {run.yield_percent}% yield.", run_id=str(run.id))
 
+    # Fields whose change is an amendment to a recorded run, not routine data
+    # entry: once a run has been logged, only the desk may correct the record.
+    AMENDMENT_FIELDS = {"input_mass_kg", "output_mass_kg", "qc_assay", "qc_moisture", "qc_verdict", "qc_lab"}
+
+    def perform_update(self, serializer):
+        changing = set(serializer.validated_data) & self.AMENDMENT_FIELDS
+        if changing and not can_decide(self.request.user):
+            raise PermissionDenied("Only the compliance operator desk can amend a recorded run.")
+        run = serializer.save()
+        self.record(
+            "run_amended",
+            target=run.reference,
+            detail=f"Amended {', '.join(sorted(changing))}." if changing else "Updated.",
+            run_id=str(run.id),
+        )
+
 
 class ProcessingDocumentViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelViewSet):
     """Read, review and download evidence; uploads go through the application."""
@@ -842,12 +863,22 @@ class ComplianceReportViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelView
     """Published oversight reports, and the endpoint that compiles new ones."""
 
     serializer_class = ComplianceReportSerializer
-    queryset = ComplianceReport.objects.all()
+    queryset = ComplianceReport.objects.none()
     permission_classes = [IsProcessingParticipant]
     filterset_fields = ["scope", "kind"]
     search_fields = ["title", "reference", "period_label"]
     ordering_fields = ["generated_on", "title"]
     ordering = ["-generated_on", "-created_at"]
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return self.queryset
+        # A report spans companies, so a single processor must not be able to
+        # list or download what the desk and regulators compiled about the
+        # whole register.
+        if not self.sees_whole_register():
+            return ComplianceReport.objects.none()
+        return ComplianceReport.objects.all()
 
     @extend_schema(
         request=ReportRequestSerializer,
