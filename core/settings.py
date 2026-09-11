@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     "processing",
     "logistics",
     "mining",
+    "marketplace",
 ]
 
 MIDDLEWARE = [
@@ -204,7 +205,11 @@ SPECTACULAR_SETTINGS = {
             ("attention", "Attention"),
             ("failed", "Failed"),
         ],
-        "LogisticsDocumentStatus": "logistics.models.EvidenceStatus.choices",
+        "EvidenceStatus": [
+            ("pending", "Pending review"),
+            ("verified", "Verified"),
+            ("rejected", "Rejected"),
+        ],
         "LogisticsInformationRequestStatus": [
             ("open", "Open"),
             ("responded", "Responded"),
@@ -215,6 +220,11 @@ SPECTACULAR_SETTINGS = {
             ("conditionally_approved", "Conditionally approved"),
             ("rejected", "Rejected"),
         ],
+        "MarketplaceSellerStatus": "marketplace.models.SellerStatus.choices",
+        "MarketplaceListingStatus": "marketplace.models.ListingStatus.choices",
+        "MarketplaceProductCategory": "marketplace.models.ProductCategory.choices",
+        "MarketplaceOrderStatus": "marketplace.models.OrderStatus.choices",
+        "MarketplacePaymentStatus": "marketplace.models.PaymentStatus.choices",
     },
     "TITLE": "Beldium Mining Compliance API",
     "DESCRIPTION": "API for mining organisations, compliance partners, and regulators.",
