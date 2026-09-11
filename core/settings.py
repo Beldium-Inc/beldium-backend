@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     "compliance",
     "processing",
     "logistics",
+    "mining",
 ]
 
 MIDDLEWARE = [
@@ -120,6 +121,18 @@ CELERY_TASK_EAGER_PROPAGATES = str(
     config("CELERY_TASK_EAGER_PROPAGATES", default="false")
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+# Throttle counters live in the cache, so a per-process cache means each gunicorn
+# worker enforces its own private allowance and every limit below is effectively
+# multiplied by the worker count. Anything that rate-limits needs a shared cache.
+CACHE_URL = config("CACHE_URL", default=CELERY_BROKER_URL if ENVIRONMENT == "production" else "")
+if CACHE_URL:
+    CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": CACHE_URL}}
+else:
+    CACHES = {"default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "beldium-local",
+    }}
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework_simplejwt.authentication.JWTAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
@@ -131,11 +144,20 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PAGINATION_CLASS": "common.pagination.DefaultPagination",
     "EXCEPTION_HANDLER": "common.exception_handler.custom_exception_handler",
+    # How many proxies run in front of this service. Every throttle and every
+    # audit record derives the caller's address from this: leave it at 0 when
+    # nothing proxies us, and set it to the real hop count behind a load
+    # balancer. It must never be unset, or X-Forwarded-For is taken on trust.
+    "NUM_PROXIES": config("NUM_PROXIES", default=0, cast=int),
     "DEFAULT_THROTTLE_RATES": {
         "verification_issue": "5/10m",
         "verification_attempt": "10/10m",
         "registration": "10/1h",
         "social_auth": "20/10m",
+        "login": "10/15m",
+        "login_email": "20/1h",
+        "token_refresh": "120/1h",
+        "sensitive_action": "10/1h",
     },
     "PAGE_SIZE": 20,
 }

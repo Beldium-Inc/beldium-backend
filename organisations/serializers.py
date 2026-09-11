@@ -42,6 +42,18 @@ class OrganisationSerializer(serializers.ModelSerializer):
         membership = obj.memberships.filter(user=request.user, is_active=True).only("role").first()
         return membership.role if membership else None
 
+    def validate_organisation_type(self, value):
+        # organisation_type drives desk/oversight access elsewhere (see
+        # processing.permissions.audience); once set, only the platform may
+        # change it, never the organisation's own administrators.
+        request = self.context.get("request")
+        is_staff = bool(request and request.user.is_authenticated and request.user.is_staff)
+        if self.instance and value != self.instance.organisation_type and not is_staff:
+            raise serializers.ValidationError(
+                "An organisation's type can only be changed by the platform."
+            )
+        return value
+
     @transaction.atomic
     def create(self, validated_data):
         organisation = super().create(validated_data)

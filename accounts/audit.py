@@ -1,9 +1,9 @@
 from accounts.models import AccountAuditEvent
+from common.ip import client_ip
 
 
 def request_ip(request):
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    return forwarded.split(",")[0].strip() if forwarded else request.META.get("REMOTE_ADDR")
+    return client_ip(request)
 
 
 def record_account_event(request, event_type, *, actor=None, **metadata):
