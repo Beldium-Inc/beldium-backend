@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     "compliance",
     "processing",
     "logistics",
+    "mining",
 ]
 
 MIDDLEWARE = [

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.core.validators import FileExtensionValidator, MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from common.models import TimeStampedModel
@@ -27,8 +27,27 @@ from common.models import TimeStampedModel
 EXPIRY_WARNING_DAYS = 60
 
 
-def _reference(prefix, width=4):
+def _reference(prefix, width=8):
     return f"{prefix}-{timezone.now().year}-{secrets.token_hex(width // 2).upper()}"
+
+
+# Widening the random component (above) makes collisions rare, but a unique
+# constraint fed by a random default always has a nonzero collision rate, so
+# creation must also tolerate and recover from a collision rather than trust
+# the random space alone.
+def _save_with_unique_reference(instance, generate, super_save, args, kwargs, max_attempts=10):
+    if instance.reference:
+        return super_save(*args, **kwargs)
+    last_error = None
+    for _ in range(max_attempts):
+        instance.reference = generate()
+        try:
+            with transaction.atomic():
+                return super_save(*args, **kwargs)
+        except IntegrityError as exc:
+            last_error = exc
+            continue
+    raise last_error
 
 
 def generate_processor_reference():
@@ -146,9 +165,7 @@ class Processor(TimeStampedModel):
         ordering = ["name"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_processor_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_processor_reference, super().save, args, kwargs)
 
     def __str__(self):
         return self.name
@@ -231,9 +248,7 @@ class ProcessingApplication(TimeStampedModel):
         ordering = ["-submitted_on", "-created_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_application_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_application_reference, super().save, args, kwargs)
 
     def __str__(self):
         return f"{self.reference} - {self.company}"
@@ -422,9 +437,7 @@ class NonConformity(TimeStampedModel):
         ordering = ["-raised_on", "-created_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_non_conformity_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_non_conformity_reference, super().save, args, kwargs)
 
     @property
     def is_overdue(self):
@@ -517,9 +530,7 @@ class Inspection(TimeStampedModel):
         ordering = ["-scheduled_for", "-created_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_inspection_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_inspection_reference, super().save, args, kwargs)
 
     def __str__(self):
         return self.reference
@@ -567,9 +578,7 @@ class EnvironmentalAlert(TimeStampedModel):
         ordering = ["-detected_on", "-created_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_alert_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_alert_reference, super().save, args, kwargs)
 
     def __str__(self):
         return f"{self.reference} - {self.parameter}"
@@ -616,9 +625,7 @@ class Incident(TimeStampedModel):
         ordering = ["-reported_on", "-created_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_incident_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_incident_reference, super().save, args, kwargs)
 
     def __str__(self):
         return f"{self.reference} - {self.incident_type}"
@@ -661,9 +668,7 @@ class TraceabilityRun(TimeStampedModel):
         ordering = ["-started_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_run_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_run_reference, super().save, args, kwargs)
 
     @property
     def yield_percent(self):
@@ -709,9 +714,7 @@ class ComplianceReport(TimeStampedModel):
         ordering = ["-generated_on", "-created_at"]
 
     def save(self, *args, **kwargs):
-        if not self.reference:
-            self.reference = generate_report_reference()
-        return super().save(*args, **kwargs)
+        return _save_with_unique_reference(self, generate_report_reference, super().save, args, kwargs)
 
     def __str__(self):
         return self.title
