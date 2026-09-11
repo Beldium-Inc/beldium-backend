@@ -5,7 +5,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from accounts.models import AccountAuditEvent, SocialIdentity, User
 from accounts.serializers import (
@@ -37,8 +38,12 @@ from accounts.services import (
     verify_phone_code,
 )
 from accounts.throttles import (
+    LoginEmailThrottle,
+    LoginThrottle,
     RegistrationThrottle,
+    SensitiveActionThrottle,
     SocialAuthThrottle,
+    TokenRefreshThrottle,
     VerificationAttemptThrottle,
     VerificationIssueThrottle,
 )
@@ -73,6 +78,11 @@ class CurrentUserView(generics.RetrieveUpdateAPIView):
 
 class VerifiedTokenObtainPairView(TokenObtainPairView):
     serializer_class = VerifiedTokenObtainPairSerializer
+    # Password guessing is bounded by nothing else: there is no lockout, and
+    # the per-code budgets in accounts.services cover OTPs rather than
+    # passwords. The pair covers one caller grinding an account and a pool of
+    # callers grinding the same one.
+    throttle_classes = [LoginThrottle, LoginEmailThrottle]
 
     def post(self, request, *args, **kwargs):
         user = User.objects.filter(email__iexact=request.data.get("email", "")).first()
@@ -85,6 +95,12 @@ class VerifiedTokenObtainPairView(TokenObtainPairView):
         return response
 
 
+class ThrottledTokenRefreshView(TokenRefreshView):
+    """Refresh mints access tokens, so it needs a ceiling like any other credential endpoint."""
+
+    throttle_classes = [TokenRefreshThrottle]
+
+
 class ResendVerificationView(generics.GenericAPIView):
     serializer_class = EmailSerializer
     permission_classes = [AllowAny]
@@ -94,7 +110,7 @@ class ResendVerificationView(generics.GenericAPIView):
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = User.objects.filter(email__iexact=serializer.validated_data["email"]).first()
+        user = User.objects.filter(email__iexact=serializer.validated_data["email"], is_active=True).first()
         if user and not user.email_verified_at:
             issue_email_verification(user)
         return Response({
@@ -158,6 +174,9 @@ class PasswordResetConfirmView(generics.GenericAPIView):
 
 class ChangePasswordView(generics.GenericAPIView):
     serializer_class = ChangePasswordSerializer
+    # This endpoint checks current_password, so it is a password oracle for a
+    # stolen access token and needs the same ceiling as signing in.
+    throttle_classes = [SensitiveActionThrottle]
 
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
@@ -197,7 +216,16 @@ class ChangeEmailConfirmView(generics.GenericAPIView):
             serializer.validated_data["code"],
         )
         record_account_event(request, "account.email_changed", previous_email=old_email)
-        return Response({"message": "Email address changed successfully.", "email": user.email})
+        # confirm_email_change revokes every refresh token, because the account
+        # just changed the identity that recovers it. Reissue here so the
+        # caller who did the change stays signed in.
+        refresh = RefreshToken.for_user(user)
+        return Response({
+            "message": "Email address changed successfully.",
+            "email": user.email,
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+        })
 
 
 class LogoutView(generics.GenericAPIView):
@@ -207,9 +235,16 @@ class LogoutView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            RefreshToken(serializer.validated_data["refresh"]).blacklist()
+            token = RefreshToken(serializer.validated_data["refresh"])
         except TokenError as exc:
             raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token") from exc
+        # Without this check the endpoint revokes any well-formed token that is
+        # presented to it, which turns a leaked refresh token into a way to end
+        # somebody else's session. Same error either way: whether a token is
+        # valid-but-another-account's is not the caller's business.
+        if str(token.get(api_settings.USER_ID_CLAIM)) != str(request.user.pk):
+            raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token")
+        token.blacklist()
         record_account_event(request, "account.logged_out")
         return Response(status=status.HTTP_204_NO_CONTENT)
 

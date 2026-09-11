@@ -1,10 +1,15 @@
 import hashlib
 
-from rest_framework.throttling import SimpleRateThrottle
+from rest_framework.throttling import SimpleRateThrottle, UserRateThrottle
 
 
-class EmailOrIPRateThrottle(SimpleRateThrottle):
-    """Rate limit by normalized email and IP without putting email addresses in cache keys."""
+class MultiUnitRateMixin:
+    """Accepts a multiplier in the period, e.g. "5/10m", which DRF's parser rejects.
+
+    DRF reads only the first character of the period, so "10m" would resolve as
+    "1"; every throttle in this module therefore has to share this parser rather
+    than inherit the stock one.
+    """
 
     def parse_rate(self, rate):
         if rate is None:
@@ -14,6 +19,10 @@ class EmailOrIPRateThrottle(SimpleRateThrottle):
         digits = "".join(character for character in period if character.isdigit())
         unit = period[len(digits):].lower()
         return int(number), int(digits or "1") * units[unit]
+
+
+class EmailOrIPRateThrottle(MultiUnitRateMixin, SimpleRateThrottle):
+    """Rate limit by normalized email and IP without putting email addresses in cache keys."""
 
     def get_cache_key(self, request, view):
         email = str(request.data.get("email", "")).strip().lower()
@@ -43,9 +52,43 @@ class IPRateThrottle(EmailOrIPRateThrottle):
         return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
 
 
+class EmailRateThrottle(EmailOrIPRateThrottle):
+    """Keyed on the submitted email alone, so one account has a global budget.
+
+    The IP-scoped buckets above are per-caller, which is the wrong shape for
+    credential stuffing: a pool of hosts each stays under its own limit while
+    the account under attack absorbs the sum of them.
+    """
+
+    def get_cache_key(self, request, view):
+        email = str(request.data.get("email", "")).strip().lower()
+        if not email:
+            return None
+        digest = hashlib.sha256(email.encode()).hexdigest()
+        return self.cache_format % {"scope": self.scope, "ident": digest}
+
+
 class RegistrationThrottle(IPRateThrottle):
     scope = "registration"
 
 
 class SocialAuthThrottle(IPRateThrottle):
     scope = "social_auth"
+
+
+class LoginThrottle(EmailOrIPRateThrottle):
+    scope = "login"
+
+
+class LoginEmailThrottle(EmailRateThrottle):
+    scope = "login_email"
+
+
+class TokenRefreshThrottle(IPRateThrottle):
+    scope = "token_refresh"
+
+
+class SensitiveActionThrottle(MultiUnitRateMixin, UserRateThrottle):
+    """For authenticated endpoints that guess or change a credential."""
+
+    scope = "sensitive_action"

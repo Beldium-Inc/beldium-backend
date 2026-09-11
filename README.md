@@ -170,6 +170,17 @@ Phone OTP delivery uses `SMS_WEBHOOK_URL` and `SMS_WEBHOOK_TOKEN`. Google requir
 
 New accounts must verify their email before using the token endpoint. Registration sends a six-digit code that expires after 10 minutes. A code is single-use, is invalidated after five failed attempts, and requesting another code invalidates earlier codes. Resend requests are limited to five per email/IP pair every 10 minutes.
 
+### Rate limiting and abuse budgets
+
+Two settings decide whether any of the limits below actually hold, and both must be set per environment:
+
+- `NUM_PROXIES` is the number of proxies in front of the service. It is `0` by default, which means the peer address is used and `X-Forwarded-For` is ignored. Behind one load balancer, set it to `1`. If it is set too high, a caller can name their own address, which forges the `ip_address` on every audit event and hands every IP-keyed throttle an unlimited supply of fresh buckets.
+- `CACHE_URL` points the default cache at shared Redis. Throttle counters live in that cache, so a per-process cache means each worker enforces its own private allowance. Production defaults this to `REDIS_URL`; `manage.py check` raises `beldium.E002` if a production instance is still on the local-memory cache.
+
+Signing in is limited to 10 attempts per email/IP pair every 15 minutes and 20 per email every hour, the second of which bounds a distributed attack on one account. Token refresh is capped per address, and password change — which verifies the current password and is therefore a password oracle for a stolen access token — is capped per user.
+
+Beyond the five-attempt cap on an individual code, each account has a per-hour budget that a new code does not reset: at most 5 codes issued and 10 failed attempts per hour, counted in the database per user and per purpose. Without it, the per-code cap bounds nothing, since requesting a fresh code buys five more guesses and a six-digit code falls in a few hundred requests. Exhausting the budget on an authenticated flow returns `verification_budget_exceeded`; on password reset and email verification it returns the ordinary `invalid_verification_code`, so that an account under attack stays indistinguishable from an unknown address.
+
 User and verification-code creation run in one database transaction. If either database write fails, neither record is retained. Email dispatch starts only after that transaction commits and provider failures are logged without reversing a successfully created account.
 
 For local development, `EMAIL_BACKEND` defaults to Django's console backend, so verification emails and codes are printed in the API terminal. In a deployed environment, set `EMAIL_BACKEND=sendgrid_backend.SendgridBackend`, configure a valid `SENDGRID_API_KEY`, set `CELERY_TASK_ALWAYS_EAGER=False`, and start a worker:

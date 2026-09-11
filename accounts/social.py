@@ -34,10 +34,16 @@ def verify_microsoft_token(token):
         claims = jwt.decode(token, key.key, algorithms=["RS256"], audience=settings.MICROSOFT_OAUTH_CLIENT_ID, issuer=issuer)
     except Exception as exc:
         raise AppError("Invalid Microsoft identity token.", code="invalid_social_token", status_code=401) from exc
-    email = claims.get("email") or claims.get("preferred_username")
+    # preferred_username is a display hint, not a proven address — on personal
+    # accounts the user sets it. The caller marks whatever comes back here as a
+    # verified email, so only the email claim will do, and xms_edov (set when
+    # the tenant has proven it owns the domain) must not contradict it.
+    email = claims.get("email")
     subject = claims.get("oid") or claims.get("sub")
     if not email or not subject:
         raise AppError("Microsoft did not provide the required identity claims.", code="social_identity_incomplete", status_code=400)
+    if claims.get("xms_edov") is False:
+        raise AppError("Microsoft has not verified this email address.", code="social_email_not_verified", status_code=403)
     return {"subject": subject, "email": email, "name": claims.get("name", "")}
 
 

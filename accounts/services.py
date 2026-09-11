@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from django.contrib.auth.hashers import check_password, make_password
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone
 
 from accounts.models import AccountRecoveryCode, EmailVerificationCode, PhoneVerificationCode, User
@@ -11,7 +12,46 @@ from common.exceptions import AppError, ConflictError
 
 OTP_TTL_MINUTES = 10
 OTP_MAX_ATTEMPTS = 5
+
+# max_attempts alone caps guesses per *code*, which caps nothing: issuing a
+# fresh code resets the counter, so a caller who can reach the issue endpoint
+# can buy another OTP_MAX_ATTEMPTS guesses as often as they like and walk the
+# whole six-digit space. These two budgets are what actually bound an attack,
+# and they are counted per user in the database rather than per caller in the
+# cache so that neither rotating the code nor rotating the source address
+# widens them.
+OTP_BUDGET_WINDOW_MINUTES = 60
+OTP_MAX_ISSUES_PER_WINDOW = 5
+OTP_MAX_FAILURES_PER_WINDOW = 10
+
 logger = logging.getLogger(__name__)
+
+
+class VerificationBudgetExceeded(AppError):
+    """Raised where the caller is already authenticated and can safely be told to wait."""
+
+    def __init__(self):
+        super().__init__(
+            "Too many verification attempts. Please wait an hour and try again.",
+            code="verification_budget_exceeded",
+            status_code=429,
+        )
+
+
+def _in_budget_window(queryset):
+    since = timezone.now() - timedelta(minutes=OTP_BUDGET_WINDOW_MINUTES)
+    return queryset.filter(created_at__gte=since)
+
+
+def issue_budget_exhausted(queryset):
+    """True when this user has already been sent the most codes we allow per window."""
+    return _in_budget_window(queryset).count() >= OTP_MAX_ISSUES_PER_WINDOW
+
+
+def attempt_budget_exhausted(queryset):
+    """True when failures across *every* recent code have used up the window's guesses."""
+    total = _in_budget_window(queryset).aggregate(total=Sum("failed_attempts"))["total"] or 0
+    return total >= OTP_MAX_FAILURES_PER_WINDOW
 
 
 def generate_verification_code():
@@ -47,7 +87,15 @@ def enqueue_account_email(task_name, *args):
 
 
 def issue_email_verification(user):
-    """Invalidate previous codes, persist a hash, and enqueue the plaintext code after commit."""
+    """Invalidate previous codes, persist a hash, and enqueue the plaintext code after commit.
+
+    Silently does nothing once the issue budget is spent: this is reachable
+    unauthenticated via the resend endpoint, whose whole point is to answer
+    identically whatever the state of the address.
+    """
+    if issue_budget_exhausted(EmailVerificationCode.objects.filter(user=user)):
+        logger.info("Email verification issue budget exhausted", extra={"user_id": str(user.id)})
+        return
     code = generate_verification_code()
     now = timezone.now()
     with transaction.atomic():
@@ -67,8 +115,10 @@ def issue_email_verification(user):
 def verify_email_code(email, submitted_code):
     verified_user = None
     with transaction.atomic():
-        user = User.objects.select_for_update().filter(email__iexact=email).first()
-        if user and not user.email_verified_at:
+        user = User.objects.select_for_update().filter(email__iexact=email, is_active=True).first()
+        if user and not user.email_verified_at and not attempt_budget_exhausted(
+            EmailVerificationCode.objects.filter(user=user)
+        ):
             verification = EmailVerificationCode.objects.select_for_update().filter(
                 user=user, consumed_at__isnull=True
             ).order_by("-created_at").first()
@@ -104,6 +154,8 @@ def verify_email_code(email, submitted_code):
 
 
 def issue_phone_verification(user, phone_number):
+    if issue_budget_exhausted(PhoneVerificationCode.objects.filter(user=user)):
+        raise VerificationBudgetExceeded()
     code = generate_verification_code()
     now = timezone.now()
     with transaction.atomic():
@@ -116,6 +168,8 @@ def issue_phone_verification(user, phone_number):
 
 
 def verify_phone_code(user, phone_number, submitted_code):
+    if attempt_budget_exhausted(PhoneVerificationCode.objects.filter(user=user)):
+        raise VerificationBudgetExceeded()
     verified = False
     with transaction.atomic():
         verification = PhoneVerificationCode.objects.select_for_update().filter(
@@ -143,6 +197,10 @@ def verify_phone_code(user, phone_number, submitted_code):
     return user
 
 
+def _recovery_codes(user, purpose):
+    return AccountRecoveryCode.objects.filter(user=user, purpose=purpose)
+
+
 def _issue_recovery_code(user, purpose, *, target_email=""):
     code = generate_verification_code()
     now = timezone.now()
@@ -165,6 +223,11 @@ def issue_password_reset(email):
     user = User.objects.filter(email__iexact=email, is_active=True).first()
     if not user:
         return
+    if issue_budget_exhausted(_recovery_codes(user, AccountRecoveryCode.Purpose.PASSWORD_RESET)):
+        # Same silence as an unknown address: this endpoint's contract is that
+        # its response says nothing about the account behind the email.
+        logger.info("Password reset issue budget exhausted", extra={"user_id": str(user.id)})
+        return
     code = _issue_recovery_code(user, AccountRecoveryCode.Purpose.PASSWORD_RESET)
     transaction.on_commit(lambda: enqueue_account_email("send_password_reset_email", str(user.id), code))
 
@@ -173,11 +236,21 @@ def issue_email_change(user, new_email):
     normalized = User.objects.normalize_email(new_email).lower()
     if normalized == user.email.lower() or User.objects.filter(email__iexact=normalized).exclude(pk=user.pk).exists():
         raise ConflictError("That email address cannot be used.", code="email_unavailable")
+    if issue_budget_exhausted(_recovery_codes(user, AccountRecoveryCode.Purpose.EMAIL_CHANGE)):
+        raise VerificationBudgetExceeded()
     code = _issue_recovery_code(user, AccountRecoveryCode.Purpose.EMAIL_CHANGE, target_email=normalized)
     transaction.on_commit(lambda: enqueue_account_email("send_email_change_email", str(user.id), normalized, code))
 
 
-def _consume_recovery_code(user, purpose, submitted_code, *, target_email="", on_success=None):
+def _consume_recovery_code(user, purpose, submitted_code, *, target_email="", on_success=None, budget_error=None):
+    if attempt_budget_exhausted(_recovery_codes(user, purpose)):
+        # Callers that are already authenticated pass a budget_error and get
+        # told to wait. Password reset does not: it falls through to the
+        # ordinary invalid-code error so that an account under attack stays
+        # indistinguishable from an address we have never seen.
+        if budget_error:
+            raise budget_error()
+        raise AppError("Invalid or expired verification code.", code="invalid_verification_code")
     consumed = False
     with transaction.atomic():
         verification = AccountRecoveryCode.objects.select_for_update().filter(
@@ -239,5 +312,7 @@ def confirm_email_change(user, new_email, code):
         code,
         target_email=normalized,
         on_success=update_email,
+        budget_error=VerificationBudgetExceeded,
     )
+    blacklist_user_refresh_tokens(user)
     return user
