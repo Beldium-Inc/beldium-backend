@@ -37,6 +37,7 @@ INSTALLED_APPS = [
     "organisations",
     "compliance",
     "processing",
+    "logistics",
 ]
 
 MIDDLEWARE = [
@@ -178,6 +179,41 @@ SPECTACULAR_SETTINGS = {
         "ProcessingReviewState": "processing.models.ReviewState.choices",
         "ProcessingType": "processing.models.ProcessingType.choices",
         "OrganisationMembershipRole": "organisations.models.MembershipRole.choices",
+        "ComplianceDocumentStatus": [
+            ("requested", "Requested"),
+            ("submitted", "Submitted"),
+            ("verified", "Verified"),
+            ("rejected", "Rejected"),
+        ],
+        "ComplianceConditionStatus": [
+            ("pending", "Pending evidence"),
+            ("submitted", "Evidence submitted"),
+            ("rejected", "Evidence rejected"),
+            ("cleared", "Cleared"),
+        ],
+        "EvidenceReviewStatus": [
+            ("verified", "verified"),
+            ("rejected", "rejected"),
+        ],
+        "LogisticsApplicationStatus": "logistics.models.ApplicationStatus.choices",
+        "LogisticsDomain": "logistics.models.Domain.choices",
+        "LogisticsDomainReviewStatus": [
+            ("pending", "Pending"),
+            ("passed", "Passed"),
+            ("attention", "Attention"),
+            ("failed", "Failed"),
+        ],
+        "LogisticsDocumentStatus": "logistics.models.EvidenceStatus.choices",
+        "LogisticsInformationRequestStatus": [
+            ("open", "Open"),
+            ("responded", "Responded"),
+            ("accepted", "Accepted"),
+        ],
+        "LogisticsReviewDecisionStatus": [
+            ("approved", "Approved"),
+            ("conditionally_approved", "Conditionally approved"),
+            ("rejected", "Rejected"),
+        ],
     },
     "TITLE": "Beldium Mining Compliance API",
     "DESCRIPTION": "API for mining organisations, compliance partners, and regulators.",
@@ -199,3 +235,11 @@ if config("AWS_STORAGE_BUCKET_NAME", default=""):
         "default": {"BACKEND": "storages.backends.s3.S3Storage"},
         "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
     }
+
+# Run Celery beat alongside the worker for continuous logistics monitoring.
+CELERY_BEAT_SCHEDULE = {
+    "logistics-credential-expiry": {
+        "task": "logistics.tasks.check_expiring_credentials",
+        "schedule": 3600.0,
+    },
+}
