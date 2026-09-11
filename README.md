@@ -26,6 +26,7 @@ The first domain slice includes:
 - S3-compatible uploads, requested-document review, applicant messaging, and dashboard aggregates
 - Processing Compliance register: processors, facilities, ten-section applications, findings, inspections, environmental alerts, incidents and batch traceability
 - Logistics Compliance register: logistics companies, depots, fleet, drivers, nine-domain applications, evidence review, information requests, restrictions, alerts, notifications and CSV reports
+- Marketplace Compliance register: seller onboarding, compliant listings, evidence review, orders, payment webhook capture, licenses, disputes, notifications, audit history and CSV reports
 
 ## Local setup
 
@@ -68,6 +69,13 @@ regulator users, applications, fleet, driver, evidence, restriction, alert and r
 
 ```bash
 python manage.py seed_logistics --flush
+```
+
+The Marketplace Compliance backend can also be seeded with sellers, listings, evidence,
+orders, a dispute and reports:
+
+```bash
+python manage.py seed_marketplace --flush
 ```
 
 ## API entry points
@@ -200,6 +208,34 @@ python manage.py seed_logistics --flush
 | GET | `/api/v1/logistics/alerts/` | List logistics monitoring events |
 | GET/POST | `/api/v1/logistics/reports/` | List or generate logistics CSV reports |
 | GET | `/api/v1/logistics/reports/{id}/download/` | Download a generated logistics report |
+| GET | `/api/v1/marketplace/me/` | Read the caller's marketplace sellers and capabilities |
+| GET | `/api/v1/marketplace/dashboard/` | Seller, listing, order, dispute, review and notification metrics |
+| GET | `/api/v1/marketplace/risk/` | Marketplace listing risk scores and bands |
+| GET/POST | `/api/v1/marketplace/sellers/` | List or create seller profiles |
+| GET/PATCH | `/api/v1/marketplace/sellers/{id}/` | Read or update a seller profile |
+| POST | `/api/v1/marketplace/sellers/{id}/submit/` | Submit a seller profile for marketplace review |
+| POST | `/api/v1/marketplace/sellers/{id}/decide/` | Verify, restrict, suspend or reject a seller |
+| GET/POST | `/api/v1/marketplace/products/` | List or create marketplace listings |
+| GET/PATCH | `/api/v1/marketplace/products/{id}/` | Read or update a marketplace listing |
+| POST | `/api/v1/marketplace/products/{id}/submit/` | Submit a complete listing for review |
+| POST | `/api/v1/marketplace/products/{id}/review/` | Activate, restrict, suspend or request listing changes |
+| GET/POST | `/api/v1/marketplace/products/{id}/documents/` | List or upload listing evidence |
+| POST | `/api/v1/marketplace/products/{id}/checks/{key}/` | Review one listing compliance check |
+| GET | `/api/v1/marketplace/documents/` | List visible marketplace evidence |
+| GET | `/api/v1/marketplace/documents/expiring/` | Marketplace evidence expiring within 30 days |
+| GET | `/api/v1/marketplace/documents/{id}/download/` | Download private marketplace evidence |
+| POST | `/api/v1/marketplace/documents/{id}/review/` | Verify or reject listing evidence |
+| GET/POST | `/api/v1/marketplace/orders/` | List visible orders or place an order for an active listing |
+| POST | `/api/v1/marketplace/orders/{id}/fulfill/` | Seller records fulfillment/shipping |
+| POST | `/api/v1/marketplace/payments/receive/` | Idempotently process a payment webhook payload |
+| GET/POST | `/api/v1/marketplace/licenses/` | List or add seller/product licences |
+| GET/POST | `/api/v1/marketplace/disputes/` | List or raise order disputes |
+| POST | `/api/v1/marketplace/disputes/{id}/resolve/` | Reviewer resolves a marketplace dispute |
+| GET | `/api/v1/marketplace/notifications/` | List current user's marketplace notifications |
+| POST | `/api/v1/marketplace/notifications/{id}/mark-read/` | Mark one marketplace notification read |
+| GET | `/api/v1/marketplace/audit/` | Read marketplace audit history visible to the caller |
+| GET/POST | `/api/v1/marketplace/reports/` | List or generate marketplace CSV reports |
+| GET | `/api/v1/marketplace/reports/{id}/download/` | Download a generated marketplace report |
 | GET | `/api/docs/` | Swagger UI |
 
 Registration, verification, resend, and token issuance are public endpoints. All other endpoints require a bearer access token.
@@ -212,7 +248,7 @@ The onboarding section identifiers are `organisation`, `representative`, `servic
 
 ## File storage and external identity
 
-Compliance uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Logistics evidence accepts PDF, Word, JPEG, PNG, XLSX and ZIP files up to 20 MB. Local development stores files under `media/`, which is deliberately not routed: uploads are private, so they are read only through the authenticated download endpoints above, which apply the same membership check as the rest of the application. With an S3-compatible backend those endpoints redirect to a signed URL instead of streaming the file. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
+Compliance uploads accept PDF, Word, JPEG, and PNG files up to 10 MB. Logistics and marketplace evidence accept PDF, Word, JPEG, PNG, XLSX and ZIP files up to 20 MB. Local development stores files under `media/`, which is deliberately not routed: uploads are private, so they are read only through the authenticated download endpoints above, which apply the same membership check as the rest of the application. With an S3-compatible backend those endpoints redirect to a signed URL instead of streaming the file. Supplying the `AWS_*` settings from `.env.example` switches uploads to private AWS S3, Cloudflare R2, Backblaze B2, or another S3-compatible provider through Django's storage API.
 
 Phone OTP delivery uses `SMS_WEBHOOK_URL` and `SMS_WEBHOOK_TOKEN`. Google requires `GOOGLE_OAUTH_CLIENT_ID`; Microsoft requires `MICROSOFT_OAUTH_CLIENT_ID` and `MICROSOFT_OAUTH_TENANT_ID`. Provider tokens are validated server-side. Existing password accounts must authenticate before linking a social identity; an email match never silently links an account.
 
