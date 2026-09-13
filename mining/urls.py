@@ -8,6 +8,7 @@ from mining.views import (
     EquipmentViewSet,
     InfoRequestViewSet,
     InspectionViewSet,
+    InventoryItemViewSet,
     LicenceDocViewSet,
     MineSiteViewSet,
     MiningAuditViewSet,
@@ -18,6 +19,7 @@ from mining.views import (
     MiningReportView,
     NonConformityViewSet,
     PendingReviewViewSet,
+    ProductionRecordViewSet,
     SafetyIncidentViewSet,
     SampleViewSet,
 )
@@ -31,6 +33,8 @@ router.register("samples", SampleViewSet, basename="mining-sample")
 router.register("environmental-records", EnvRecordViewSet, basename="mining-env-record")
 router.register("safety-incidents", SafetyIncidentViewSet, basename="mining-safety-incident")
 router.register("equipment", EquipmentViewSet, basename="mining-equipment")
+router.register("production", ProductionRecordViewSet, basename="mining-production")
+router.register("inventory", InventoryItemViewSet, basename="mining-inventory")
 router.register("applications", ApplicationViewSet, basename="mining-application")
 router.register("pending-reviews", PendingReviewViewSet, basename="mining-pending-review")
 router.register("info-requests", InfoRequestViewSet, basename="mining-info-request")

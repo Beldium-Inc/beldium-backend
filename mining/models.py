@@ -501,6 +501,41 @@ class Equipment(TimeStampedModel):
         return self.name
 
 
+class ProductionRecord(TimeStampedModel):
+    """One reported period of production output at a mine site."""
+
+    site = models.ForeignKey(MineSite, on_delete=models.CASCADE, related_name="production_records")
+    period_start = models.DateField()
+    period_end = models.DateField()
+    commodity = models.CharField(max_length=120)
+    tonnage = models.DecimalField(max_digits=12, decimal_places=2)
+    grade = models.DecimalField(max_digits=8, decimal_places=3, null=True, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-period_start"]
+
+    def __str__(self):
+        return f"{self.commodity} · {self.site_id} ({self.period_start})"
+
+
+class InventoryItem(TimeStampedModel):
+    """One stockpile, consumable or spare held at a mine site."""
+
+    site = models.ForeignKey(MineSite, on_delete=models.CASCADE, related_name="inventory_items")
+    category = models.CharField(max_length=60)  # stockpile / consumable / spare
+    name = models.CharField(max_length=150)
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    unit = models.CharField(max_length=30)
+    threshold = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} · {self.site_id}"
+
+
 class Application(TimeStampedModel):
     """An admission or amendment application, referencing a not-yet-live site."""
 

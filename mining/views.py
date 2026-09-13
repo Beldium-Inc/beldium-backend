@@ -35,11 +35,13 @@ from mining.models import (
     Evidence,
     InfoRequest,
     Inspection,
+    InventoryItem,
     LicenceDoc,
     MineSite,
     MiningOrganisationProfile,
     NonConformity,
     PendingReview,
+    ProductionRecord,
     ReviewSection,
     Sample,
     SafetyIncident,
@@ -73,6 +75,7 @@ from mining.serializers import (
     InfoRequestSerializer,
     InspectionRequestSerializer,
     InspectionSerializer,
+    InventoryItemSerializer,
     LicenceDocSerializer,
     MineSiteDetailSerializer,
     MineSiteSerializer,
@@ -82,6 +85,7 @@ from mining.serializers import (
     NonConformityClosureSerializer,
     NonConformitySerializer,
     PendingReviewSerializer,
+    ProductionRecordSerializer,
     ReviewSectionSerializer,
     SafetyIncidentSerializer,
     SampleSerializer,
@@ -562,6 +566,72 @@ class EquipmentViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
             raise PermissionDenied("You can only update equipment at your own sites.")
         equipment = serializer.save()
         self.record("equipment_updated", target=equipment.name, site_id=str(equipment.site_id or ""))
+
+
+class ProductionRecordViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
+    """Site-level production reporting, the queryable counterpart of MineSite.production."""
+
+    serializer_class = ProductionRecordSerializer
+    queryset = ProductionRecord.objects.none()
+    permission_classes = [IsMiningParticipant]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    filterset_fields = ["site", "commodity"]
+    search_fields = ["commodity", "notes"]
+    ordering_fields = ["period_start", "period_end", "tonnage"]
+    ordering = ["-period_start"]
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return self.queryset
+        qs = ProductionRecord.objects.select_related("site")
+        if self.sees_whole_register():
+            return qs
+        return qs.filter(site__organisation_id__in=organisation_ids(self.request.user))
+
+    def perform_create(self, serializer):
+        if not owns_site(self.request.user, serializer.validated_data.get("site")):
+            raise PermissionDenied("You can only record production at your own sites.")
+        record = serializer.save()
+        self.record("production_record_created", target=record.commodity, site_id=str(record.site_id or ""))
+
+    def perform_update(self, serializer):
+        if not owns_site(self.request.user, serializer.instance.site):
+            raise PermissionDenied("You can only update production records at your own sites.")
+        record = serializer.save()
+        self.record("production_record_updated", target=record.commodity, site_id=str(record.site_id or ""))
+
+
+class InventoryItemViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
+    """Site-level inventory, the queryable counterpart of MineSite.inventory."""
+
+    serializer_class = InventoryItemSerializer
+    queryset = InventoryItem.objects.none()
+    permission_classes = [IsMiningParticipant]
+    http_method_names = ["get", "post", "patch", "delete", "head", "options"]
+    filterset_fields = ["site", "category"]
+    search_fields = ["name", "category"]
+    ordering_fields = ["name", "quantity"]
+    ordering = ["name"]
+
+    def get_queryset(self):
+        if getattr(self, "swagger_fake_view", False):
+            return self.queryset
+        qs = InventoryItem.objects.select_related("site")
+        if self.sees_whole_register():
+            return qs
+        return qs.filter(site__organisation_id__in=organisation_ids(self.request.user))
+
+    def perform_create(self, serializer):
+        if not owns_site(self.request.user, serializer.validated_data.get("site")):
+            raise PermissionDenied("You can only record inventory at your own sites.")
+        item = serializer.save()
+        self.record("inventory_item_created", target=item.name, site_id=str(item.site_id or ""))
+
+    def perform_update(self, serializer):
+        if not owns_site(self.request.user, serializer.instance.site):
+            raise PermissionDenied("You can only update inventory at your own sites.")
+        item = serializer.save()
+        self.record("inventory_item_updated", target=item.name, site_id=str(item.site_id or ""))
 
 
 class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):

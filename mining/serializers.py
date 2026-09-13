@@ -20,11 +20,13 @@ from mining.models import (
     Evidence,
     InfoRequest,
     Inspection,
+    InventoryItem,
     LicenceDoc,
     MineSite,
     MiningOrganisationProfile,
     NonConformity,
     PendingReview,
+    ProductionRecord,
     ReviewSection,
     Sample,
     SafetyIncident,
@@ -382,6 +384,37 @@ class EquipmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Equipment
         fields = ["id", "site", "site_name", "name", "serial", "cert_expires_on", "status", "created_at", "updated_at"]
+        read_only_fields = ["id", "site_name", "created_at", "updated_at"]
+
+
+class ProductionRecordSerializer(serializers.ModelSerializer):
+    site_name = serializers.CharField(source="site.name", read_only=True)
+
+    class Meta:
+        model = ProductionRecord
+        fields = [
+            "id", "site", "site_name", "period_start", "period_end", "commodity",
+            "tonnage", "grade", "notes", "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "site_name", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        period_start = attrs.get("period_start", getattr(self.instance, "period_start", None))
+        period_end = attrs.get("period_end", getattr(self.instance, "period_end", None))
+        if period_start and period_end and period_end < period_start:
+            raise serializers.ValidationError("period_end cannot be before period_start.")
+        return attrs
+
+
+class InventoryItemSerializer(serializers.ModelSerializer):
+    site_name = serializers.CharField(source="site.name", read_only=True)
+
+    class Meta:
+        model = InventoryItem
+        fields = [
+            "id", "site", "site_name", "category", "name", "quantity", "unit",
+            "threshold", "created_at", "updated_at",
+        ]
         read_only_fields = ["id", "site_name", "created_at", "updated_at"]
 
 
