@@ -9,6 +9,7 @@ urlpatterns = [
     path("api/v1/", include("compliance.urls")),
     path("api/v1/processing/", include("processing.urls")),
     path("api/v1/logistics/", include("logistics.urls")),
+    path("api/v1/export/", include("export.urls")),
     path("api/v1/mining/", include("mining.urls")),
     path("api/v1/marketplace/", include("marketplace.urls")),
     path("api/v1/quality/", include("quality.urls")),

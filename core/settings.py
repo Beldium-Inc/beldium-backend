@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     "compliance",
     "processing",
     "logistics",
+    "export",
     "mining",
     "marketplace",
     "quality",
@@ -200,6 +201,8 @@ SPECTACULAR_SETTINGS = {
         ],
         "LogisticsApplicationStatus": "logistics.models.ApplicationStatus.choices",
         "LogisticsDomain": "logistics.models.Domain.choices",
+        "ExportApplicationStatus": "export.models.ApplicationStatus.choices",
+        "ExportDomain": "export.models.Domain.choices",
         "LogisticsDomainReviewStatus": [
             ("pending", "Pending"),
             ("passed", "Passed"),
