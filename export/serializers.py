@@ -86,11 +86,55 @@ class BuyerSerializer(OwnedSerializer):
         read_only_fields = ["id", "created_at", "updated_at"]
 
 
+class ShipmentChecklistItemSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.ShipmentChecklistItem
+        fields = ["id", "shipment", "domain", "label", "detail", "state", "created_at", "updated_at"]
+        read_only_fields = ["id", "shipment", "created_at", "updated_at"]
+
+
+class ShipmentChecklistStateSerializer(serializers.Serializer):
+    state = serializers.ChoiceField(choices=["pass", "open", "fail"])
+
+
+class ShipmentNonConformitySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.ShipmentNonConformity
+        fields = ["id", "shipment", "domain", "title", "detail", "severity", "status", "raised_by", "response", "created_at", "updated_at"]
+        read_only_fields = ["id", "shipment", "status", "raised_by", "response", "created_at", "updated_at"]
+
+
+class ShipmentNonConformityRespondSerializer(serializers.Serializer):
+    response = serializers.CharField()
+
+
+class ShipmentNonConformityCloseSerializer(serializers.Serializer):
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class ShipmentDecisionSerializer(serializers.Serializer):
+    outcome = serializers.ChoiceField(choices=["cleared", "conditionally_cleared", "declined"])
+    rationale = serializers.CharField()
+    conditions = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if attrs["outcome"] == "conditionally_cleared" and not attrs.get("conditions"):
+            raise serializers.ValidationError({"conditions": "Conditions are required for a conditional clearance."})
+        return attrs
+
+
 class ShipmentSerializer(OwnedSerializer):
+    checklist = ShipmentChecklistItemSerializer(many=True, read_only=True)
+    non_conformities = ShipmentNonConformitySerializer(many=True, read_only=True)
+    readiness = serializers.SerializerMethodField()
+
     class Meta:
         model = m.Shipment
         fields = "__all__"
-        read_only_fields = ["id", "reference", "created_at", "updated_at"]
+        read_only_fields = [
+            "id", "reference", "created_at", "updated_at",
+            "decision_outcome", "decision_by", "decision_at", "decision_rationale", "decision_conditions",
+        ]
 
     def validate(self, attrs):
         exporter = attrs.get("exporter", getattr(self.instance, "exporter", None))
@@ -99,6 +143,12 @@ class ShipmentSerializer(OwnedSerializer):
             if obj and obj.exporter_id != exporter.pk:
                 raise serializers.ValidationError({field: "This record belongs to another exporter."})
         return attrs
+
+    def get_readiness(self, obj):
+        items = list(obj.checklist.all())
+        if not items:
+            return None
+        return round(sum(1 for i in items if i.state == "pass") / len(items) * 100)
 
 
 class GrantSerializer(serializers.ModelSerializer):

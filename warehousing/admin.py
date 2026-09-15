@@ -2,7 +2,19 @@ from django.contrib import admin
 
 from warehousing import models
 
-for model in [models.WarehouseOperator, models.WarehousingAccessGrant, models.Facility, models.StorageZone, models.InventoryLot, models.Inspection]:
+for model in [
+    models.WarehouseOperator,
+    models.WarehousingAccessGrant,
+    models.Facility,
+    models.StorageZone,
+    models.InventoryLot,
+    models.Inspection,
+    models.Incident,
+    models.ReleaseRequest,
+    models.MonitoringAlert,
+    models.Inspector,
+    models.Certificate,
+]:
     admin.site.register(model)
 
 

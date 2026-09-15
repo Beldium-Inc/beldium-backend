@@ -14,6 +14,8 @@ urlpatterns = [
     path("api/v1/mining/", include("mining.urls")),
     path("api/v1/marketplace/", include("marketplace.urls")),
     path("api/v1/quality/", include("quality.urls")),
+    path("api/v1/finance/", include("finance.urls")),
+    path("api/v1/ecosystem/", include("ecosystem.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
 ]

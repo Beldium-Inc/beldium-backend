@@ -53,6 +53,17 @@ class WarehouseOperator(TimeStampedModel):
     license_expires_on = models.DateField(null=True, blank=True)
     services = models.JSONField(default=list)
     storage_categories = models.JSONField(default=list)
+    # Rich company profile (formerly only present in frontend mock data).
+    trading_name = models.CharField(max_length=200, blank=True)
+    company_type = models.CharField(max_length=150, blank=True)
+    incorporated_on = models.DateField(null=True, blank=True)
+    mineral_title = models.CharField(max_length=255, blank=True)
+    head_office_address = models.TextField(blank=True)
+    bankers = models.CharField(max_length=255, blank=True)
+    annual_turnover = models.CharField(max_length=100, blank=True)
+    staff_count = models.PositiveIntegerField(null=True, blank=True)
+    directors = models.JSONField(default=list, blank=True, help_text="[{name, role, bvn_verified}]")
+    shareholding = models.JSONField(default=list, blank=True, help_text="[{holder, percent}]")
 
     class Meta:
         ordering = ["organisation__name"]
@@ -80,6 +91,17 @@ class Facility(TimeStampedModel):
     fire_certificate_expires_on = models.DateField(null=True, blank=True)
     insurance_expires_on = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
+    # Rich facility profile (formerly only present in frontend mock data).
+    coordinates = models.CharField(max_length=100, blank=True)
+    land_title = models.CharField(max_length=255, blank=True)
+    built_area = models.CharField(max_length=150, blank=True)
+    bay_count = models.PositiveIntegerField(null=True, blank=True)
+    loading_dock_count = models.PositiveIntegerField(null=True, blank=True)
+    weighbridge_details = models.TextField(blank=True)
+    laboratory_details = models.TextField(blank=True)
+    security_details = models.TextField(blank=True)
+    fire_system_details = models.TextField(blank=True)
+    facility_contact = models.CharField(max_length=200, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -110,7 +132,8 @@ class InventoryLot(TimeStampedModel):
     product_name = models.CharField(max_length=200)
     batch_number = models.CharField(max_length=100)
     owner_name = models.CharField(max_length=200)
-    quantity = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)])
+    quantity = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)], help_text="Declared quantity at intake.")
+    actual_weighbridge_quantity = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0)], help_text="Measured weighbridge quantity at intake, if weighed.")
     unit = models.CharField(max_length=30, default="tonnes")
     received_on = models.DateField()
     expires_on = models.DateField(null=True, blank=True)
@@ -118,6 +141,12 @@ class InventoryLot(TimeStampedModel):
 
     class Meta:
         ordering = ["-received_on", "-created_at"]
+
+    @property
+    def variance_percent(self):
+        if self.actual_weighbridge_quantity is None or not self.quantity:
+            return None
+        return round(float((self.actual_weighbridge_quantity - self.quantity) / self.quantity) * 100, 2)
 
 
 class Inspection(TimeStampedModel):
@@ -132,6 +161,83 @@ class Inspection(TimeStampedModel):
 
     class Meta:
         ordering = ["-inspected_on"]
+
+
+class Incident(TimeStampedModel):
+    warehouse = models.ForeignKey(WarehouseOperator, on_delete=models.CASCADE, related_name="incidents")
+    facility = models.ForeignKey(Facility, on_delete=models.PROTECT, related_name="incidents")
+    lot = models.ForeignKey(InventoryLot, on_delete=models.SET_NULL, null=True, blank=True, related_name="incidents")
+    title = models.CharField(max_length=255)
+    category = models.CharField(max_length=20, choices=[("safety", "Safety"), ("environmental", "Environmental"), ("security", "Security"), ("stock_integrity", "Stock integrity")])
+    severity = models.CharField(max_length=10, choices=[("low", "Low"), ("medium", "Medium"), ("high", "High")], default="medium")
+    occurred_on = models.DateField()
+    location = models.CharField(max_length=200, blank=True)
+    description = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=[("open", "Open"), ("under_investigation", "Under investigation"), ("closed", "Closed")], default="open")
+    reported_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+
+    class Meta:
+        ordering = ["-occurred_on", "-created_at"]
+
+
+class ReleaseRequest(TimeStampedModel):
+    warehouse = models.ForeignKey(WarehouseOperator, on_delete=models.CASCADE, related_name="release_requests")
+    lot = models.ForeignKey(InventoryLot, on_delete=models.PROTECT, related_name="release_requests")
+    requested_by_name = models.CharField(max_length=200)
+    destination = models.CharField(max_length=255)
+    declared_quantity = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)])
+    actual_weighbridge_quantity = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True, validators=[MinValueValidator(0)])
+    unit = models.CharField(max_length=30, default="tonnes")
+    status = models.CharField(max_length=20, choices=[("pending", "Pending authorisation"), ("authorised", "Authorised"), ("declined", "Declined")], default="pending")
+    decision_reason = models.TextField(blank=True)
+    authorised_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    authorised_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def variance_percent(self):
+        if self.actual_weighbridge_quantity is None or not self.declared_quantity:
+            return None
+        return round(float((self.actual_weighbridge_quantity - self.declared_quantity) / self.declared_quantity) * 100, 2)
+
+
+class MonitoringAlert(TimeStampedModel):
+    warehouse = models.ForeignKey(WarehouseOperator, on_delete=models.CASCADE, related_name="monitoring_alerts")
+    facility = models.ForeignKey(Facility, on_delete=models.SET_NULL, null=True, blank=True, related_name="monitoring_alerts")
+    message = models.TextField()
+    severity = models.CharField(max_length=10, choices=[("info", "Info"), ("warning", "Warning"), ("critical", "Critical")], default="info")
+    source = models.CharField(max_length=150, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class Inspector(TimeStampedModel):
+    name = models.CharField(max_length=200)
+    region = models.CharField(max_length=150, blank=True)
+    title = models.CharField(max_length=150, blank=True)
+    email = models.EmailField(blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["name"]
+
+
+class Certificate(TimeStampedModel):
+    warehouse = models.ForeignKey(WarehouseOperator, on_delete=models.CASCADE, related_name="certificates")
+    facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name="certificates")
+    application = models.ForeignKey("WarehousingApplication", on_delete=models.SET_NULL, null=True, blank=True, related_name="certificates")
+    scope = models.CharField(max_length=255, blank=True)
+    issued_on = models.DateField()
+    expires_on = models.DateField()
+    status = models.CharField(max_length=20, choices=[("active", "Active"), ("conditional", "Conditional"), ("suspended", "Suspended"), ("expired", "Expired")], default="active")
+    issued_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+
+    class Meta:
+        ordering = ["-issued_on"]
 
 
 class WarehousingApplication(TimeStampedModel):

@@ -143,9 +143,41 @@ class Shipment(TimeStampedModel):
     currency = models.CharField(max_length=3, default="USD")
     expected_ship_date = models.DateField()
     status = models.CharField(max_length=20, choices=[("planned", "Planned"), ("ready", "Ready"), ("cleared", "Cleared"), ("shipped", "Shipped"), ("held", "Held"), ("cancelled", "Cancelled")], default="planned")
+    # Compliance decision, recorded once a shipment's checklist and
+    # non-conformities have been cleared by a reviewer.
+    decision_outcome = models.CharField(max_length=25, blank=True, choices=[("cleared", "Cleared"), ("conditionally_cleared", "Conditionally cleared"), ("declined", "Declined")])
+    decision_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    decision_at = models.DateTimeField(null=True, blank=True)
+    decision_rationale = models.TextField(blank=True)
+    decision_conditions = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-expected_ship_date", "-created_at"]
+
+
+class ShipmentChecklistItem(TimeStampedModel):
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name="checklist")
+    domain = models.CharField(max_length=30, choices=Domain.choices)
+    label = models.CharField(max_length=255)
+    detail = models.TextField(blank=True)
+    state = models.CharField(max_length=10, choices=[("pass", "Pass"), ("open", "Open"), ("fail", "Fail")], default="open")
+
+    class Meta:
+        ordering = ["domain", "id"]
+
+
+class ShipmentNonConformity(TimeStampedModel):
+    shipment = models.ForeignKey(Shipment, on_delete=models.CASCADE, related_name="non_conformities")
+    domain = models.CharField(max_length=30, choices=Domain.choices)
+    title = models.CharField(max_length=255)
+    detail = models.TextField(blank=True)
+    severity = models.CharField(max_length=10, choices=[("minor", "Minor"), ("major", "Major"), ("critical", "Critical")], default="major")
+    status = models.CharField(max_length=15, choices=[("open", "Open"), ("responded", "Responded"), ("closed", "Closed")], default="open")
+    raised_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="+")
+    response = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
 
 
 class ExportCondition(TimeStampedModel):

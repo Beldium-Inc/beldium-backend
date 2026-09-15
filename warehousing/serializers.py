@@ -98,6 +98,8 @@ class StorageZoneSerializer(OwnedSerializer):
 
 
 class InventoryLotSerializer(OwnedSerializer):
+    variance_percent = serializers.ReadOnlyField()
+
     class Meta:
         model = m.InventoryLot
         fields = "__all__"
@@ -135,6 +137,87 @@ class InspectionSerializer(OwnedSerializer):
         next_due_on = attrs.get("next_due_on", getattr(self.instance, "next_due_on", None))
         if inspected_on and next_due_on and next_due_on < inspected_on:
             raise serializers.ValidationError({"next_due_on": "Next due date cannot precede inspection date."})
+        return attrs
+
+
+class IncidentSerializer(OwnedSerializer):
+    class Meta:
+        model = m.Incident
+        fields = "__all__"
+        read_only_fields = ["id", "reported_by", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        warehouse = attrs.get("warehouse", getattr(self.instance, "warehouse", None))
+        for field in ["facility", "lot"]:
+            obj = attrs.get(field, getattr(self.instance, field, None))
+            if obj and obj.warehouse_id != warehouse.pk:
+                raise serializers.ValidationError({field: "This record belongs to another warehouse."})
+        return attrs
+
+
+class ReleaseRequestSerializer(OwnedSerializer):
+    variance_percent = serializers.ReadOnlyField()
+
+    class Meta:
+        model = m.ReleaseRequest
+        fields = "__all__"
+        read_only_fields = ["id", "status", "decision_reason", "authorised_by", "authorised_at", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        warehouse = attrs.get("warehouse", getattr(self.instance, "warehouse", None))
+        lot = attrs.get("lot", getattr(self.instance, "lot", None))
+        if lot and lot.warehouse_id != warehouse.pk:
+            raise serializers.ValidationError({"lot": "This lot belongs to another warehouse."})
+        return attrs
+
+
+class ReleaseDecisionSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=["authorised", "declined"])
+    actual_weighbridge_quantity = serializers.DecimalField(max_digits=15, decimal_places=2, required=False, min_value=0)
+    reason = serializers.CharField(required=False, allow_blank=True)
+
+
+class MonitoringAlertSerializer(OwnedSerializer):
+    class Meta:
+        model = m.MonitoringAlert
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        warehouse = attrs.get("warehouse", getattr(self.instance, "warehouse", None))
+        facility = attrs.get("facility", getattr(self.instance, "facility", None))
+        if facility and facility.warehouse_id != warehouse.pk:
+            raise serializers.ValidationError({"facility": "This facility belongs to another warehouse."})
+        return attrs
+
+
+class InspectorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.Inspector
+        fields = "__all__"
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class CertificateSerializer(OwnedSerializer):
+    is_expiring = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.Certificate
+        fields = "__all__"
+        read_only_fields = ["id", "issued_by", "created_at", "updated_at"]
+
+    def get_is_expiring(self, obj):
+        return (obj.expires_on - timezone.localdate()).days <= 30
+
+    def validate(self, attrs):
+        warehouse = attrs.get("warehouse", getattr(self.instance, "warehouse", None))
+        facility = attrs.get("facility", getattr(self.instance, "facility", None))
+        if facility and facility.warehouse_id != warehouse.pk:
+            raise serializers.ValidationError({"facility": "This facility belongs to another warehouse."})
+        issued_on = attrs.get("issued_on", getattr(self.instance, "issued_on", None))
+        expires_on = attrs.get("expires_on", getattr(self.instance, "expires_on", None))
+        if issued_on and expires_on and expires_on < issued_on:
+            raise serializers.ValidationError({"expires_on": "Expiry cannot precede issue date."})
         return attrs
 
 
@@ -303,11 +386,16 @@ class NotificationSerializer(serializers.ModelSerializer):
 
 
 class ReportSerializer(serializers.ModelSerializer):
+    facility_count = serializers.SerializerMethodField()
+
     class Meta:
         model = m.WarehousingReport
         ref_name = "WarehousingReport"
-        fields = ["id", "report_type", "created_at"]
+        fields = ["id", "report_type", "warehouse_ids", "facility_count", "created_at"]
         read_only_fields = fields
+
+    def get_facility_count(self, obj):
+        return len(obj.warehouse_ids)
 
 
 class SummarySerializer(serializers.Serializer):

@@ -122,6 +122,102 @@ class InspectionViewSet(WarehouseOperatorRecordViewSet):
     filterset_fields = ["warehouse", "facility", "inspection_type", "outcome"]
 
 
+class IncidentViewSet(WarehouseOperatorRecordViewSet):
+    queryset = m.Incident.objects.none()
+    serializer_class = s.IncidentSerializer
+    search_fields = ["title", "location", "description"]
+    filterset_fields = ["warehouse", "facility", "category", "severity", "status"]
+
+    def perform_create(self, serializer):
+        warehouse = serializer.validated_data["warehouse"]
+        assert_editor(self.request.user, warehouse)
+        obj = serializer.save(reported_by=self.request.user)
+        services.audit(self.request, warehouse, "incident_created", object_id=str(obj.pk))
+
+    @extend_schema(request=s.ResolutionSerializer, responses=s.IncidentSerializer)
+    @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        incident = self.get_object()
+        assert_editor(request.user, incident.warehouse)
+        payload = s.ResolutionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        incident.status = "closed"
+        incident.save(update_fields=["status", "updated_at"])
+        services.audit(request, incident.warehouse, "incident_closed", object_id=str(incident.pk), notes=payload.validated_data["notes"])
+        return Response(self.get_serializer(incident).data)
+
+
+class ReleaseRequestViewSet(WarehouseOperatorRecordViewSet):
+    queryset = m.ReleaseRequest.objects.none()
+    serializer_class = s.ReleaseRequestSerializer
+    search_fields = ["requested_by_name", "destination", "lot__reference"]
+    filterset_fields = ["warehouse", "lot", "status"]
+
+    @extend_schema(request=s.ReleaseDecisionSerializer, responses=s.ReleaseRequestSerializer)
+    @action(detail=True, methods=["post"])
+    def decide(self, request, pk=None):
+        release = self.get_object()
+        assert_editor(request.user, release.warehouse)
+        if release.status != "pending":
+            raise ConflictError("This release request has already been decided.")
+        payload = s.ReleaseDecisionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        release.status = data["status"]
+        release.decision_reason = data.get("reason", "")
+        if "actual_weighbridge_quantity" in data:
+            release.actual_weighbridge_quantity = data["actual_weighbridge_quantity"]
+        release.authorised_by, release.authorised_at = request.user, timezone.now()
+        release.save(update_fields=["status", "decision_reason", "actual_weighbridge_quantity", "authorised_by", "authorised_at", "updated_at"])
+        if release.status == "authorised":
+            release.lot.status = "dispatched"
+            release.lot.save(update_fields=["status", "updated_at"])
+        services.audit(request, release.warehouse, "release_" + release.status, object_id=str(release.pk))
+        return Response(self.get_serializer(release).data)
+
+
+class MonitoringAlertViewSet(WarehouseOperatorRecordViewSet):
+    queryset = m.MonitoringAlert.objects.none()
+    serializer_class = s.MonitoringAlertSerializer
+    search_fields = ["message", "source"]
+    filterset_fields = ["warehouse", "facility", "severity"]
+
+    @extend_schema(request=None, responses=s.MonitoringAlertSerializer)
+    @action(detail=True, methods=["post"])
+    def resolve(self, request, pk=None):
+        alert = self.get_object()
+        assert_editor(request.user, alert.warehouse)
+        if alert.resolved_at is None:
+            alert.resolved_at = timezone.now()
+            alert.save(update_fields=["resolved_at", "updated_at"])
+        return Response(self.get_serializer(alert).data)
+
+
+class InspectorViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, AtomicViewSet):
+    queryset = m.Inspector.objects.filter(is_active=True)
+    serializer_class = s.InspectorSerializer
+    http_method_names = ["get", "post", "patch", "head", "options"]
+    search_fields = ["name", "region", "title"]
+
+    def get_permissions(self):
+        if self.request.method not in {"GET", "HEAD", "OPTIONS"}:
+            return [IsAdminUser()]
+        return [IsAuthenticated()]
+
+
+class CertificateViewSet(WarehouseOperatorRecordViewSet):
+    queryset = m.Certificate.objects.none()
+    serializer_class = s.CertificateSerializer
+    search_fields = ["scope", "facility__name"]
+    filterset_fields = ["warehouse", "facility", "status"]
+
+    def perform_create(self, serializer):
+        warehouse = serializer.validated_data["warehouse"]
+        assert_editor(self.request.user, warehouse)
+        obj = serializer.save(issued_by=self.request.user)
+        services.audit(self.request, warehouse, "certificate_issued", object_id=str(obj.pk))
+
+
 class GrantViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, AtomicViewSet):
     permission_classes = [IsAdminUser]
     queryset = m.WarehousingAccessGrant.objects.all()

@@ -43,6 +43,8 @@ INSTALLED_APPS = [
     "mining",
     "marketplace",
     "quality",
+    "finance",
+    "ecosystem",
 ]
 
 MIDDLEWARE = [

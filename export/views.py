@@ -114,6 +114,98 @@ class ShipmentViewSet(ExporterRecordViewSet):
     search_fields = ["reference", "destination_country", "port_of_loading", "port_of_discharge"]
     filterset_fields = ["exporter", "product", "buyer", "destination_country", "status"]
 
+    def get_queryset(self):
+        return super().get_queryset().prefetch_related("checklist", "non_conformities")
+
+    @extend_schema(methods=["GET"], responses=s.ShipmentChecklistItemSerializer(many=True))
+    @extend_schema(methods=["POST"], request=s.ShipmentChecklistItemSerializer, responses={201: s.ShipmentChecklistItemSerializer})
+    @action(detail=True, methods=["get", "post"], pagination_class=None)
+    def checklist(self, request, pk=None):
+        shipment = self.get_object()
+        if request.method == "GET":
+            return Response(s.ShipmentChecklistItemSerializer(shipment.checklist.all(), many=True).data)
+        editable_exporter(request.user, shipment.exporter)
+        payload = s.ShipmentChecklistItemSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        item = payload.save(shipment=shipment)
+        services.audit(request, shipment.exporter, "shipment_checklist_item_created", shipment_id=str(shipment.pk))
+        return Response(s.ShipmentChecklistItemSerializer(item).data, status=201)
+
+    @extend_schema(request=s.ShipmentChecklistStateSerializer, responses=s.ShipmentChecklistItemSerializer, parameters=[OpenApiParameter("item_id", OpenApiTypes.INT, OpenApiParameter.PATH)])
+    @action(detail=True, methods=["patch"], url_path=r"checklist/(?P<item_id>[0-9]+)")
+    def checklist_item(self, request, pk=None, item_id=None):
+        shipment = self.get_object()
+        editable_exporter(request.user, shipment.exporter)
+        item = get_object_or_404(shipment.checklist, pk=item_id)
+        payload = s.ShipmentChecklistStateSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        item.state = payload.validated_data["state"]
+        item.save(update_fields=["state", "updated_at"])
+        services.audit(request, shipment.exporter, "shipment_checklist_item_updated", shipment_id=str(shipment.pk), state=item.state)
+        return Response(s.ShipmentChecklistItemSerializer(item).data)
+
+    @extend_schema(methods=["GET"], responses=s.ShipmentNonConformitySerializer(many=True))
+    @extend_schema(methods=["POST"], request=s.ShipmentNonConformitySerializer, responses={201: s.ShipmentNonConformitySerializer})
+    @action(detail=True, methods=["get", "post"], pagination_class=None, url_path="non-conformities")
+    def non_conformities(self, request, pk=None):
+        shipment = self.get_object()
+        if request.method == "GET":
+            return Response(s.ShipmentNonConformitySerializer(shipment.non_conformities.all(), many=True).data)
+        editable_exporter(request.user, shipment.exporter)
+        payload = s.ShipmentNonConformitySerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        item = payload.save(shipment=shipment, raised_by=request.user)
+        services.audit(request, shipment.exporter, "non_conformity_raised", shipment_id=str(shipment.pk), non_conformity_id=str(item.pk))
+        return Response(s.ShipmentNonConformitySerializer(item).data, status=201)
+
+    @extend_schema(request=s.ShipmentNonConformityRespondSerializer, responses=s.ShipmentNonConformitySerializer, parameters=[OpenApiParameter("nc_id", OpenApiTypes.INT, OpenApiParameter.PATH)])
+    @action(detail=True, methods=["post"], url_path=r"non-conformities/(?P<nc_id>[0-9]+)/respond")
+    def respond_non_conformity(self, request, pk=None, nc_id=None):
+        shipment = self.get_object()
+        nc = get_object_or_404(shipment.non_conformities, pk=nc_id)
+        if nc.status == "closed":
+            raise ConflictError("This finding is already closed.")
+        payload = s.ShipmentNonConformityRespondSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        nc.status, nc.response = "responded", payload.validated_data["response"]
+        nc.save(update_fields=["status", "response", "updated_at"])
+        services.audit(request, shipment.exporter, "non_conformity_responded", shipment_id=str(shipment.pk), non_conformity_id=str(nc.pk))
+        return Response(s.ShipmentNonConformitySerializer(nc).data)
+
+    @extend_schema(request=s.ShipmentNonConformityCloseSerializer, responses=s.ShipmentNonConformitySerializer, parameters=[OpenApiParameter("nc_id", OpenApiTypes.INT, OpenApiParameter.PATH)])
+    @action(detail=True, methods=["post"], url_path=r"non-conformities/(?P<nc_id>[0-9]+)/close")
+    def close_non_conformity(self, request, pk=None, nc_id=None):
+        shipment = self.get_object()
+        editable_exporter(request.user, shipment.exporter)
+        nc = get_object_or_404(shipment.non_conformities, pk=nc_id)
+        nc.status = "closed"
+        nc.save(update_fields=["status", "updated_at"])
+        services.audit(request, shipment.exporter, "non_conformity_closed", shipment_id=str(shipment.pk), non_conformity_id=str(nc.pk))
+        return Response(s.ShipmentNonConformitySerializer(nc).data)
+
+    @extend_schema(request=s.ShipmentDecisionSerializer, responses=s.ShipmentSerializer)
+    @action(detail=True, methods=["post"])
+    def decide(self, request, pk=None):
+        shipment = self.get_object()
+        editable_exporter(request.user, shipment.exporter)
+        if shipment.decision_outcome:
+            raise ConflictError("A decision has already been recorded for this shipment.")
+        blocking = shipment.checklist.filter(state="fail").count()
+        open_nc = shipment.non_conformities.exclude(status="closed").count()
+        payload = s.ShipmentDecisionSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        if data["outcome"] == "cleared" and (blocking or open_nc):
+            raise ConflictError("Resolve blocking checklist items and open non-conformities before clearance.")
+        shipment.decision_outcome = data["outcome"]
+        shipment.decision_rationale = data["rationale"]
+        shipment.decision_conditions = data.get("conditions", "")
+        shipment.decision_by, shipment.decision_at = request.user, timezone.now()
+        shipment.status = "cleared" if data["outcome"] != "declined" else "held"
+        shipment.save(update_fields=["decision_outcome", "decision_rationale", "decision_conditions", "decision_by", "decision_at", "status", "updated_at"])
+        services.audit(request, shipment.exporter, "shipment_decided", shipment_id=str(shipment.pk), verdict=shipment.decision_outcome)
+        return Response(self.get_serializer(shipment).data)
+
 
 class GrantViewSet(mixins.ListModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, AtomicViewSet):
     permission_classes = [IsAdminUser]

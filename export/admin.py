@@ -2,7 +2,7 @@ from django.contrib import admin
 
 from export import models
 
-for model in [models.Exporter, models.ExportAccessGrant, models.Product, models.Buyer, models.Shipment]:
+for model in [models.Exporter, models.ExportAccessGrant, models.Product, models.Buyer, models.Shipment, models.ShipmentChecklistItem, models.ShipmentNonConformity]:
     admin.site.register(model)
 
 
