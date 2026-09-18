@@ -8,7 +8,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key-change-this-before-any-real-deployment-2026")
 DEBUG = str(config("DEBUG", default="true")).strip().lower() in {"1", "true", "yes", "on", "debug", "development"}
 ENVIRONMENT = str(config("ENVIRONMENT", default="local")).strip().lower()
-ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1, api.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173, https://api.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 
 if ENVIRONMENT == "production":
