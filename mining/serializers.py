@@ -28,6 +28,7 @@ from mining.models import (
     PendingReview,
     ProductionRecord,
     ReviewSection,
+    ReviewState,
     Sample,
     SafetyIncident,
     ScoreFactor,
@@ -147,7 +148,7 @@ class ReviewSectionSerializer(serializers.ModelSerializer):
 
 
 class MiningSectionReviewSerializer(serializers.Serializer):
-    status = serializers.ChoiceField(choices=["verified", "rejected", "info_requested", "flagged", "under_review", "pending"])
+    status = serializers.ChoiceField(choices=ReviewState.choices)
     note = serializers.CharField(required=False, allow_blank=True, max_length=2000)
     score = serializers.IntegerField(required=False, min_value=0, max_value=100)
 
