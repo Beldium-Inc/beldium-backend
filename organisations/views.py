@@ -15,6 +15,7 @@ from accounts.services import enqueue_account_email
 from organisations.audit import record_event
 from organisations.models import JoinRequest, MembershipRole, Organisation, OrganisationInvitation, OrganisationMembership
 from common.exceptions import ConflictError, ResourceNotFoundError
+from organisations.timeline import build_timeline
 from organisations.permissions import has_organisation_role
 from organisations.serializers import (
     JoinRequestDecisionSerializer,
@@ -217,6 +218,12 @@ class OrganisationViewSet(viewsets.ModelViewSet):
         organisation.save(update_fields=["verification_status", "verified_by", "verified_at", "rejection_reason", "updated_at"])
         record_event(request, f"organisation.{decision}", organisation=organisation)
         return Response(self.get_serializer(organisation).data)
+
+    @action(detail=True, methods=["get"])
+    def timeline(self, request, pk=None):
+        """Verification stages and a member-safe activity feed. Any active member may read it."""
+        organisation = self.get_object()
+        return Response(build_timeline(organisation))
 
     @action(detail=True, methods=["get"])
     def audit(self, request, pk=None):

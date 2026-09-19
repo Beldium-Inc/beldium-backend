@@ -91,3 +91,47 @@ def weighted_score(site):
         total_weight = sum(f.weight for f in factors)
         return round(sum(f.weight * f.score for f in factors) / total_weight)
     return site.compliance_score
+
+
+def risk_band(score, *, has_active_critical=False):
+    """Banding rules shown on the review page: 80+ low, 60-79 medium, below 60 high."""
+    if has_active_critical or score < 60:
+        return "high"
+    return "low" if score >= 80 else "medium"
+
+
+def apply_review_outcome(site):
+    """Move the site's stored score, risk band and status after a section verdict.
+
+    A site becomes operational only when every one of its ten sections is
+    verified; it never leaves that state silently, because a later rejection
+    or flag puts it back under review.
+    """
+    from mining.models import Application, NonConformity, PendingReview
+
+    site.compliance_score = weighted_score(site)
+    critical = site.non_conformities.filter(severity="critical").exclude(status="closed").exists()
+    site.risk = risk_band(site.compliance_score, has_active_critical=critical)
+    reasons = []
+    if critical:
+        reasons.append("An active critical non-conformity escalates the band to High.")
+    summary = review_summary(site)
+    if summary["sections_rejected"]:
+        reasons.append(f"{summary['sections_rejected']} section(s) rejected.")
+    if summary["sections_flagged"]:
+        reasons.append(f"{summary['sections_flagged']} section(s) flagged or awaiting information.")
+    site.risk_reasons = reasons
+
+    all_verified = summary["sections_verified"] == SECTION_COUNT
+    if all_verified:
+        site.status = "operational"
+        PendingReview.objects.filter(site=site).exclude(status="completed").update(status="completed")
+        # The miner's admission application for this site is what their
+        # dashboard lists, so it has to follow the desk's outcome.
+        Application.objects.filter(site=site, status__in=["pending", "under_review", "info_requested"]).update(
+            status="approved", stage="Verified"
+        )
+    elif site.status == "operational":
+        site.status = "under_review"
+    site.save(update_fields=["compliance_score", "risk", "risk_reasons", "status", "updated_at"])
+    return site

@@ -138,6 +138,15 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
 
         organisation = application.organisation
         organisation.name = data["name"]
+        # organisation_type drives desk/oversight access across every vertical
+        # (see organisations.access.audience), so once it is set, only the
+        # platform may change it — matching the rule OrganisationSerializer
+        # enforces on the regular organisation-update endpoint. Without this,
+        # an applicant could flip their own mining-company organisation to
+        # compliance_partner through this form and end up holding both a
+        # miner and a compliance-desk dashboard on the same organisation.
+        if organisation.organisation_type and organisation.organisation_type != data["organisation_type"] and not self.request.user.is_staff:
+            raise PermissionDenied("An organisation's type can only be changed by the platform.")
         organisation.organisation_type = data["organisation_type"]
         organisation.registration_number = data["registration_number"]
         organisation.tax_identifier = data["tax_identifier"]

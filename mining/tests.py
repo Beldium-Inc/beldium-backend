@@ -170,6 +170,75 @@ class ReviewSectionTests(MiningTestCase):
         self.assertEqual(section.status, "verified")
         self.assertEqual(section.score, 90)
 
+    def test_reviewer_at_an_unverified_compliance_partner_cannot_review_a_section(self):
+        """A compliance-partner org only grants desk power once Beldium has
+        verified it. Signing up as a compliance partner and adding a
+        reviewer does not itself unlock review actions; that self-declared
+        organisation_type is worth nothing until an admin verifies the org,
+        exactly like a mining company's own verification gate.
+        """
+        pending_desk_org = Organisation.objects.create(
+            name="New Compliance Partner Ltd",
+            organisation_type=OrganisationType.COMPLIANCE_PARTNER,
+            verification_status="under_review",
+        )
+        pending_reviewer = make_user("reviewer@new-partner.test")
+        OrganisationMembership.objects.create(
+            organisation=pending_desk_org, user=pending_reviewer, role=MembershipRole.REVIEWER
+        )
+
+        self.client.force_authenticate(pending_reviewer)
+        url = reverse("mining-site-review-section", args=[self.site.id, SectionKey.CORPORATE])
+        response = self.client.post(url, {"status": "verified", "score": 90})
+        self.assertEqual(response.status_code, 403, response.data)
+
+
+class SiteVerificationOutcomeTests(MiningTestCase):
+    def verify(self, key):
+        url = reverse("mining-site-review-section", args=[self.site.id, key])
+        return self.client.post(url, {"status": "verified"})
+
+    def test_verifying_every_section_makes_the_site_operational(self):
+        self.client.force_authenticate(self.operator)
+        keys = [key for key, _ in SectionKey.choices]
+        for key in keys[:-1]:
+            self.assertEqual(self.verify(key).status_code, 200)
+        self.site.refresh_from_db()
+        self.assertEqual(self.site.status, SiteStatus.UNDER_REVIEW)
+        self.assertEqual(self.site.compliance_score, 90)
+        self.assertEqual(self.site.risk, "low")
+
+        self.verify(keys[-1])
+        self.site.refresh_from_db()
+        self.assertEqual(self.site.status, SiteStatus.OPERATIONAL)
+        self.assertEqual(self.site.compliance_score, 100)
+
+    def test_full_verification_approves_the_miners_application_and_timeline(self):
+        from mining.models import Application
+
+        application = Application.objects.create(organisation=self.miner_org, site=self.site, site_name="Jos Tin Site A")
+        self.client.force_authenticate(self.operator)
+        for key, _ in SectionKey.choices:
+            self.verify(key)
+        application.refresh_from_db()
+        self.assertEqual(application.status, "approved")
+
+        self.client.force_authenticate(self.miner)
+        data = self.client.get(reverse("organisation-timeline", args=[self.miner_org.id])).data
+        stages = {s["key"]: s for s in data["stages"]}
+        self.assertEqual(stages["site_verification"]["state"], "complete")
+        self.assertEqual(data["sites"], {"verified": 1, "total": 1})
+
+    def test_rejecting_a_section_takes_the_site_back_under_review(self):
+        self.client.force_authenticate(self.operator)
+        for key, _ in SectionKey.choices:
+            self.verify(key)
+        url = reverse("mining-site-review-section", args=[self.site.id, SectionKey.CORPORATE])
+        self.client.post(url, {"status": "rejected", "note": "Certificate expired"})
+        self.site.refresh_from_db()
+        self.assertEqual(self.site.status, SiteStatus.UNDER_REVIEW)
+        self.assertEqual(self.site.compliance_score, 90)
+
 
 class NonConformityTests(MiningTestCase):
     def test_only_operator_can_raise_a_finding(self):
@@ -317,3 +386,40 @@ class ApplicationTests(MiningTestCase):
             "organisation": str(self.other_org.id), "site_name": "New Site", "mineral": "Tin",
         })
         self.assertEqual(response.status_code, 403)
+
+
+class OrganisationVerificationTests(MiningTestCase):
+    def url(self, decision):
+        return reverse("mining-organisation-decision", args=[self.miner_org.id, decision])
+
+    def test_cannot_verify_until_every_site_is_verified(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(self.url("verify"))
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "organisation_not_ready")
+
+    def test_desk_verifies_ready_organisation_and_miner_dashboard_flips(self):
+        self.client.force_authenticate(self.operator)
+        for key, _ in SectionKey.choices:
+            self.client.post(reverse("mining-site-review-section", args=[self.site.id, key]), {"status": "verified"})
+        listing = self.client.get(reverse("mining-organisation-verification")).data["results"]
+        row = next(r for r in listing if r["id"] == str(self.miner_org.id))
+        self.assertTrue(row["ready"])
+
+        response = self.client.post(self.url("verify"))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.miner_org.refresh_from_db()
+        self.assertEqual(self.miner_org.verification_status, "verified")
+        self.assertIsNotNone(self.miner_org.submitted_at)
+
+    def test_miner_cannot_verify_own_organisation(self):
+        self.client.force_authenticate(self.miner)
+        self.assertEqual(self.client.post(self.url("verify")).status_code, 403)
+
+    def test_reject_needs_reason(self):
+        self.client.force_authenticate(self.operator)
+        self.assertEqual(self.client.post(self.url("reject")).status_code, 400)
+        response = self.client.post(self.url("reject"), {"reason": "Licence not supplied"})
+        self.assertEqual(response.status_code, 200)
+        self.miner_org.refresh_from_db()
+        self.assertEqual(self.miner_org.verification_status, "rejected")

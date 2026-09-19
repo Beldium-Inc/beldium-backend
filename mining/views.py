@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Count, Q
+from django.shortcuts import get_object_or_404
 from django.http import FileResponse, HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
@@ -23,9 +24,11 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.audit import record_account_event
 from accounts.models import AccountAuditEvent
+from organisations.models import Organisation
 from common.exceptions import AppError, ConflictError
-from mining import audit, checklist, reports, scoring
+from mining import audit, checklist, reports, scoring, verification
 from mining.models import (
     Application,
     CorrectiveSubmission,
@@ -255,6 +258,10 @@ class MineSiteViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         section.decision_note = serializer.validated_data.get("note", "")
         if "score" in serializer.validated_data:
             section.score = serializer.validated_data["score"]
+        elif section.status == "verified":
+            section.score = 100
+        elif section.status in {"rejected", "flagged"}:
+            section.score = 0
         section.decided_by = request.user
         section.decided_at = timezone.now()
         section.save(update_fields=["status", "decision_note", "score", "decided_by", "decided_at", "updated_at"])
@@ -262,6 +269,7 @@ class MineSiteViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
             "section_reviewed", target=f"{site.name} · {SectionKey(key).label}",
             detail=f"Marked {section.get_status_display().lower()}.", site_id=str(site.id), section=key, status=section.status,
         )
+        scoring.apply_review_outcome(site)
         return Response(ReviewSectionSerializer(section, context={"request": request}).data)
 
     @extend_schema(methods=["GET"], responses=EvidenceSerializer(many=True))
@@ -1117,3 +1125,65 @@ class MiningReportView(APIView):
         response = HttpResponse(pdf, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="{reference}.pdf"'
         return response
+
+
+class MiningOrganisationVerificationView(APIView):
+    """The desk's register of mining companies, and the decision on each."""
+
+    permission_classes = [IsMiningParticipant]
+
+    def _require_desk(self, request):
+        if not can_decide(request.user):
+            raise PermissionDenied("Only the compliance operator desk can verify an organisation.")
+
+    def _row(self, organisation):
+        return {
+            "id": str(organisation.id),
+            "name": organisation.name,
+            "beldium_id": organisation.beldium_id,
+            "verification_status": organisation.verification_status,
+            "verified_at": organisation.verified_at,
+            "rejection_reason": organisation.rejection_reason,
+            **verification.readiness(organisation),
+        }
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def get(self, request):
+        if audience(request.user) not in {"operator", "regulator"}:
+            raise PermissionDenied("Only the desk and the regulator can see the organisation register.")
+        organisations = Organisation.objects.filter(organisation_type="mining_company").order_by("name")
+        return Response({"results": [self._row(o) for o in organisations]})
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses=OpenApiTypes.OBJECT)
+    @transaction.atomic
+    def post(self, request, pk=None, decision=None):
+        self._require_desk(request)
+        organisation = get_object_or_404(Organisation, pk=pk, organisation_type="mining_company")
+        if decision == "verify":
+            state = verification.readiness(organisation)
+            if not state["ready"]:
+                raise AppError(
+                    "This organisation is not ready to verify: " + " ".join(state["blockers"]),
+                    code="organisation_not_ready", status_code=409, details=state,
+                )
+            organisation.verification_status = "verified"
+            organisation.verified_at = timezone.now()
+            organisation.verified_by = request.user
+            organisation.rejection_reason = ""
+            if not organisation.submitted_at:
+                organisation.submitted_at = organisation.verified_at
+            event = "organisation.verified"
+        else:
+            reason = str(request.data.get("reason", "")).strip()
+            if not reason:
+                raise AppError("Give a reason for rejecting this organisation.", code="reason_required")
+            organisation.verification_status = "rejected"
+            organisation.verified_at = None
+            organisation.verified_by = request.user
+            organisation.rejection_reason = reason
+            event = "organisation.rejected"
+        organisation.save(update_fields=[
+            "verification_status", "verified_at", "verified_by", "rejection_reason", "submitted_at", "updated_at",
+        ])
+        record_account_event(request, event, organisation_id=str(organisation.id))
+        return Response(self._row(organisation))

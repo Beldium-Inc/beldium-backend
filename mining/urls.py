@@ -16,6 +16,7 @@ from mining.views import (
     MiningChecklistView,
     MiningDashboardView,
     MiningOrganisationProfileViewSet,
+    MiningOrganisationVerificationView,
     MiningReportView,
     NonConformityViewSet,
     PendingReviewViewSet,
@@ -44,6 +45,12 @@ router.register("audit", MiningAuditViewSet, basename="mining-audit")
 
 urlpatterns = [
     path("dashboard/", MiningDashboardView.as_view(), name="mining-dashboard"),
+    path("organisation-verification/", MiningOrganisationVerificationView.as_view(), name="mining-organisation-verification"),
+    path(
+        "organisation-verification/<uuid:pk>/<str:decision>/",
+        MiningOrganisationVerificationView.as_view(),
+        name="mining-organisation-decision",
+    ),
     path("me/", MiningCapabilityView.as_view(), name="mining-capabilities"),
     path("checklist/", MiningChecklistView.as_view(), name="mining-checklist"),
     path("reports/", MiningReportView.as_view(), name="mining-report"),

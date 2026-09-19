@@ -82,3 +82,44 @@ class OrganisationAPITests(APITestCase):
         response = self.client.get(reverse("organisation-detail", args=["00000000-0000-0000-0000-000000000000"]))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
         self.assertEqual(response.data["error"]["code"], "not_found")
+
+
+class OrganisationTimelineTests(APITestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user("tl-owner@example.com", "SafePassword-2026!")
+        self.outsider = User.objects.create_user("tl-out@example.com", "SafePassword-2026!")
+        self.staff = User.objects.create_user("tl-staff@example.com", "SafePassword-2026!", is_staff=True)
+        self.org = Organisation.objects.create(name="Timeline Mining", organisation_type="mining_company")
+        OrganisationMembership.objects.create(organisation=self.org, user=self.owner, role="owner")
+        self.url = reverse("organisation-timeline", args=[self.org.id])
+
+    def _stages(self):
+        return {s["key"]: s["state"] for s in self.client.get(self.url).data["stages"]}
+
+    def test_draft_organisation_has_current_submission_stage(self):
+        self.client.force_authenticate(self.owner)
+        stages = self._stages()
+        self.assertEqual(stages["submitted"], "current")
+        self.assertEqual(stages["decision"], "upcoming")
+
+    def test_submit_then_verify_advances_stages_and_feeds_activity(self):
+        self.client.force_authenticate(self.owner)
+        self.client.post(reverse("organisation-submit", args=[self.org.id]))
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        stages = {s["key"]: s["state"] for s in response.data["stages"]}
+        self.assertEqual(stages["submitted"], "complete")
+        self.assertEqual(stages["document_review"], "current")
+        self.assertEqual(response.data["activity"][0]["event_type"], "organisation.submitted")
+        self.assertNotIn("ip_address", response.data["activity"][0])
+
+        self.client.force_authenticate(self.staff)
+        self.client.post(reverse("organisation-decide", args=[self.org.id]), {"decision": "verified"})
+        self.client.force_authenticate(self.owner)
+        stages = self._stages()
+        self.assertEqual(stages["decision"], "complete")
+        self.assertEqual(stages["assessment"], "complete")
+
+    def test_non_member_cannot_read_timeline(self):
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.get(self.url).status_code, status.HTTP_404_NOT_FOUND)
