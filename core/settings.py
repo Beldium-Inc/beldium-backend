@@ -113,6 +113,11 @@ LEGACY_DATABASE_URL = config("LEGACY_DATABASE_URL", default="")
 # accounts/management/commands/delete_test_users.py). Unset once done.
 DELETE_TEST_USER_EMAILS = config("DELETE_TEST_USER_EMAILS", default="")
 
+# Bootstraps an admin login for /admin/ (see accounts/management/commands/
+# bootstrap_admin.py) — the only way to get one without Render shell access.
+ADMIN_EMAIL = config("ADMIN_EMAIL", default="")
+ADMIN_BOOTSTRAP_SECRET = config("ADMIN_BOOTSTRAP_SECRET", default="")
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
