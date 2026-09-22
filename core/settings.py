@@ -304,6 +304,10 @@ if config("AWS_STORAGE_BUCKET_NAME", default=""):
     AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME")
     AWS_S3_REGION_NAME = config("AWS_S3_REGION_NAME", default="us-east-1")
     AWS_S3_ENDPOINT_URL = config("AWS_S3_ENDPOINT_URL", default=None)
+    if AWS_S3_ENDPOINT_URL and not AWS_S3_ENDPOINT_URL.startswith(("http://", "https://")):
+        # botocore rejects a bare hostname outright; a scheme-less endpoint
+        # is always meant to be https, never http, so this is safe to assume.
+        AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_ENDPOINT_URL}"
     AWS_DEFAULT_ACL = None
     AWS_QUERYSTRING_AUTH = True
     STORAGES = {
