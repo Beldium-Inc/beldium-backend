@@ -1,3 +1,5 @@
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, status
@@ -50,6 +52,8 @@ from accounts.throttles import (
 from common.exceptions import AppError
 from accounts.audit import record_account_event
 from accounts.social import verify_social_token
+
+logger = logging.getLogger(__name__)
 
 
 class RegistrationView(generics.CreateAPIView):
@@ -110,7 +114,12 @@ class ResendVerificationView(generics.GenericAPIView):
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = User.objects.filter(email__iexact=serializer.validated_data["email"], is_active=True).first()
+        email = serializer.validated_data["email"]
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        logger.info(
+            "resend-verification for %s: user_found=%s already_verified=%s",
+            email, bool(user), bool(user and user.email_verified_at),
+        )
         if user and not user.email_verified_at:
             issue_email_verification(user)
         return Response({
