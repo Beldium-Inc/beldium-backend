@@ -129,8 +129,12 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
 
-# Resend is used via its SMTP relay, so switching providers later (e.g. AWS SES,
-# which also exposes an SMTP interface) only means changing these env vars.
+# Default backend is Resend's HTTPS API (common.email_backends), not its SMTP
+# relay: Render's outbound SMTP to smtp.resend.com repeatedly hung or timed
+# out in production well past EMAIL_TIMEOUT, while HTTPS (port 443) doesn't
+# have this problem. These EMAIL_HOST* settings stay for EMAIL_HOST_PASSWORD
+# (reused as the Resend API key) and as a documented fallback if you ever
+# explicitly set EMAIL_BACKEND back to the SMTP one.
 EMAIL_HOST = config("EMAIL_HOST", default="smtp.resend.com")
 EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
 EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="resend")
@@ -144,7 +148,7 @@ EMAIL_TIMEOUT = config("EMAIL_TIMEOUT", default=10, cast=int)
 EMAIL_BACKEND = config(
     "EMAIL_BACKEND",
     default=(
-        "django.core.mail.backends.smtp.EmailBackend"
+        "common.email_backends.ResendAPIEmailBackend"
         if EMAIL_HOST_PASSWORD
         else "django.core.mail.backends.console.EmailBackend"
     ),
