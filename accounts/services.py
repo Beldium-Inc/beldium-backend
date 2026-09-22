@@ -1,5 +1,6 @@
 import secrets
 import logging
+import threading
 from datetime import timedelta
 
 from django.contrib.auth.hashers import check_password, make_password
@@ -65,25 +66,55 @@ def blacklist_user_refresh_tokens(user):
         BlacklistedToken.objects.get_or_create(token=token)
 
 
+def _run_in_background(target, *, on_error):
+    """Fire a task off a background thread instead of blocking the request.
+
+    There's no separate Celery worker process (CELERY_TASK_ALWAYS_EAGER=True),
+    so a plain `.delay()` call runs the send synchronously and makes every
+    auth/registration request wait on Resend — 5-6s even when it succeeds,
+    much worse when it's slow. This returns to the caller immediately; the
+    send happens off-thread and any failure is only logged, never surfaced
+    to the request (the OTP flows already treat "resend" as the recovery
+    path for a dropped email).
+    """
+    def _wrapped():
+        from django.db import close_old_connections
+
+        try:
+            target()
+        except Exception:
+            on_error()
+        finally:
+            # This thread isn't a request cycle, so nothing else closes the
+            # DB connection it opened; left alone, it leaks one per send.
+            close_old_connections()
+
+    thread = threading.Thread(target=_wrapped, daemon=True)
+    thread.start()
+    return thread
+
+
 def enqueue_verification_email(user_id, code):
+    """Returns the background thread doing the send, mainly so tests can join() it."""
     from accounts.tasks import send_email_verification
 
-    try:
-        send_email_verification.delay(str(user_id), code)
-    except Exception:
-        logger.exception(
-            "Unable to enqueue email verification message",
+    return _run_in_background(
+        lambda: send_email_verification.delay(str(user_id), code),
+        on_error=lambda: logger.exception(
+            "Unable to send email verification message",
             extra={"user_id": str(user_id)},
-        )
+        ),
+    )
 
 
 def enqueue_account_email(task_name, *args):
+    """Returns the background thread doing the send, mainly so tests can join() it."""
     from accounts import tasks
 
-    try:
-        getattr(tasks, task_name).delay(*args)
-    except Exception:
-        logger.exception("Unable to enqueue account email", extra={"task_name": task_name})
+    return _run_in_background(
+        lambda: getattr(tasks, task_name).delay(*args),
+        on_error=lambda: logger.exception("Unable to send account email", extra={"task_name": task_name}),
+    )
 
 
 def issue_email_verification(user):

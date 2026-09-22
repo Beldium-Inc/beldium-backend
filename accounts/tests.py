@@ -161,6 +161,8 @@ class EmailVerificationTests(APITestCase):
     @patch("accounts.services.logger.exception")
     @patch("accounts.tasks.send_email_verification.delay", side_effect=RuntimeError("provider unavailable"))
     def test_delivery_failure_does_not_break_registration_flow(self, delay, logger):
-        enqueue_verification_email(self.user.id, "123456")
+        # The send now happens on a background thread so the request doesn't
+        # wait on it; join it so the mocks are observed deterministically.
+        enqueue_verification_email(self.user.id, "123456").join(timeout=5)
         delay.assert_called_once()
         logger.assert_called_once()

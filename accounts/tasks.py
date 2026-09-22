@@ -1,6 +1,7 @@
 import logging
 import json
 import signal
+import threading
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -34,16 +35,23 @@ def _send_template(*, recipient, subject, template, context):
     # settings.EMAIL_TIMEOUT only bounds the connect() call, not DNS
     # resolution — a stalled lookup on the host's resolver can hang well
     # past it (observed in production: 10s EMAIL_TIMEOUT, 100+s actual
-    # hang). SIGALRM interrupts the send regardless of what it's stuck on.
-    # Only safe from the main thread, which is where gunicorn's sync worker
-    # (and this Celery-eager call within it) runs.
-    previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(EMAIL_SEND_HARD_TIMEOUT_SECONDS)
+    # hang). SIGALRM interrupts the send regardless of what it's stuck on,
+    # but only works on the main thread. Sends now happen on a background
+    # thread (accounts.services._run_in_background) so the request doesn't
+    # wait on them, so this only applies when something calls this directly
+    # from the main thread (e.g. a test using .run()) — off the main thread
+    # it's skipped and EMAIL_TIMEOUT is the only bound, which is an
+    # acceptable trade since a stuck send there no longer blocks a request.
+    on_main_thread = threading.current_thread() is threading.main_thread()
+    if on_main_thread:
+        previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(EMAIL_SEND_HARD_TIMEOUT_SECONDS)
     try:
         email.send(fail_silently=False)
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, previous_handler)
+        if on_main_thread:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
     logger.info("Sent email to %s: %s", recipient, subject)
 
 
