@@ -77,7 +77,22 @@ TEMPLATES = [{
 WSGI_APPLICATION = "core.wsgi.application"
 ASGI_APPLICATION = "core.asgi.application"
 
-if config("DB_ENGINE", default="sqlite") == "postgresql":
+DATABASE_URL = config("DATABASE_URL", default="")
+if DATABASE_URL:
+    # A single connection string (as Render's managed Postgres provides) beats
+    # keeping DB_HOST/DB_USER/... in sync with it by hand.
+    from urllib.parse import urlparse
+
+    _db_url = urlparse(DATABASE_URL)
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": _db_url.path.lstrip("/"),
+        "USER": _db_url.username,
+        "PASSWORD": _db_url.password,
+        "HOST": _db_url.hostname,
+        "PORT": _db_url.port or 5432,
+    }}
+elif config("DB_ENGINE", default="sqlite") == "postgresql":
     DATABASES = {"default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": config("DB_NAME"),
