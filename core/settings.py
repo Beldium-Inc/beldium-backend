@@ -109,6 +109,10 @@ else:
 # Unset once the import has run if you don't want it re-checked on every boot.
 LEGACY_DATABASE_URL = config("LEGACY_DATABASE_URL", default="")
 
+# Comma-separated emails to delete on next boot (see
+# accounts/management/commands/delete_test_users.py). Unset once done.
+DELETE_TEST_USER_EMAILS = config("DELETE_TEST_USER_EMAILS", default="")
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
