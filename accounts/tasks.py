@@ -49,9 +49,6 @@ def _send_template(*, recipient, subject, template, context):
 
 @shared_task(
     bind=True,
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 1},
     name="accounts.send_email_verification",
 )
 def send_email_verification(self, user_id, code):
@@ -79,9 +76,6 @@ def send_email_verification(self, user_id, code):
 
 
 @shared_task(
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 1},
     name="accounts.send_password_reset_email",
 )
 def send_password_reset_email(user_id, code):
@@ -97,9 +91,6 @@ def send_password_reset_email(user_id, code):
 
 
 @shared_task(
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 1},
     name="accounts.send_email_change_email",
 )
 def send_email_change_email(user_id, new_email, code):
@@ -115,9 +106,6 @@ def send_email_change_email(user_id, new_email, code):
 
 
 @shared_task(
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 1},
     name="accounts.send_welcome_email",
 )
 def send_welcome_email(user_id):
@@ -133,9 +121,6 @@ def send_welcome_email(user_id):
 
 
 @shared_task(
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 1},
     name="accounts.send_organisation_invitation_email",
 )
 def send_organisation_invitation_email(email_address, organisation_name, inviter_name, role, token):
@@ -157,9 +142,6 @@ TERMII_SEND_URL = "https://api.ng.termii.com/api/sms/send"
 
 @shared_task(
     bind=True,
-    autoretry_for=(ConnectionError, TimeoutError),
-    retry_backoff=True,
-    retry_kwargs={"max_retries": 1},
     name="accounts.send_phone_verification",
 )
 def send_phone_verification(self, user_id, phone_number, code):
