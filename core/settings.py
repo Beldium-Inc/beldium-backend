@@ -104,6 +104,11 @@ elif config("DB_ENGINE", default="sqlite") == "postgresql":
 else:
     DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 
+# Old backend's database, read-only source for the one-time `import_legacy_users`
+# credential carry-over (see accounts/management/commands/import_legacy_users.py).
+# Unset once the import has run if you don't want it re-checked on every boot.
+LEGACY_DATABASE_URL = config("LEGACY_DATABASE_URL", default="")
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
