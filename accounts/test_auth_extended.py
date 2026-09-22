@@ -144,7 +144,7 @@ class EmailVerificationEdgeCaseTests(APITestCase):
         new_response = self.client.post(reverse("verify-email"), {
             "email": self.user.email,
             "code": "222222",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(new_response.status_code, status.HTTP_200_OK)
 
     def test_resend_for_verified_user_does_not_create_code(self):

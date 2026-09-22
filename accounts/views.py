@@ -11,6 +11,7 @@ from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from accounts.models import AccountAuditEvent, SocialIdentity, User
+from accounts.portal import portal_for_request
 from accounts.serializers import (
     AccountAuditEventSerializer,
     ChangeEmailConfirmSerializer,
@@ -140,6 +141,25 @@ class VerifyEmailView(generics.GenericAPIView):
             serializer.validated_data["email"],
             serializer.validated_data["code"],
         )
+        # This mints a token pair directly, same as /auth/token/ — without
+        # this check it was a full bypass of the portal wall: resend a code
+        # for any unverified account, verify it from the other app's origin,
+        # and sign in there regardless of which portal the account belongs to.
+        portal = portal_for_request(request)
+        if not portal:
+            raise AppError(
+                "Could not determine which Beldium app this request is from.",
+                code="portal_undetermined", status_code=403,
+            )
+        if user.portal:
+            if user.portal != portal:
+                raise AppError(
+                    "This account belongs to a different Beldium portal.",
+                    code="portal_mismatch", status_code=403,
+                )
+        else:
+            user.portal = portal
+            user.save(update_fields=["portal"])
         refresh = RefreshToken.for_user(user)
         record_account_event(request, "account.email_verified", actor=user)
         transaction.on_commit(lambda: enqueue_account_email("send_welcome_email", str(user.id)))

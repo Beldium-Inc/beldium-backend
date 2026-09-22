@@ -155,11 +155,26 @@ class EmailVerificationTests(APITestCase):
         response = self.client.post(reverse("verify-email"), {
             "email": self.user.email,
             "code": "123456",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
         self.user.refresh_from_db()
         self.assertIsNotNone(self.user.email_verified_at)
+
+    @patch("accounts.services.generate_verification_code", return_value="654321")
+    def test_verify_email_from_the_wrong_portal_is_refused(self, generate_code):
+        """Regression: this endpoint mints tokens directly, same as /auth/token/ —
+        without a portal check it was a full bypass: resend a code for any
+        unverified account, then verify it from the other app's origin."""
+        user = User.objects.create_user("miner@example.com", "SafePassword-2026!", portal="miner")
+        issue_email_verification(user)
+        response = self.client.post(reverse("verify-email"), {
+            "email": user.email,
+            "code": "654321",
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "portal_mismatch")
+        self.assertNotIn("access", response.data)
 
         response = self.client.post(reverse("verify-email"), {
             "email": self.user.email,
