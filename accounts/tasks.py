@@ -1,5 +1,6 @@
 import logging
 import json
+import signal
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -13,6 +14,12 @@ from accounts.models import User
 
 logger = logging.getLogger(__name__)
 
+EMAIL_SEND_HARD_TIMEOUT_SECONDS = 15
+
+
+def _alarm_handler(signum, frame):
+    raise TimeoutError("email send exceeded hard timeout")
+
 
 def _send_template(*, recipient, subject, template, context):
     html = render_to_string(template, context)
@@ -24,7 +31,19 @@ def _send_template(*, recipient, subject, template, context):
     )
     email.attach_alternative(html, "text/html")
     logger.info("Sending email via %s to %s: %s", settings.EMAIL_BACKEND, recipient, subject)
-    email.send(fail_silently=False)
+    # settings.EMAIL_TIMEOUT only bounds the connect() call, not DNS
+    # resolution — a stalled lookup on the host's resolver can hang well
+    # past it (observed in production: 10s EMAIL_TIMEOUT, 100+s actual
+    # hang). SIGALRM interrupts the send regardless of what it's stuck on.
+    # Only safe from the main thread, which is where gunicorn's sync worker
+    # (and this Celery-eager call within it) runs.
+    previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(EMAIL_SEND_HARD_TIMEOUT_SECONDS)
+    try:
+        email.send(fail_silently=False)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
     logger.info("Sent email to %s: %s", recipient, subject)
 
 
