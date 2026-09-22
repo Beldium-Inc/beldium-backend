@@ -155,6 +155,22 @@ else:
         "LOCATION": "beldium-local",
     }}
 
+# Without this, app-level logger.info/logger.exception calls (accounts.tasks,
+# accounts.services) never reach Render's log stream: Python's logging module
+# falls back to a WARNING-only "last resort" handler when nothing is configured,
+# so OTP-send failures were being logged into the void.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+}
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework_simplejwt.authentication.JWTAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],

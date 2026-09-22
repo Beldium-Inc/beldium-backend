@@ -22,7 +22,9 @@ def _send_template(*, recipient, subject, template, context):
         to=[recipient],
     )
     email.attach_alternative(html, "text/html")
+    logger.info("Sending email via %s to %s: %s", settings.EMAIL_BACKEND, recipient, subject)
     email.send(fail_silently=False)
+    logger.info("Sent email to %s: %s", recipient, subject)
 
 
 @shared_task(
@@ -35,6 +37,10 @@ def _send_template(*, recipient, subject, template, context):
 def send_email_verification(self, user_id, code):
     user = User.objects.filter(id=user_id).only("email", "first_name").first()
     if not user or user.email_verified_at:
+        logger.info(
+            "Skipping verification email for user_id=%s: found=%s already_verified=%s",
+            user_id, bool(user), bool(user and user.email_verified_at),
+        )
         return
 
     context = {
