@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import PhoneVerificationCode, SocialIdentity, User
+from accounts.models import PhoneVerificationCode, User
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
@@ -29,25 +29,11 @@ class PhoneVerificationTests(APITestCase):
         self.assertEqual(reused.status_code, status.HTTP_400_BAD_REQUEST)
 
 
-class SocialLoginTests(APITestCase):
-    @patch("accounts.views.verify_social_token")
-    def test_verified_social_identity_creates_and_reuses_account(self, verify_token):
-        verify_token.return_value = {"subject": "provider-123", "email": "social@example.com", "name": "Ada Lovelace"}
-        first = self.client.post(reverse("social-login"), {"provider": "google", "id_token": "signed-token"})
-        second = self.client.post(reverse("social-login"), {"provider": "google", "id_token": "signed-token"})
-        self.assertEqual(first.status_code, status.HTTP_200_OK)
-        self.assertEqual(second.status_code, status.HTTP_200_OK)
-        self.assertEqual(User.objects.filter(email="social@example.com").count(), 1)
-        self.assertEqual(SocialIdentity.objects.count(), 1)
+class SocialLoginDisabledTests(APITestCase):
+    """Social login was a second bypass path for the cross-portal login issue
+    (it authenticated/created accounts with no portal awareness at all) and
+    is disabled until it enforces the same check password login does."""
 
-    @patch("accounts.views.verify_social_token")
-    def test_existing_password_account_requires_authenticated_link(self, verify_token):
-        user = User.objects.create_user("existing@example.com", "SafePassword-2026!", email_verified_at=timezone.now())
-        verify_token.return_value = {"subject": "provider-456", "email": user.email, "name": "Existing User"}
-        denied = self.client.post(reverse("social-login"), {"provider": "microsoft", "id_token": "signed-token"})
-        self.assertEqual(denied.status_code, status.HTTP_409_CONFLICT)
-        self.assertEqual(denied.data["error"]["code"], "social_account_link_required")
-        self.client.force_authenticate(user)
-        linked = self.client.post(reverse("social-link"), {"provider": "microsoft", "id_token": "signed-token"})
-        self.assertEqual(linked.status_code, status.HTTP_200_OK)
-        self.assertTrue(SocialIdentity.objects.filter(user=user, provider="microsoft").exists())
+    def test_social_endpoints_are_not_routed(self):
+        self.assertEqual(self.client.post("/api/v1/auth/social/").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.post("/api/v1/auth/social/link/").status_code, status.HTTP_404_NOT_FOUND)

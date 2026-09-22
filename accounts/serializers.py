@@ -41,9 +41,14 @@ class RegistrationSerializer(serializers.ModelSerializer):
         },
     )
 
+    # Model field is blank=True (to grandfather pre-existing accounts through
+    # the login check below), but every new registration must declare which
+    # frontend it's for — this overrides the auto-generated optional field.
+    portal = serializers.ChoiceField(choices=User.Portal.choices)
+
     class Meta:
         model = User
-        fields = ["id", "email", "password", "confirm_password", "first_name", "last_name", "phone_number", "country", "onboarding_role", "agreed_terms"]
+        fields = ["id", "email", "password", "confirm_password", "first_name", "last_name", "phone_number", "country", "onboarding_role", "portal", "agreed_terms"]
         read_only_fields = ["id"]
 
     def create(self, validated_data):
@@ -84,7 +89,12 @@ class SocialLoginSerializer(serializers.Serializer):
 
 
 class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
+    # Which frontend is attempting the login. Required so an account created
+    # on one portal can't be signed into on the other.
+    portal = serializers.ChoiceField(choices=User.Portal.choices, write_only=True)
+
     def validate(self, attrs):
+        portal = attrs.pop("portal")
         data = super().validate(attrs)
         if not self.user.email_verified_at:
             raise AppError(
@@ -92,6 +102,19 @@ class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
                 code="email_not_verified",
                 status_code=403,
             )
+        if self.user.portal:
+            if self.user.portal != portal:
+                raise AppError(
+                    "This account belongs to a different Beldium portal.",
+                    code="portal_mismatch",
+                    status_code=403,
+                )
+        else:
+            # Pre-existing account from before this field existed: lock it to
+            # whichever portal it first logs into from now on, rather than
+            # leaving it permanently unrestricted.
+            self.user.portal = portal
+            self.user.save(update_fields=["portal"])
         return data
 
 

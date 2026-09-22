@@ -32,6 +32,10 @@ class User(AbstractBaseUser, PermissionsMixin):
         REGULATORY_OFFICER = "regulatory-officer", "Regulatory / Oversight Officer"
         INDEPENDENT = "independent", "Independent Mining Compliance Professional"
 
+    class Portal(models.TextChoices):
+        COMPLIANCE = "compliance", "Compliance"
+        MINER = "miner", "Miner Hub"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, db_index=True)
     first_name = models.CharField(max_length=100, blank=True)
@@ -40,6 +44,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     country = models.CharField(max_length=100, blank=True)
     terms_accepted_at = models.DateTimeField(null=True, blank=True)
     onboarding_role = models.CharField(max_length=40, choices=OnboardingRole.choices, blank=True)
+    # Which frontend this account registered through. Blank means a legacy
+    # account predating this field (imported, or registered before either
+    # frontend was sending it) — those are grandfathered through the login
+    # check in VerifiedTokenObtainPairSerializer rather than locked out.
+    portal = models.CharField(max_length=20, choices=Portal.choices, blank=True)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     email_verified_at = models.DateTimeField(null=True, blank=True)

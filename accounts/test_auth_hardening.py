@@ -42,6 +42,7 @@ class ForwardedHeaderTrustTests(TestCase):
                 "password": STRONG_PASSWORD,
                 "confirm_password": STRONG_PASSWORD,
                 "agreed_terms": True,
+                "portal": "compliance",
             },
             format="json",
             **extra,
@@ -81,7 +82,7 @@ class LoginThrottleTests(TestCase):
         statuses = [
             self.client.post(
                 reverse("token"),
-                {"email": "victim@example.com", "password": f"wrong{attempt}"},
+                {"email": "victim@example.com", "password": f"wrong{attempt}", "portal": "compliance"},
                 format="json",
             ).status_code
             for attempt in range(30)
@@ -95,7 +96,7 @@ class LoginThrottleTests(TestCase):
             statuses = [
                 self.client.post(
                     reverse("token"),
-                    {"email": "victim@example.com", "password": f"wrong{attempt}"},
+                    {"email": "victim@example.com", "password": f"wrong{attempt}", "portal": "compliance"},
                     format="json",
                     HTTP_X_FORWARDED_FOR=f"198.51.100.{attempt}",
                 ).status_code

@@ -23,6 +23,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
             "first_name": "Ada",
+            "portal": "compliance",
         })
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -37,6 +38,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "password": "AnotherPassword-2026!",
             "confirm_password": "AnotherPassword-2026!",
             "agreed_terms": True,
+            "portal": "compliance",
         })
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -50,6 +52,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "password": "12345678",
             "confirm_password": "12345678",
             "agreed_terms": True,
+            "portal": "compliance",
         })
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -66,6 +69,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "verified@example.com",
             "password": "WrongPassword-2026!",
+            "portal": "compliance",
         })
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -102,6 +106,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
         login = self.client.post(reverse("token"), {
             "email": user.email,
             "password": "SafePassword-2026!",
+            "portal": "compliance",
         })
 
         response = self.client.post(reverse("token-refresh"), {"refresh": login.data["refresh"]})
@@ -219,6 +224,7 @@ class RegistrationThrottleTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
+            "portal": "compliance",
         }, format="json")
 
     def test_repeated_registration_from_one_caller_is_refused(self):
@@ -245,6 +251,7 @@ class PhoneNumberFormatTests(APITestCase):
                 "confirm_password": "Str0ng-Passw0rd!",
                 "agreed_terms": True,
                 "phone_number": phone,
+                "portal": "miner",
             },
             format="json",
         )
@@ -265,6 +272,7 @@ class PhoneNumberFormatTests(APITestCase):
                 "password": "Str0ng-Passw0rd!",
                 "confirm_password": "Str0ng-Passw0rd!",
                 "agreed_terms": True,
+                "portal": "miner",
             },
             format="json",
         )

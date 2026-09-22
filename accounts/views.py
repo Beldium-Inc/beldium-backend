@@ -292,6 +292,11 @@ class PhoneVerificationConfirmView(generics.GenericAPIView):
 
 
 class SocialLoginView(generics.GenericAPIView):
+    """Disabled: not wired to any URL. Was a second bypass path for the
+    cross-portal login issue (creates/authenticates accounts with no portal
+    awareness). Re-enable only once it takes and enforces a portal field the
+    way VerifiedTokenObtainPairSerializer does."""
+
     serializer_class = SocialLoginSerializer
     permission_classes = [AllowAny]
     authentication_classes = []

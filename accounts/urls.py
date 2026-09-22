@@ -14,8 +14,6 @@ from accounts.views import (
     VerifyEmailView,
     PhoneVerificationRequestView,
     PhoneVerificationConfirmView,
-    SocialLoginView,
-    SocialLinkView,
     ThrottledTokenRefreshView,
 )
 
@@ -35,6 +33,8 @@ urlpatterns = [
     path("me/", CurrentUserView.as_view(), name="current-user"),
     path("verify-phone/request/", PhoneVerificationRequestView.as_view(), name="phone-verification-request"),
     path("verify-phone/confirm/", PhoneVerificationConfirmView.as_view(), name="phone-verification-confirm"),
-    path("social/", SocialLoginView.as_view(), name="social-login"),
-    path("social/link/", SocialLinkView.as_view(), name="social-link"),
+    # Social login (Google/Microsoft) is disabled: it was a second bypass path
+    # for the cross-portal login issue (creates/authenticates accounts with no
+    # portal awareness at all). Re-enable only once it enforces the same
+    # portal check as VerifiedTokenObtainPairSerializer.
 ]

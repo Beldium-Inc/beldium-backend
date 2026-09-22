@@ -27,11 +27,13 @@ class AuthenticationTests(APITestCase):
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
             "first_name": "Ada",
+            "portal": "compliance",
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(email="owner@example.com")
         self.assertTrue(user.check_password("SafePassword-2026!"))
         self.assertIsNone(user.email_verified_at)
+        self.assertEqual(user.portal, "compliance")
         self.assertTrue(EmailVerificationCode.objects.filter(user=user, consumed_at__isnull=True).exists())
 
         user.email_verified_at = timezone.now()
@@ -40,19 +42,55 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "owner@example.com",
             "password": "SafePassword-2026!",
-            "confirm_password": "SafePassword-2026!",
-            "agreed_terms": True,
+            "portal": "compliance",
         })
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
         response = self.client.get(reverse("current-user"))
         self.assertEqual(response.data["email"], "owner@example.com")
 
+    def test_login_rejects_wrong_portal(self):
+        User.objects.create_user(
+            "cross-portal@example.com", "SafePassword-2026!",
+            email_verified_at=timezone.now(), portal="compliance",
+        )
+        response = self.client.post(reverse("token"), {
+            "email": "cross-portal@example.com",
+            "password": "SafePassword-2026!",
+            "portal": "miner",
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "portal_mismatch")
+
+    def test_login_grandfathers_and_locks_in_blank_portal(self):
+        user = User.objects.create_user(
+            "legacy@example.com", "SafePassword-2026!", email_verified_at=timezone.now(),
+        )
+        self.assertEqual(user.portal, "")
+        response = self.client.post(reverse("token"), {
+            "email": "legacy@example.com",
+            "password": "SafePassword-2026!",
+            "portal": "miner",
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertEqual(user.portal, "miner")
+
+        # Now locked to "miner" — the other portal is rejected.
+        response = self.client.post(reverse("token"), {
+            "email": "legacy@example.com",
+            "password": "SafePassword-2026!",
+            "portal": "compliance",
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "portal_mismatch")
+
     def test_unverified_user_cannot_login(self):
         User.objects.create_user("pending@example.com", "SafePassword-2026!")
         response = self.client.post(reverse("token"), {
             "email": "pending@example.com",
             "password": "SafePassword-2026!",
+            "portal": "compliance",
         })
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["error"]["code"], "email_not_verified")
@@ -66,6 +104,7 @@ class AuthenticationTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
+            "portal": "compliance",
         })
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertFalse(User.objects.filter(email="rollback@example.com").exists())
@@ -79,6 +118,7 @@ class AuthenticationTests(APITestCase):
         self.assertEqual(response.data["error"]["code"], "validation_error")
         self.assertIn("email", response.data["error"]["details"])
         self.assertIn("password", response.data["error"]["details"])
+        self.assertIn("portal", response.data["error"]["details"])
         self.assertTrue(response.data["message"].startswith("email:"))
 
         response = self.client.get(reverse("current-user"))

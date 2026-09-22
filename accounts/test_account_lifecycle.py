@@ -24,6 +24,7 @@ class RegistrationContractTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "DifferentPassword-2026!",
             "agreed_terms": True,
+            "portal": "compliance",
         })
         self.assertEqual(mismatch.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("confirm_password", mismatch.data["error"]["details"])
@@ -33,8 +34,20 @@ class RegistrationContractTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": False,
+            "portal": "compliance",
         })
         self.assertEqual(no_terms.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(User.objects.exists())
+
+    def test_registration_requires_a_portal(self):
+        response = self.client.post(reverse("register"), {
+            "email": "user@example.com",
+            "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("portal", response.data["error"]["details"])
         self.assertFalse(User.objects.exists())
 
     def test_registration_records_terms_and_audit_event(self):
@@ -44,6 +57,7 @@ class RegistrationContractTests(APITestCase):
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
             "country": "Nigeria",
+            "portal": "miner",
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get()
@@ -130,11 +144,13 @@ class PasswordLifecycleTests(APITestCase):
         failed = self.client.post(reverse("token"), {
             "email": self.user.email,
             "password": "wrong",
+            "portal": "compliance",
         })
         self.assertEqual(failed.status_code, status.HTTP_401_UNAUTHORIZED)
         succeeded = self.client.post(reverse("token"), {
             "email": self.user.email,
             "password": "OldPassword-2026!",
+            "portal": "compliance",
         })
         self.assertEqual(succeeded.status_code, status.HTTP_200_OK)
 
