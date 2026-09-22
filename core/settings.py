@@ -147,8 +147,11 @@ EMAIL_BACKEND = config(
 )
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@beldium.com")
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:8080")
-SMS_WEBHOOK_URL = config("SMS_WEBHOOK_URL", default="")
-SMS_WEBHOOK_TOKEN = config("SMS_WEBHOOK_TOKEN", default="")
+# Phone OTPs send through Termii (see accounts/tasks.py:send_phone_verification).
+# TERMII_SENDER_ID defaults to Termii's shared "N-Alert" ID, which works
+# out of the box in Nigeria without registering a custom sender ID first.
+TERMII_API_KEY = config("TERMII_API_KEY", default="")
+TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
 GOOGLE_OAUTH_CLIENT_ID = config("GOOGLE_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_CLIENT_ID = config("MICROSOFT_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_TENANT_ID = config("MICROSOFT_OAUTH_TENANT_ID", default="common")

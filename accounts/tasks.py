@@ -1,5 +1,6 @@
 import logging
 import json
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from celery import shared_task
@@ -112,11 +113,20 @@ def send_organisation_invitation_email(email_address, organisation_name, inviter
     )
 
 
-@shared_task(name="accounts.send_phone_verification")
-def send_phone_verification(user_id, phone_number, code):
-    """Send through a configurable SMS webhook; log safely in local development."""
-    webhook = getattr(settings, "SMS_WEBHOOK_URL", "")
-    if not webhook:
+TERMII_SEND_URL = "https://api.ng.termii.com/api/sms/send"
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=(ConnectionError,),
+    retry_backoff=True,
+    retry_kwargs={"max_retries": 3},
+    name="accounts.send_phone_verification",
+)
+def send_phone_verification(self, user_id, phone_number, code):
+    """Send via Termii; log safely in local development."""
+    api_key = getattr(settings, "TERMII_API_KEY", "")
+    if not api_key:
         # No gateway configured. In development, print the code the way the
         # console email backend prints the signup code — otherwise the phone
         # step cannot be completed locally at all. Never outside DEBUG: an
@@ -131,8 +141,22 @@ def send_phone_verification(user_id, phone_number, code):
                 extra={"user_id": user_id, "phone_number": phone_number[-4:]},
             )
         return
-    payload = json.dumps({"to": phone_number, "message": f"Your Beldium verification code is {code}. It expires in 10 minutes."}).encode()
-    request = Request(webhook, data=payload, headers={"Content-Type": "application/json", "Authorization": f"Bearer {getattr(settings, 'SMS_WEBHOOK_TOKEN', '')}"}, method="POST")
-    with urlopen(request, timeout=10) as response:
-        if response.status >= 400:
-            raise ConnectionError(f"SMS gateway returned {response.status}")
+
+    # Termii expects the number without a leading "+" (e.g. 2348012345678).
+    to = phone_number.lstrip("+")
+    payload = json.dumps({
+        "to": to,
+        "from": getattr(settings, "TERMII_SENDER_ID", "N-Alert"),
+        "sms": f"Your Beldium verification code is {code}. It expires in 10 minutes.",
+        "type": "plain",
+        "channel": "generic",
+        "api_key": api_key,
+    }).encode()
+    request = Request(TERMII_SEND_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urlopen(request, timeout=10) as response:
+            body = json.loads(response.read())
+    except HTTPError as exc:
+        raise ConnectionError(f"Termii returned {exc.code}: {exc.read().decode(errors='replace')}") from exc
+
+    logger.info("Sent SMS via Termii to %s: %s", to[-4:], body)
