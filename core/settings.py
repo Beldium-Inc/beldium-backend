@@ -100,12 +100,18 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "accounts.User"
 
-SENDGRID_API_KEY = config("SENDGRID_API_KEY", default="")
+# Resend is used via its SMTP relay, so switching providers later (e.g. AWS SES,
+# which also exposes an SMTP interface) only means changing these env vars.
+EMAIL_HOST = config("EMAIL_HOST", default="smtp.resend.com")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="resend")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+EMAIL_USE_TLS = str(config("EMAIL_USE_TLS", default="true")).strip().lower() in {"1", "true", "yes", "on"}
 EMAIL_BACKEND = config(
     "EMAIL_BACKEND",
     default=(
-        "sendgrid_backend.SendgridBackend"
-        if ENVIRONMENT == "production" and SENDGRID_API_KEY
+        "django.core.mail.backends.smtp.EmailBackend"
+        if EMAIL_HOST_PASSWORD
         else "django.core.mail.backends.console.EmailBackend"
     ),
 )

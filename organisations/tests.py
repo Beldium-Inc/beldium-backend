@@ -117,8 +117,8 @@ class OrganisationTimelineTests(APITestCase):
         self.client.post(reverse("organisation-decide", args=[self.org.id]), {"decision": "verified"})
         self.client.force_authenticate(self.owner)
         stages = self._stages()
-        self.assertEqual(stages["decision"], "complete")
-        self.assertEqual(stages["assessment"], "complete")
+        self.assertEqual(set(stages.values()), {"complete"})
+        self.assertEqual(list(stages), ["submitted", "document_review", "site_verification", "decision"])
 
     def test_non_member_cannot_read_timeline(self):
         self.client.force_authenticate(self.outsider)

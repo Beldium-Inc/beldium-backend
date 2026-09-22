@@ -98,80 +98,74 @@ def build_timeline(organisation):
     awaiting_review = [d for d in docs if d == "awaiting"]
     requested = [d for d in docs if d in {"requested", "rejected"}]
     docs_reviewed_at = _last_event_time(events, "compliance.document_reviewed", "mining.document_reviewed")
+    verified_sites, total_sites = _site_progress(organisation)
+    verified = organisation.verification_status == "verified" or status == "verified"
+    rejected = status == "rejected"
 
-    stages = []
-    stages.append(
+    # Completion of each stage is decided once, from the facts. A verified
+    # organisation is complete everywhere: whatever the desk did or did not
+    # click along the way, the outcome is what the miner sees.
+    docs_done = verified or decided or bool(docs and not awaiting_review and not requested)
+    sites_done = verified or decided or bool(total_sites and verified_sites == total_sites)
+
+    def open_state(done, attention):
+        if done:
+            return "complete"
+        if not submitted:
+            return "upcoming"
+        return "attention" if attention else "current"
+
+    stages = [
         _stage(
             "submitted", "Application submitted", "Organisation application received by Beldium.",
-            "complete" if submitted else "current", submitted_at,
+            "complete" if (submitted or verified) else "current",
+            submitted_at or (organisation.verified_at if verified else None),
         )
-    )
+    ]
 
-    if not submitted and not docs:
-        review_state = "upcoming"
-    elif decided or (docs and not awaiting_review and not requested):
-        review_state = "complete"
-    elif requested or needs_info:
-        review_state = "attention"
-    else:
-        review_state = "current"
-    detail = ""
+    parts = []
     if docs:
-        parts = [f"{docs.count('verified')} of {len(docs)} documents verified"]
+        parts.append(f"{docs.count('verified')} of {len(docs)} documents verified")
         if awaiting_review:
             parts.append(f"{len(awaiting_review)} awaiting review")
         if requested:
             parts.append(f"{len(requested)} need attention")
-        detail = " · ".join(parts)
+    else:
+        parts.append("No documents to review")
     stages.append(
         _stage(
             "document_review", "Document review", "Documents and mandatory fields are checked by a reviewer.",
-            review_state, docs_reviewed_at if review_state == "complete" else None, detail,
+            open_state(docs_done, bool(requested) or needs_info),
+            docs_reviewed_at if docs_done else None, " · ".join(parts),
         )
     )
 
-    if not submitted or review_state in {"upcoming"}:
-        assess_state = "upcoming"
-    elif decided:
-        assess_state = "complete"
-    elif needs_info:
-        assess_state = "attention"
-    elif review_state == "complete":
-        assess_state = "current"
-    else:
-        assess_state = "upcoming"
     stages.append(
         _stage(
-            "assessment", "Reviewer assessment", "Licences, sites and equipment are assessed by a reviewer.",
-            assess_state, application.reviewed_at if application and decided else None,
-            DECISION_LABELS["action_required"] if needs_info else "",
+            "site_verification", "Site verification", "Declared sites are reviewed section by section.",
+            open_state(sites_done, False),
+            None,
+            f"{verified_sites} of {total_sites} sites verified" if total_sites else "No sites declared",
         )
     )
 
-    verified_sites, total_sites = _site_progress(organisation)
-    if total_sites:
-        if verified_sites == total_sites:
-            site_state = "complete"
-        elif any(site.sections.exclude(status="pending").exists() for site in organisation.mine_sites.all()):
-            site_state = "current"
-        else:
-            site_state = "upcoming"
+    if verified or decided:
+        decided_at = (application.reviewed_at if application else None) or organisation.verified_at
+        outcome = DECISION_LABELS.get(status, DECISION_LABELS["verified"] if verified else "")
+        if rejected:
+            outcome = organisation.rejection_reason or outcome
+        stages.append(
+            _stage("decision", "Decision", "Verification outcome issued.", "failed" if rejected else "complete", decided_at, outcome)
+        )
+    else:
+        ready = submitted and docs_done and sites_done
         stages.append(
             _stage(
-                "site_verification", "Site verification", "Declared sites are reviewed section by section.",
-                site_state, None, f"{verified_sites} of {total_sites} sites verified",
+                "decision", "Decision", "Verification outcome issued.",
+                "attention" if needs_info else "current" if ready else "upcoming", None,
+                DECISION_LABELS["action_required"] if needs_info else ("Awaiting the review team's decision." if ready else ""),
             )
         )
-
-    if decided:
-        decided_at = (application.reviewed_at if application else None) or organisation.verified_at
-        state = "failed" if status == "rejected" else "complete"
-        outcome = DECISION_LABELS.get(status, "")
-        if status == "rejected":
-            outcome = organisation.rejection_reason or outcome
-        stages.append(_stage("decision", "Decision", "Verification outcome issued.", state, decided_at, outcome))
-    else:
-        stages.append(_stage("decision", "Decision", "Verification outcome issued.", "upcoming"))
 
     return {
         "status": organisation.verification_status,
