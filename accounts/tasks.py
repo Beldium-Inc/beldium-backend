@@ -144,39 +144,51 @@ TERMII_SEND_URL = "https://api.ng.termii.com/api/sms/send"
     name="accounts.send_phone_verification",
 )
 def send_phone_verification(self, user_id, phone_number, code):
-    """Send via Termii; log safely in local development."""
-    api_key = getattr(settings, "TERMII_API_KEY", "")
-    if not api_key:
-        # No gateway configured. In development, print the code the way the
-        # console email backend prints the signup code — otherwise the phone
-        # step cannot be completed locally at all. Never outside DEBUG: an
-        # OTP in a production log is an OTP in whatever ships those logs.
-        if settings.DEBUG:
-            logger.warning(
-                "SMS gateway not configured; phone verification code for %s is %s", phone_number, code
-            )
-        else:
-            logger.info(
-                "Phone verification generated",
-                extra={"user_id": user_id, "phone_number": phone_number[-4:]},
-            )
-        return
+    """Log the code instead of sending; log safely in local development.
 
-    # Termii expects the number without a leading "+" (e.g. 2348012345678).
-    to = phone_number.lstrip("+")
-    payload = json.dumps({
-        "to": to,
-        "from": getattr(settings, "TERMII_SENDER_ID", "N-Alert"),
-        "sms": f"Your Beldium verification code is {code}. It expires in 10 minutes.",
-        "type": "plain",
-        "channel": "generic",
-        "api_key": api_key,
-    }).encode()
-    request = Request(TERMII_SEND_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urlopen(request, timeout=10) as response:
-            body = json.loads(response.read())
-    except HTTPError as exc:
-        raise ConnectionError(f"Termii returned {exc.code}: {exc.read().decode(errors='replace')}") from exc
+    Real sending via Termii is disabled for now (2026-09-22) to avoid send
+    costs while the sender ID isn't approved for this workspace yet. To
+    re-enable, uncomment the block below and remove the early return.
+    """
+    if settings.DEBUG:
+        logger.warning(
+            "SMS sending disabled; phone verification code for %s is %s", phone_number, code
+        )
+    else:
+        logger.info(
+            "Phone verification generated (SMS sending disabled)",
+            extra={"user_id": user_id, "phone_number": phone_number[-4:]},
+        )
+    return
 
-    logger.info("Sent SMS via Termii to %s: %s", to[-4:], body)
+    # api_key = getattr(settings, "TERMII_API_KEY", "")
+    # if not api_key:
+    #     if settings.DEBUG:
+    #         logger.warning(
+    #             "SMS gateway not configured; phone verification code for %s is %s", phone_number, code
+    #         )
+    #     else:
+    #         logger.info(
+    #             "Phone verification generated",
+    #             extra={"user_id": user_id, "phone_number": phone_number[-4:]},
+    #         )
+    #     return
+    #
+    # # Termii expects the number without a leading "+" (e.g. 2348012345678).
+    # to = phone_number.lstrip("+")
+    # payload = json.dumps({
+    #     "to": to,
+    #     "from": getattr(settings, "TERMII_SENDER_ID", "N-Alert"),
+    #     "sms": f"Your Beldium verification code is {code}. It expires in 10 minutes.",
+    #     "type": "plain",
+    #     "channel": "generic",
+    #     "api_key": api_key,
+    # }).encode()
+    # request = Request(TERMII_SEND_URL, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    # try:
+    #     with urlopen(request, timeout=10) as response:
+    #         body = json.loads(response.read())
+    # except HTTPError as exc:
+    #     raise ConnectionError(f"Termii returned {exc.code}: {exc.read().decode(errors='replace')}") from exc
+    #
+    # logger.info("Sent SMS via Termii to %s: %s", to[-4:], body)
