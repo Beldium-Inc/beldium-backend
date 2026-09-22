@@ -13,6 +13,9 @@ from accounts.models import EmailVerificationCode, User
 from accounts.services import enqueue_verification_email, issue_email_verification
 from accounts.tasks import send_email_verification
 
+COMPLIANCE_ORIGIN = "https://compliance.beldium.com"
+MINER_ORIGIN = "https://miners.beldium.com"
+
 
 class AuthenticationTests(APITestCase):
     def setUp(self):
@@ -27,8 +30,7 @@ class AuthenticationTests(APITestCase):
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
             "first_name": "Ada",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get(email="owner@example.com")
         self.assertTrue(user.check_password("SafePassword-2026!"))
@@ -42,8 +44,7 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "owner@example.com",
             "password": "SafePassword-2026!",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
         response = self.client.get(reverse("current-user"))
@@ -57,8 +58,7 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "cross-portal@example.com",
             "password": "SafePassword-2026!",
-            "portal": "miner",
-        })
+        }, HTTP_ORIGIN=MINER_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["error"]["code"], "portal_mismatch")
 
@@ -70,8 +70,7 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "legacy@example.com",
             "password": "SafePassword-2026!",
-            "portal": "miner",
-        })
+        }, HTTP_ORIGIN=MINER_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         user.refresh_from_db()
         self.assertEqual(user.portal, "miner")
@@ -80,18 +79,27 @@ class AuthenticationTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "legacy@example.com",
             "password": "SafePassword-2026!",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["error"]["code"], "portal_mismatch")
+
+    def test_login_without_a_recognized_origin_is_refused(self):
+        User.objects.create_user(
+            "no-origin@example.com", "SafePassword-2026!", email_verified_at=timezone.now(),
+        )
+        response = self.client.post(reverse("token"), {
+            "email": "no-origin@example.com",
+            "password": "SafePassword-2026!",
+        })
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data["error"]["code"], "portal_undetermined")
 
     def test_unverified_user_cannot_login(self):
         User.objects.create_user("pending@example.com", "SafePassword-2026!")
         response = self.client.post(reverse("token"), {
             "email": "pending@example.com",
             "password": "SafePassword-2026!",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["error"]["code"], "email_not_verified")
 
@@ -104,21 +112,30 @@ class AuthenticationTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertFalse(User.objects.filter(email="rollback@example.com").exists())
         issue_verification.assert_called_once()
         logger.assert_called_once()
 
+    def test_registration_without_a_recognized_origin_is_refused(self):
+        response = self.client.post(reverse("register"), {
+            "email": "no-origin@example.com",
+            "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("portal", response.data["error"]["details"])
+        self.assertFalse(User.objects.filter(email="no-origin@example.com").exists())
+
     def test_validation_and_authentication_errors_use_standard_envelope(self):
-        response = self.client.post(reverse("register"), {"email": "invalid"})
+        response = self.client.post(reverse("register"), {"email": "invalid"}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["status"], "failed")
         self.assertEqual(response.data["error"]["code"], "validation_error")
         self.assertIn("email", response.data["error"]["details"])
         self.assertIn("password", response.data["error"]["details"])
-        self.assertIn("portal", response.data["error"]["details"])
         self.assertTrue(response.data["message"].startswith("email:"))
 
         response = self.client.get(reverse("current-user"))

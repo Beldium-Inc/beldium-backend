@@ -4,6 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from accounts.models import AccountAuditEvent, User
+from accounts.portal import portal_for_request
 from accounts.services import issue_email_verification
 from common.exceptions import AppError
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
@@ -41,21 +42,20 @@ class RegistrationSerializer(serializers.ModelSerializer):
         },
     )
 
-    # Model field is blank=True (to grandfather pre-existing accounts through
-    # the login check below), but every new registration must declare which
-    # frontend it's for — this overrides the auto-generated optional field.
-    portal = serializers.ChoiceField(choices=User.Portal.choices)
-
     class Meta:
         model = User
-        fields = ["id", "email", "password", "confirm_password", "first_name", "last_name", "phone_number", "country", "onboarding_role", "portal", "agreed_terms"]
+        fields = ["id", "email", "password", "confirm_password", "first_name", "last_name", "phone_number", "country", "onboarding_role", "agreed_terms"]
         read_only_fields = ["id"]
 
     def create(self, validated_data):
         validated_data.pop("confirm_password")
         validated_data.pop("agreed_terms")
         with transaction.atomic():
-            user = User.objects.create_user(terms_accepted_at=timezone.now(), **validated_data)
+            user = User.objects.create_user(
+                terms_accepted_at=timezone.now(),
+                portal=portal_for_request(self.context.get("request")),
+                **validated_data,
+            )
             issue_email_verification(user)
         return user
 
@@ -64,6 +64,14 @@ class RegistrationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"confirm_password": ["Passwords do not match."]})
         if not attrs["agreed_terms"]:
             raise serializers.ValidationError({"agreed_terms": ["You must accept the terms to continue."]})
+        # Origin-derived, not client-declared (see accounts/portal.py) — an
+        # unrecognized origin means this wasn't a real browser call from
+        # either known frontend, so refuse rather than create an
+        # unrestricted account.
+        if not portal_for_request(self.context.get("request")):
+            raise serializers.ValidationError({
+                "portal": ["Could not determine which Beldium app this request is from."]
+            })
         return attrs
 
 
@@ -89,17 +97,22 @@ class SocialLoginSerializer(serializers.Serializer):
 
 
 class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
-    # Which frontend is attempting the login. Required so an account created
-    # on one portal can't be signed into on the other.
-    portal = serializers.ChoiceField(choices=User.Portal.choices, write_only=True)
-
     def validate(self, attrs):
-        portal = attrs.pop("portal")
+        # Derived from the request's Origin header (see accounts/portal.py),
+        # not a client-declared field — a browser can't forge or omit Origin
+        # on a cross-origin call the way it could a body field.
+        portal = portal_for_request(self.context.get("request"))
         data = super().validate(attrs)
         if not self.user.email_verified_at:
             raise AppError(
                 "Please verify your email address before signing in.",
                 code="email_not_verified",
+                status_code=403,
+            )
+        if not portal:
+            raise AppError(
+                "Could not determine which Beldium app this request is from.",
+                code="portal_undetermined",
                 status_code=403,
             )
         if self.user.portal:

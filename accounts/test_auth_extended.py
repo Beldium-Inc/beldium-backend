@@ -10,6 +10,9 @@ from rest_framework.test import APITestCase
 from accounts.models import EmailVerificationCode, User
 from accounts.services import issue_email_verification
 
+COMPLIANCE_ORIGIN = "https://compliance.beldium.com"
+MINER_ORIGIN = "https://miners.beldium.com"
+
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class AuthenticationEdgeCaseTests(APITestCase):
@@ -23,8 +26,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
             "first_name": "Ada",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertNotIn("password", response.data["user"])
@@ -38,8 +40,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "password": "AnotherPassword-2026!",
             "confirm_password": "AnotherPassword-2026!",
             "agreed_terms": True,
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(response.data["error"]["code"], "validation_error")
@@ -52,8 +53,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "password": "12345678",
             "confirm_password": "12345678",
             "agreed_terms": True,
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(User.objects.filter(email="weak@example.com").exists())
@@ -69,8 +69,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
         response = self.client.post(reverse("token"), {
             "email": "verified@example.com",
             "password": "WrongPassword-2026!",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
         self.assertEqual(response.data["error"]["code"], "authentication_failed")
@@ -106,8 +105,7 @@ class AuthenticationEdgeCaseTests(APITestCase):
         login = self.client.post(reverse("token"), {
             "email": user.email,
             "password": "SafePassword-2026!",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
         response = self.client.post(reverse("token-refresh"), {"refresh": login.data["refresh"]})
 
@@ -224,8 +222,7 @@ class RegistrationThrottleTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
-            "portal": "compliance",
-        }, format="json")
+        }, format="json", HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
     def test_repeated_registration_from_one_caller_is_refused(self):
         codes = [self._register(i).status_code for i in range(12)]
@@ -251,9 +248,9 @@ class PhoneNumberFormatTests(APITestCase):
                 "confirm_password": "Str0ng-Passw0rd!",
                 "agreed_terms": True,
                 "phone_number": phone,
-                "portal": "miner",
             },
             format="json",
+            HTTP_ORIGIN=MINER_ORIGIN,
         )
 
     def test_a_number_without_a_country_code_is_refused(self):
@@ -272,9 +269,9 @@ class PhoneNumberFormatTests(APITestCase):
                 "password": "Str0ng-Passw0rd!",
                 "confirm_password": "Str0ng-Passw0rd!",
                 "agreed_terms": True,
-                "portal": "miner",
             },
             format="json",
+            HTTP_ORIGIN=MINER_ORIGIN,
         )
         self.assertEqual(response.status_code, 201)
 

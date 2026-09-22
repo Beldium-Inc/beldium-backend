@@ -17,6 +17,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.models import AccountRecoveryCode, EmailVerificationCode, User
 
 STRONG_PASSWORD = "CorrectHorse!9times"
+COMPLIANCE_ORIGIN = "https://compliance.beldium.com"
 
 
 def _rest_framework_with(**overrides):
@@ -42,9 +43,9 @@ class ForwardedHeaderTrustTests(TestCase):
                 "password": STRONG_PASSWORD,
                 "confirm_password": STRONG_PASSWORD,
                 "agreed_terms": True,
-                "portal": "compliance",
             },
             format="json",
+            HTTP_ORIGIN=COMPLIANCE_ORIGIN,
             **extra,
         )
 
@@ -82,8 +83,9 @@ class LoginThrottleTests(TestCase):
         statuses = [
             self.client.post(
                 reverse("token"),
-                {"email": "victim@example.com", "password": f"wrong{attempt}", "portal": "compliance"},
+                {"email": "victim@example.com", "password": f"wrong{attempt}"},
                 format="json",
+                HTTP_ORIGIN=COMPLIANCE_ORIGIN,
             ).status_code
             for attempt in range(30)
         ]
@@ -96,8 +98,9 @@ class LoginThrottleTests(TestCase):
             statuses = [
                 self.client.post(
                     reverse("token"),
-                    {"email": "victim@example.com", "password": f"wrong{attempt}", "portal": "compliance"},
+                    {"email": "victim@example.com", "password": f"wrong{attempt}"},
                     format="json",
+                    HTTP_ORIGIN=COMPLIANCE_ORIGIN,
                     HTTP_X_FORWARDED_FOR=f"198.51.100.{attempt}",
                 ).status_code
                 for attempt in range(40)

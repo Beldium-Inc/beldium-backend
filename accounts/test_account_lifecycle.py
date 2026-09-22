@@ -12,6 +12,9 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from accounts.models import AccountAuditEvent, AccountRecoveryCode, User
 from accounts.services import issue_email_change, issue_password_reset
 
+COMPLIANCE_ORIGIN = "https://compliance.beldium.com"
+MINER_ORIGIN = "https://miners.beldium.com"
+
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class RegistrationContractTests(APITestCase):
@@ -24,8 +27,7 @@ class RegistrationContractTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "DifferentPassword-2026!",
             "agreed_terms": True,
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(mismatch.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("confirm_password", mismatch.data["error"]["details"])
 
@@ -34,8 +36,7 @@ class RegistrationContractTests(APITestCase):
             "password": "SafePassword-2026!",
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": False,
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(no_terms.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(User.objects.exists())
 
@@ -57,8 +58,7 @@ class RegistrationContractTests(APITestCase):
             "confirm_password": "SafePassword-2026!",
             "agreed_terms": True,
             "country": "Nigeria",
-            "portal": "miner",
-        })
+        }, HTTP_ORIGIN=MINER_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         user = User.objects.get()
         self.assertIsNotNone(user.terms_accepted_at)
@@ -144,14 +144,12 @@ class PasswordLifecycleTests(APITestCase):
         failed = self.client.post(reverse("token"), {
             "email": self.user.email,
             "password": "wrong",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(failed.status_code, status.HTTP_401_UNAUTHORIZED)
         succeeded = self.client.post(reverse("token"), {
             "email": self.user.email,
             "password": "OldPassword-2026!",
-            "portal": "compliance",
-        })
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(succeeded.status_code, status.HTTP_200_OK)
 
         self.client.force_authenticate(self.user)

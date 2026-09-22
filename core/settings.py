@@ -16,6 +16,22 @@ if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
 CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173, https://api.beldium.com, https://compliance.beldium.com, https://miners.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 
+# Which frontend origin maps to which account portal (accounts.models.User.Portal).
+# The frontends live on separate origins, so the browser's own Origin header
+# — which JavaScript cannot forge or omit on a cross-origin request — is
+# enough to tell them apart without either app declaring anything itself.
+# See accounts/portal.py:portal_for_origin.
+COMPLIANCE_PORTAL_ORIGINS = config(
+    "COMPLIANCE_PORTAL_ORIGINS",
+    default="https://compliance.beldium.com,http://localhost:8080,http://localhost:3000,http://localhost:5173",
+    cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
+)
+MINER_PORTAL_ORIGINS = config(
+    "MINER_PORTAL_ORIGINS",
+    default="https://miners.beldium.com,http://localhost:5174",
+    cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
+)
+
 if ENVIRONMENT == "production":
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_SSL_REDIRECT = True
