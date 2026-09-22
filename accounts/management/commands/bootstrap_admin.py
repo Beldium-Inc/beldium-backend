@@ -7,10 +7,12 @@ from accounts.models import User
 class Command(BaseCommand):
     """Creates (or promotes) a superuser from ADMIN_EMAIL/ADMIN_BOOTSTRAP_SECRET.
 
-    Exists so you can reach /admin/ without Render shell access. On first run
-    it creates the account with that password; on later runs it only makes
-    sure is_staff/is_superuser are set — it never overwrites a password you
-    may have since changed through the admin itself.
+    Exists so you can reach /admin/ without Render shell access. Always syncs
+    the password to ADMIN_BOOTSTRAP_SECRET on every boot — this is also the
+    recovery path if that password is ever lost: change the env var, redeploy,
+    log in with the new value. If ADMIN_EMAIL already belongs to an existing
+    account (e.g. carried over from the legacy import), this takes it over as
+    the admin login; use a dedicated address if that's not what you want.
     """
 
     help = "Create or promote the admin user from ADMIN_EMAIL/ADMIN_BOOTSTRAP_SECRET."
@@ -26,19 +28,9 @@ class Command(BaseCommand):
             email=email,
             defaults={"is_staff": True, "is_superuser": True, "is_active": True},
         )
-        if created:
-            user.set_password(password)
-            user.save(update_fields=["password"])
-            self.stdout.write(f"Created admin user {email}.")
-            return
-
-        changed_fields = []
-        for field in ("is_staff", "is_superuser", "is_active"):
-            if not getattr(user, field):
-                setattr(user, field, True)
-                changed_fields.append(field)
-        if changed_fields:
-            user.save(update_fields=changed_fields)
-            self.stdout.write(f"Promoted existing user {email} to admin ({', '.join(changed_fields)}).")
-        else:
-            self.stdout.write(f"{email} is already an admin; left password unchanged.")
+        user.is_staff = True
+        user.is_superuser = True
+        user.is_active = True
+        user.set_password(password)
+        user.save(update_fields=["is_staff", "is_superuser", "is_active", "password"])
+        self.stdout.write(f"{'Created' if created else 'Synced'} admin user {email}.")
