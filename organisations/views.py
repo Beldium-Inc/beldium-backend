@@ -13,6 +13,7 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from accounts.models import AccountAuditEvent
 from accounts.services import enqueue_account_email
 from organisations.audit import record_event
+from organisations.dedupe import apply_dedupe, plan_dedupe
 from organisations.models import JoinRequest, MembershipRole, Organisation, OrganisationInvitation, OrganisationMembership
 from common.exceptions import ConflictError, ResourceNotFoundError
 from organisations.timeline import build_timeline
@@ -234,6 +235,36 @@ class OrganisationViewSet(viewsets.ModelViewSet):
         page = self.paginate_queryset(events)
         serializer = AccountAuditEventSerializer(page if page is not None else events, many=True)
         return self.get_paginated_response(serializer.data) if page is not None else Response(serializer.data)
+
+    @action(detail=False, methods=["post"], permission_classes=[IsAdminUser])
+    def dedupe_duplicates(self, request):
+        """Staff-only cleanup for the pre-guard duplicate organisations (same
+        name + type created before OrganisationSerializer started rejecting
+        that on create). Exists so this can be run from Render without shell
+        access. Defaults to a dry run — pass {"apply": true} to actually
+        delete; see organisations/dedupe.py for the keeper/loser rule.
+        """
+        report = plan_dedupe()
+        payload = {
+            "groups": [
+                {
+                    "name": g.name,
+                    "organisation_type": g.organisation_type,
+                    "keeper_id": g.keeper_id,
+                    "keeper_beldium_id": g.keeper_beldium_id,
+                    "removed": g.losers,
+                }
+                for g in report.groups
+            ],
+            "skipped_ambiguous": report.skipped_ambiguous,
+            "organisations_removed": report.organisations_removed,
+            "applied": False,
+        }
+        if request.data.get("apply"):
+            apply_dedupe(report)
+            payload["applied"] = True
+            record_event(request, "organisations.deduplicated", organisations_removed=report.organisations_removed)
+        return Response(payload)
 
 
 class JoinRequestViewSet(viewsets.ModelViewSet):

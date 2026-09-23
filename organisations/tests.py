@@ -124,6 +124,77 @@ class OrganisationAPITests(APITestCase):
         self.assertEqual(response.data["error"]["code"], "not_found")
 
 
+class OrganisationDedupeTests(APITestCase):
+    """Cleanup for duplicate Organisation rows created before the create-time
+    guard existed — see organisations/dedupe.py."""
+
+    def setUp(self):
+        self.staff = User.objects.create_user("dedupe-staff@example.com", "SafePassword-2026!", is_staff=True)
+        self.member = User.objects.create_user("dedupe-member@example.com", "SafePassword-2026!")
+
+    def test_non_staff_cannot_run_dedupe(self):
+        self.client.force_authenticate(self.member)
+        response = self.client.post(reverse("organisation-dedupe-duplicates"), {})
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_dry_run_reports_but_does_not_delete(self):
+        first = Organisation.objects.create(name="Cosmaris Industries", organisation_type="compliance_partner")
+        second = Organisation.objects.create(name="cosmaris industries", organisation_type="compliance_partner")
+        OrganisationMembership.objects.create(organisation=second, user=self.member, role="owner")
+
+        self.client.force_authenticate(self.staff)
+        response = self.client.post(reverse("organisation-dedupe-duplicates"), {})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["organisations_removed"], 1)
+        self.assertEqual(response.data["groups"][0]["keeper_id"], str(first.id))
+        self.assertFalse(response.data["applied"])
+        self.assertEqual(Organisation.objects.count(), 2)
+
+    def test_apply_deletes_losers_and_their_orphanable_sites_and_applications(self):
+        from mining.models import Application as MiningApplication
+        from mining.models import MineSite
+
+        keeper = Organisation.objects.create(
+            name="Favvy Miners LTD", organisation_type="mining_company", verification_status="verified"
+        )
+        loser = Organisation.objects.create(name="Favvy Miners LTD", organisation_type="mining_company")
+        MineSite.objects.create(organisation=loser, name="Eton", mineral="Lithium")
+        MiningApplication.objects.create(organisation=loser, site_name="Eton")
+
+        self.client.force_authenticate(self.staff)
+        response = self.client.post(reverse("organisation-dedupe-duplicates"), {"apply": True})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.data["applied"])
+        self.assertEqual(response.data["organisations_removed"], 1)
+
+        self.assertTrue(Organisation.objects.filter(id=keeper.id).exists())
+        self.assertFalse(Organisation.objects.filter(id=loser.id).exists())
+        self.assertFalse(MineSite.objects.filter(name="Eton").exists())
+        self.assertFalse(MiningApplication.objects.filter(site_name="Eton").exists())
+
+    def test_a_verified_organisation_is_always_the_keeper(self):
+        older = Organisation.objects.create(name="Kaduna Minerals", organisation_type="mining_company")
+        verified_but_newer = Organisation.objects.create(
+            name="Kaduna Minerals", organisation_type="mining_company", verification_status="verified"
+        )
+
+        self.client.force_authenticate(self.staff)
+        response = self.client.post(reverse("organisation-dedupe-duplicates"), {"apply": True})
+        self.assertEqual(response.data["groups"][0]["keeper_id"], str(verified_but_newer.id))
+        self.assertFalse(Organisation.objects.filter(id=older.id).exists())
+        self.assertTrue(Organisation.objects.filter(id=verified_but_newer.id).exists())
+
+    def test_two_verified_duplicates_are_skipped_not_guessed_at(self):
+        Organisation.objects.create(name="Ambiguous Co", organisation_type="mining_company", verification_status="verified")
+        Organisation.objects.create(name="Ambiguous Co", organisation_type="mining_company", verification_status="verified")
+
+        self.client.force_authenticate(self.staff)
+        response = self.client.post(reverse("organisation-dedupe-duplicates"), {"apply": True})
+        self.assertEqual(response.data["groups"], [])
+        self.assertEqual(len(response.data["skipped_ambiguous"]), 1)
+        self.assertEqual(Organisation.objects.filter(name="Ambiguous Co").count(), 2)
+
+
 class OrganisationTimelineTests(APITestCase):
     def setUp(self):
         self.owner = User.objects.create_user("tl-owner@example.com", "SafePassword-2026!")
