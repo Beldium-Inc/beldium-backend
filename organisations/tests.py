@@ -31,6 +31,46 @@ class OrganisationAPITests(APITestCase):
         response = self.client.get(reverse("organisation-list"))
         self.assertEqual(response.data["count"], 0)
 
+    def test_cannot_create_duplicate_organisation_by_name_and_type(self):
+        Organisation.objects.create(name="Cosmaris Industries", organisation_type="compliance_partner")
+
+        self.client.force_authenticate(self.member)
+        response = self.client.post(reverse("organisation-list"), {
+            "name": "cosmaris industries",  # case-insensitive match
+            "organisation_type": "compliance_partner",
+            "registration_number": "RC-9988776",
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data["error"]["details"]["name"][0], (
+            "An organisation named \"cosmaris industries\" is already registered or under review. "
+            "Ask an existing member to invite you instead of creating a new one."
+        ))
+        self.assertEqual(Organisation.objects.filter(name__iexact="Cosmaris Industries").count(), 1)
+
+    def test_duplicate_check_ignores_a_different_organisation_type(self):
+        Organisation.objects.create(name="Cosmaris Industries", organisation_type="compliance_partner")
+
+        self.client.force_authenticate(self.member)
+        response = self.client.post(reverse("organisation-list"), {
+            "name": "Cosmaris Industries",
+            "organisation_type": "mining_company",
+            "registration_number": "RC-1122334",
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_duplicate_check_ignores_a_previously_rejected_organisation(self):
+        Organisation.objects.create(
+            name="Cosmaris Industries", organisation_type="compliance_partner", verification_status="rejected"
+        )
+
+        self.client.force_authenticate(self.member)
+        response = self.client.post(reverse("organisation-list"), {
+            "name": "Cosmaris Industries",
+            "organisation_type": "compliance_partner",
+            "registration_number": "RC-5544332",
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
     def test_admin_can_approve_join_request(self):
         organisation = Organisation.objects.create(name="Beldium Compliance", organisation_type="compliance_partner")
         OrganisationMembership.objects.create(organisation=organisation, user=self.owner, role="owner")

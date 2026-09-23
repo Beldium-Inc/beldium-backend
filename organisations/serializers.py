@@ -54,6 +54,34 @@ class OrganisationSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def validate(self, attrs):
+        # The only DB-level duplicate guard is (country, registration_number),
+        # and it's skipped entirely when registration_number is blank (see
+        # Organisation.Meta.constraints). Without this, onboarding under a new
+        # account (or leaving registration number blank) silently mints a
+        # fresh Organisation + application chain for the same real company,
+        # each sitting at "Under Review" independently with no way to tell
+        # they're duplicates. Block it at creation instead of cleaning up after.
+        if self.instance is None:
+            name = (attrs.get("name") or "").strip()
+            organisation_type = attrs.get("organisation_type")
+            if name and organisation_type:
+                duplicate = Organisation.objects.filter(
+                    name__iexact=name,
+                    organisation_type=organisation_type,
+                ).exclude(verification_status="rejected")
+                if duplicate.exists():
+                    raise serializers.ValidationError(
+                        {
+                            "name": (
+                                "An organisation named "
+                                f"\"{name}\" is already registered or under review. "
+                                "Ask an existing member to invite you instead of creating a new one."
+                            )
+                        }
+                    )
+        return attrs
+
     @transaction.atomic
     def create(self, validated_data):
         organisation = super().create(validated_data)
