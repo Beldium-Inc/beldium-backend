@@ -388,6 +388,84 @@ class ApplicationTests(MiningTestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class ApplicationClaimTests(MiningTestCase):
+    """Multiple verified compliance-partner orgs see the same register — one
+    claiming an application must lock the rest out, since a plain PATCH to
+    assigned_to used to let anyone silently overwrite anyone else's claim."""
+
+    def setUp(self):
+        super().setUp()
+        self.application = Application.objects.create(
+            organisation=self.miner_org, site=self.site, site_name=self.site.name, mineral="Tin",
+        )
+        second_desk = make_org("Second Compliance Partner", OrganisationType.COMPLIANCE_PARTNER)
+        self.second_reviewer = make_user("reviewer2@second-desk.test")
+        OrganisationMembership.objects.create(
+            organisation=second_desk, user=self.second_reviewer, role=MembershipRole.REVIEWER
+        )
+
+    def claim_url(self):
+        return reverse("mining-application-claim", args=[self.application.id])
+
+    def release_url(self):
+        return reverse("mining-application-release", args=[self.application.id])
+
+    def test_reviewer_can_claim_an_unclaimed_application(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(self.claim_url())
+        self.assertEqual(response.status_code, 200, response.data)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.assigned_to_id, self.operator.id)
+
+    def test_a_second_reviewer_cannot_claim_an_already_claimed_application(self):
+        self.client.force_authenticate(self.operator)
+        self.client.post(self.claim_url())
+
+        self.client.force_authenticate(self.second_reviewer)
+        response = self.client.post(self.claim_url())
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "already_claimed")
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.assigned_to_id, self.operator.id)
+
+    def test_a_plain_patch_cannot_set_assigned_to(self):
+        self.client.force_authenticate(self.operator)
+        response = self.client.patch(
+            reverse("mining-application-detail", args=[self.application.id]),
+            {"assigned_to": str(self.second_reviewer.id)},
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.application.refresh_from_db()
+        self.assertIsNone(self.application.assigned_to_id)
+
+    def test_miner_cannot_claim_an_application(self):
+        self.client.force_authenticate(self.miner)
+        response = self.client.post(self.claim_url())
+        self.assertEqual(response.status_code, 403)
+
+    def test_claimant_can_release_and_another_reviewer_can_then_claim(self):
+        self.client.force_authenticate(self.operator)
+        self.client.post(self.claim_url())
+        release_response = self.client.post(self.release_url())
+        self.assertEqual(release_response.status_code, 200, release_response.data)
+        self.application.refresh_from_db()
+        self.assertIsNone(self.application.assigned_to_id)
+
+        self.client.force_authenticate(self.second_reviewer)
+        response = self.client.post(self.claim_url())
+        self.assertEqual(response.status_code, 200, response.data)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.assigned_to_id, self.second_reviewer.id)
+
+    def test_a_reviewer_cannot_release_someone_elses_claim(self):
+        self.client.force_authenticate(self.operator)
+        self.client.post(self.claim_url())
+
+        self.client.force_authenticate(self.second_reviewer)
+        response = self.client.post(self.release_url())
+        self.assertEqual(response.status_code, 403)
+
+
 class OrganisationVerificationTests(MiningTestCase):
     def url(self, decision):
         return reverse("mining-organisation-decision", args=[self.miner_org.id, decision])

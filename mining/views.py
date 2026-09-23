@@ -678,6 +678,57 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         application = serializer.save()
         self.record("application_updated", target=application.reference, application_id=str(application.id))
 
+    @extend_schema(request=None, responses=ApplicationSerializer)
+    @action(detail=True, methods=["post"])
+    def claim(self, request, pk=None):
+        """First reviewer to call this gets it; everyone after gets refused.
+
+        Every verified compliance-partner org sees the whole application
+        register (see get_queryset/sees_whole_register), so without this,
+        two reviewers from different organisations could both start working
+        the same application — or one could silently overwrite the other's
+        assignment via a plain PATCH, since assigned_to used to be a normal
+        writable field with no exclusivity check at all.
+        """
+        if not can_decide(request.user):
+            raise PermissionDenied("Only the compliance desk can claim an application.")
+        application = Application.objects.select_for_update().get(pk=self.get_object().pk)
+        if application.assigned_to_id and application.assigned_to_id != request.user.id:
+            raise ConflictError(
+                "This application has already been claimed by another reviewer.",
+                code="already_claimed",
+            )
+        if application.assigned_to_id != request.user.id:
+            application.assigned_to = request.user
+            application.save(update_fields=["assigned_to", "updated_at"])
+            self.record(
+                "application_claimed", target=application.reference, application_id=str(application.id),
+            )
+        return Response(ApplicationSerializer(application, context={"request": request}).data)
+
+    @extend_schema(request=None, responses=ApplicationSerializer)
+    @action(detail=True, methods=["post"])
+    def release(self, request, pk=None):
+        """Lets the current claimant (or true platform staff) hand it back.
+
+        Deliberately not gated by can_decide/is_operator: every verified
+        compliance-partner org shares that same audience in this codebase
+        (see organisations/access.py:audience), so a rival reviewer passing
+        either check could release someone else's claim and immediately
+        re-claim it themselves — exactly the takeover claiming is meant to
+        prevent. Only Django staff (Beldium itself) gets the override.
+        """
+        application = Application.objects.select_for_update().get(pk=self.get_object().pk)
+        if application.assigned_to_id != request.user.id and not (request.user.is_staff or request.user.is_superuser):
+            raise PermissionDenied("You have not claimed this application.")
+        if application.assigned_to_id is not None:
+            application.assigned_to = None
+            application.save(update_fields=["assigned_to", "updated_at"])
+            self.record(
+                "application_released", target=application.reference, application_id=str(application.id),
+            )
+        return Response(ApplicationSerializer(application, context={"request": request}).data)
+
 
 class PendingReviewViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
     serializer_class = PendingReviewSerializer

@@ -420,13 +420,22 @@ class InventoryItemSerializer(serializers.ModelSerializer):
 
 
 class ApplicationSerializer(serializers.ModelSerializer):
+    assigned_to_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Application
         fields = [
             "id", "reference", "organisation", "site", "site_name", "type", "mineral",
-            "submitted_on", "stage", "status", "assigned_to", "sla_days", "created_at", "updated_at",
+            "submitted_on", "stage", "status", "assigned_to", "assigned_to_name", "sla_days", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "reference", "status", "created_at", "updated_at"]
+        # assigned_to is deliberately read-only here: a plain PATCH had no
+        # exclusivity check at all, so any reviewer could silently overwrite
+        # someone else's claim. Claiming/reassigning now only happens through
+        # the dedicated claim action, which locks the row and checks first.
+        read_only_fields = ["id", "reference", "status", "assigned_to", "assigned_to_name", "created_at", "updated_at"]
+
+    def get_assigned_to_name(self, obj) -> str | None:
+        return actor_name(obj.assigned_to) if obj.assigned_to_id else None
 
     def validate_organisation(self, value):
         if self.instance and value != self.instance.organisation:
