@@ -44,7 +44,18 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "patch", "delete", "head", "options"]
     # Without these the project's DjangoFilterBackend has nothing to act on and
     # ?status= / ?organisation= are accepted but silently ignored.
-    filterset_fields = ["status", "organisation"]
+    filterset_fields = {
+        "status": ["exact"],
+        "organisation": ["exact"],
+        # ?organisation__organisation_type__in=compliance_partner,inspection_body
+        # lets the staff vetting desk ask for partner applications server-side
+        # instead of filtering one page of every vertical's applications.
+        "organisation__organisation_type": ["exact", "in"],
+    }
+    ordering_fields = ["created_at", "submitted_at"]
+    # Newest first, so a just-created application is on page one rather than
+    # wherever an unordered queryset happens to put it.
+    ordering = ["-created_at"]
 
     @extend_schema(exclude=True)
     def destroy(self, request, *args, **kwargs):

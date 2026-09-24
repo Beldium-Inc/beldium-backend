@@ -240,11 +240,15 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
     personnel = PersonnelSerializer(many=True, read_only=True)
     documents = ComplianceDocumentSerializer(many=True, read_only=True)
     progress = serializers.SerializerMethodField()
+    # The organisation record's type, set at signup. organisation_profile only
+    # carries a type once the applicant saves the organisation section, so it
+    # can't be relied on to tell a partner application from a miner's.
+    organisation_type = serializers.CharField(source="organisation.organisation_type", read_only=True)
 
     class Meta:
         model = ComplianceApplication
         fields = [
-            "id", "reference", "organisation", "status", "organisation_profile", "representative", "services",
+            "id", "reference", "organisation", "organisation_type", "status", "organisation_profile", "representative", "services",
             "professional_capability", "inspection_capability", "conflict_declaration", "declaration",
             "submitted_at", "reviewed_at", "review_notes", "conditional_requirements", "personnel",
             "documents", "conditions", "progress", "created_at", "updated_at",
