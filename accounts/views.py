@@ -3,7 +3,8 @@ import logging
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
@@ -103,7 +104,21 @@ class VerifiedTokenObtainPairView(TokenObtainPairView):
 class ThrottledTokenRefreshView(TokenRefreshView):
     """Refresh mints access tokens, so it needs a ceiling like any other credential endpoint."""
 
+    authentication_classes = [JWTAuthentication]
+    permission_classes = [IsAuthenticated]
     throttle_classes = [TokenRefreshThrottle]
+
+    def post(self, request, *args, **kwargs):
+        refresh_token = request.data.get("refresh")
+        if not refresh_token:
+            raise AppError("Refresh token is required.", code="refresh_token_required")
+        try:
+            token = RefreshToken(refresh_token)
+        except TokenError as exc:
+            raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401) from exc
+        if str(token.get(api_settings.USER_ID_CLAIM)) != str(request.user.pk):
+            raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401)
+        return Response({"access": str(token.access_token)}, status=status.HTTP_200_OK)
 
 
 class ResendVerificationView(generics.GenericAPIView):
