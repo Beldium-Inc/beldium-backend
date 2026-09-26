@@ -77,3 +77,25 @@ class SecretKeyCheckTests(SimpleTestCase):
     @override_settings(SECRET_KEY="short", ENVIRONMENT="production")
     def test_a_short_key_is_rejected(self):
         self.assertEqual(secret_key_is_strong(None)[0].id, "beldium.E001")
+
+
+class ServeStoredFileTests(SimpleTestCase):
+    def test_streams_bytes_even_when_storage_hands_back_a_signed_url(self):
+        # S3 storage returns an absolute signed URL. Redirecting to it breaks the
+        # frontend's authenticated fetch (the bucket has no CORS rule), so the
+        # bytes must come back from our own origin instead.
+        from unittest import mock
+
+        from django.core.files.base import ContentFile
+
+        from common.files import serve_stored_file
+
+        stored = mock.Mock()
+        stored.url = "https://bucket.s3.amazonaws.com/doc.pdf?X-Amz-Signature=abc"
+        stored.open.return_value = ContentFile(b"%PDF-1.4 test", name="doc.pdf")
+
+        response = serve_stored_file(stored, "doc.pdf")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(b"".join(response.streaming_content), b"%PDF-1.4 test")
+        self.assertEqual(response["Content-Type"], "application/pdf")

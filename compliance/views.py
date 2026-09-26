@@ -12,7 +12,6 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 
 from pathlib import Path
 
-from django.http import FileResponse, HttpResponseRedirect
 
 from accounts.audit import record_account_event
 from accounts.models import AccountAuditEvent
@@ -32,6 +31,7 @@ from compliance.serializers import (
 )
 from compliance.workflow import require_review, transition
 from common.exceptions import AppError, ConflictError
+from common.files import serve_stored_file
 from organisations.models import MembershipRole
 
 
@@ -273,18 +273,8 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         return Response(ComplianceDocumentSerializer(document, context={"request": request}).data, status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED)
 
     def _serve(self, stored_file, filename):
-        """Hand back a stored file without exposing the storage layer.
-
-        S3-backed storage signs an absolute URL that is already access
-        controlled and expires on its own, so redirecting to it is both cheaper
-        and safer than proxying the bytes. Local storage returns a bare
-        site-relative path with nothing guarding it, so those bytes are streamed
-        through this view, which has already checked the caller.
-        """
-        url = stored_file.url
-        if url.startswith(("http://", "https://")):
-            return HttpResponseRedirect(url)
-        return FileResponse(stored_file.open("rb"), as_attachment=True, filename=filename)
+        """Stream a stored file; see common.files.serve_stored_file."""
+        return serve_stored_file(stored_file, filename)
 
     @extend_schema(parameters=[OpenApiParameter("document_id", OpenApiTypes.UUID, OpenApiParameter.PATH)])
     @action(detail=True, methods=["get"], url_path=r"documents/(?P<document_id>[^/.]+)/download", url_name="download-document")

@@ -11,7 +11,6 @@ from datetime import timedelta
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db.models import Count, Q
-from django.http import FileResponse, HttpResponseRedirect
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -24,6 +23,7 @@ from rest_framework.views import APIView
 
 from accounts.models import AccountAuditEvent
 from common.exceptions import AppError, ConflictError
+from common.files import serve_stored_file
 from processing import audit, checklist, reports, scoring
 from processing.models import (
     EXPIRY_WARNING_DAYS,
@@ -96,20 +96,6 @@ DECISION_STATUS = {
     ApplicationDecision.CONDITIONAL: ProcessorStatus.CONDITIONAL,
     ApplicationDecision.REJECTED: ProcessorStatus.SUSPENDED,
 }
-
-
-def serve_file(stored_file, filename):
-    """Hand back a stored file without exposing the storage layer.
-
-    An S3 URL is already signed, access controlled and self-expiring, so a
-    redirect is both cheaper and safer than proxying bytes. A local path has
-    nothing guarding it, so those bytes are streamed through this view, which
-    has already checked the caller.
-    """
-    url = stored_file.url
-    if url.startswith(("http://", "https://")):
-        return HttpResponseRedirect(url)
-    return FileResponse(stored_file.open("rb"), as_attachment=True, filename=filename)
 
 
 class ProcessingViewSetMixin:
@@ -631,7 +617,7 @@ class NonConformityViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet):
         evidence = NonConformityEvidence.objects.filter(id=evidence_id, non_conformity=finding).first()
         if not evidence or not evidence.file:
             raise AppError("Evidence file not found.", code="not_found", status_code=404)
-        return serve_file(evidence.file, evidence.original_name)
+        return serve_stored_file(evidence.file, evidence.original_name)
 
 
 class InspectionViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet):
@@ -831,7 +817,7 @@ class ProcessingDocumentViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelVi
         document = self.get_object()
         if not document.file:
             raise AppError("No file has been uploaded for this document.", code="not_found", status_code=404)
-        return serve_file(document.file, document.original_name)
+        return serve_stored_file(document.file, document.original_name)
 
     @extend_schema(request=ProcessingDocumentReviewSerializer, responses=ProcessingDocumentSerializer)
     @action(detail=True, methods=["post"], url_path="review", url_name="review")
@@ -938,7 +924,7 @@ class ComplianceReportViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelView
         report = self.get_object()
         if not report.file:
             raise AppError("This report has no stored file.", code="not_found", status_code=404)
-        return serve_file(report.file, f"{report.reference}.pdf")
+        return serve_stored_file(report.file, f"{report.reference}.pdf")
 
 
 class ProcessingAuditViewSet(ProcessingViewSetMixin, viewsets.ReadOnlyModelViewSet):

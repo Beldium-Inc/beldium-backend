@@ -13,7 +13,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
-from django.http import FileResponse, HttpResponse, HttpResponseRedirect
+from django.http import HttpResponse
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -28,6 +28,7 @@ from accounts.audit import record_account_event
 from accounts.models import AccountAuditEvent
 from organisations.models import Organisation
 from common.exceptions import AppError, ConflictError
+from common.files import serve_stored_file
 from mining import audit, checklist, reports, scoring, verification
 from mining.models import (
     Application,
@@ -97,20 +98,6 @@ from mining.serializers import (
 
 LICENCE_EXPIRY_WARNING_DAYS = 60
 KPI_TREND_MONTHS = 6
-
-
-def serve_file(stored_file, filename):
-    """Hand back a stored file without exposing the storage layer.
-
-    An S3 URL is already signed, access controlled and self-expiring, so a
-    redirect is both cheaper and safer than proxying bytes. A local path has
-    nothing guarding it, so those bytes are streamed through this view, which
-    has already checked the caller.
-    """
-    url = stored_file.url
-    if url.startswith(("http://", "https://")):
-        return HttpResponseRedirect(url)
-    return FileResponse(stored_file.open("rb"), as_attachment=True, filename=filename)
 
 
 class MiningViewSetMixin:
@@ -297,7 +284,7 @@ class MineSiteViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         evidence = Evidence.objects.filter(id=evidence_id, section__site=site).first()
         if not evidence or not evidence.file:
             raise AppError("Evidence file not found.", code="not_found", status_code=404)
-        return serve_file(evidence.file, evidence.original_name)
+        return serve_stored_file(evidence.file, evidence.original_name)
 
     @extend_schema(methods=["GET"], responses=ScoreFactorSerializer(many=True))
     @extend_schema(methods=["POST"], request=ScoreFactorSerializer, responses={201: ScoreFactorSerializer})
@@ -848,7 +835,7 @@ class LicenceDocViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         licence = self.get_object()
         if not licence.file:
             raise AppError("No file has been uploaded for this licence.", code="not_found", status_code=404)
-        return serve_file(licence.file, f"{licence.type}-{licence.number}")
+        return serve_stored_file(licence.file, f"{licence.type}-{licence.number}")
 
 
 class DocumentRecordViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
@@ -897,7 +884,7 @@ class DocumentRecordViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         document = self.get_object()
         if not document.file:
             raise AppError("No file has been uploaded for this document.", code="not_found", status_code=404)
-        return serve_file(document.file, document.original_name)
+        return serve_stored_file(document.file, document.original_name)
 
 
 class MiningAuditViewSet(MiningViewSetMixin, viewsets.ReadOnlyModelViewSet):
