@@ -107,10 +107,50 @@ class AuthenticationEdgeCaseTests(APITestCase):
             "password": "SafePassword-2026!",
         }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
 
-        response = self.client.post(reverse("token-refresh"), {"refresh": login.data["refresh"]})
+        response = self.client.post(
+            reverse("token-refresh"),
+            {"refresh": login.data["refresh"]},
+            HTTP_AUTHORIZATION=f"Bearer {login.data['access']}",
+        )
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
+
+    def test_refresh_without_a_live_access_token_is_refused(self):
+        # An idle client whose access token has lapsed cannot mint a new one:
+        # that is what ends an inactive session.
+        user = User.objects.create_user(
+            "idle@example.com",
+            "SafePassword-2026!",
+            email_verified_at=timezone.now(),
+        )
+        login = self.client.post(reverse("token"), {
+            "email": user.email,
+            "password": "SafePassword-2026!",
+        }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+
+        response = self.client.post(reverse("token-refresh"), {"refresh": login.data["refresh"]})
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertNotIn("access", response.data)
+
+    def test_refresh_token_must_belong_to_the_caller(self):
+        owner = User.objects.create_user(
+            "owner@example.com", "SafePassword-2026!", email_verified_at=timezone.now()
+        )
+        other = User.objects.create_user(
+            "other@example.com", "SafePassword-2026!", email_verified_at=timezone.now()
+        )
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        response = self.client.post(
+            reverse("token-refresh"),
+            {"refresh": str(RefreshToken.for_user(other))},
+            HTTP_AUTHORIZATION=f"Bearer {RefreshToken.for_user(owner).access_token}",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data["error"]["code"], "invalid_refresh_token")
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

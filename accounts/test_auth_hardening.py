@@ -240,7 +240,7 @@ class LogoutOwnershipTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["error"]["code"], "invalid_refresh_token")
 
-        self.client.force_authenticate(user=None)
+        self.client.force_authenticate(user=self.victim)
         still_valid = self.client.post(reverse("token-refresh"), {"refresh": victim_refresh}, format="json")
         self.assertEqual(still_valid.status_code, 200, "the victim's session was revoked anyway")
 
@@ -272,7 +272,10 @@ class EmailChangeSessionTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("access", response.data)
 
+        # Refresh needs a live access token, so present the new one: the stale
+        # refresh token must still be refused on its own merits (blacklisted).
         self.client.force_authenticate(user=None)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {response.data['access']}")
         replayed = self.client.post(reverse("token-refresh"), {"refresh": stale_refresh}, format="json")
         self.assertEqual(replayed.status_code, 401, "a session predating the identity change survived")
 

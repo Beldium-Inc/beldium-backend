@@ -1,3 +1,4 @@
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count
 from django.shortcuts import get_object_or_404
@@ -5,7 +6,7 @@ from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
-from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -353,3 +354,22 @@ class InvitationAcceptanceView(generics.GenericAPIView):
         invitation.save(update_fields=["accepted_at", "updated_at"])
         record_event(request, "membership.invitation_accepted", organisation=invitation.organisation)
         return Response({"organisation_id": invitation.organisation_id, "role": invitation.role})
+
+
+class PlatformStatsView(generics.GenericAPIView):
+    """Public headline figures for the sign-in page. Counts only, nothing that
+    identifies an organisation, and cached so an anonymous page can't turn
+    into a query load."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    CACHE_KEY = "platform-stats:v1"
+    CACHE_SECONDS = 300
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    def get(self, request):
+        stats = cache.get(self.CACHE_KEY)
+        if stats is None:
+            stats = {"verified_organisations": Organisation.objects.filter(verification_status="verified").count()}
+            cache.set(self.CACHE_KEY, stats, self.CACHE_SECONDS)
+        return Response(stats)

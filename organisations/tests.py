@@ -234,3 +234,24 @@ class OrganisationTimelineTests(APITestCase):
     def test_non_member_cannot_read_timeline(self):
         self.client.force_authenticate(self.outsider)
         self.assertEqual(self.client.get(self.url).status_code, status.HTTP_404_NOT_FOUND)
+
+
+class PlatformStatsTests(APITestCase):
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def test_anonymous_caller_gets_only_the_verified_count(self):
+        Organisation.objects.create(name="A", organisation_type="mining_company", verification_status="verified")
+        Organisation.objects.create(name="B", organisation_type="compliance_partner", verification_status="verified")
+        Organisation.objects.create(name="C", organisation_type="mining_company", verification_status="draft")
+
+        response = self.client.get(reverse("platform-stats"))
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json(), {"verified_organisations": 2})
+
+    def test_a_stale_bearer_token_does_not_break_the_public_page(self):
+        response = self.client.get(reverse("platform-stats"), HTTP_AUTHORIZATION="Bearer not-a-real-token")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
