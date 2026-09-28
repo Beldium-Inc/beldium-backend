@@ -333,3 +333,140 @@ class ReportSerializer(serializers.ModelSerializer):
 class SummarySerializer(serializers.Serializer):
     """Aggregate response; domain records have dedicated typed serializers."""
     data = serializers.DictField()
+
+
+class TransportRequestSerializer(serializers.ModelSerializer):
+    quantity_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.TransportRequest
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_quantity_display(self, obj):
+        return f'{obj.quantity:g} {obj.quantity_unit}'
+
+
+class MovementSerializer(serializers.ModelSerializer):
+    vehicle_registration = serializers.CharField(source='vehicle.registration', read_only=True)
+    driver_name = serializers.CharField(source='driver.full_name', read_only=True)
+    quantity_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.Movement
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_quantity_display(self, obj):
+        return f'{obj.quantity:g} {obj.quantity_unit}'
+
+
+class DeliverySerializer(serializers.ModelSerializer):
+    movement_reference = serializers.CharField(source='movement.reference', read_only=True)
+    transaction_id = serializers.CharField(source='movement.transaction_id', read_only=True)
+    variance = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.Delivery
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_variance(self, obj):
+        if obj.received_quantity is None:
+            return None
+        return obj.received_quantity - obj.expected_quantity
+
+
+class LogisticsTransactionSerializer(serializers.ModelSerializer):
+    movement_reference = serializers.CharField(source='movement.reference', read_only=True)
+
+    class Meta:
+        model = m.LogisticsTransaction
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class LogisticsPaymentSerializer(serializers.ModelSerializer):
+    transaction_id = serializers.CharField(source='transaction.transaction_id', read_only=True)
+    movement_reference = serializers.CharField(source='movement.reference', read_only=True)
+    outstanding_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.LogisticsPayment
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def get_outstanding_amount(self, obj):
+        return obj.due_amount - obj.paid_amount
+
+
+class IncidentSerializer(serializers.ModelSerializer):
+    movement_reference = serializers.CharField(source='movement.reference', read_only=True)
+    vehicle_registration = serializers.CharField(source='movement.vehicle.registration', read_only=True)
+    driver_name = serializers.CharField(source='movement.driver.full_name', read_only=True)
+
+    class Meta:
+        model = m.Incident
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class OperationsDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.OperationsDocument
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ComplianceFindingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.ComplianceFinding
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class QualityRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.QualityRecord
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class OperationsEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.OperationsEvent
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class ActionItemSerializer(serializers.ModelSerializer):
+    movement_reference = serializers.CharField(source='related_movement.reference', read_only=True)
+
+    class Meta:
+        model = m.ActionItem
+        fields = '__all__'
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class MovementAssignSerializer(serializers.Serializer):
+    vehicle = serializers.PrimaryKeyRelatedField(queryset=m.Vehicle.objects.filter(is_active=True), required=False)
+    driver = serializers.PrimaryKeyRelatedField(queryset=m.Driver.objects.filter(is_active=True), required=False)
+
+
+class MovementStatusSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=m.Movement._meta.get_field('status').choices)
+    occurred_at = serializers.DateTimeField(required=False)
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False)
+    note = serializers.CharField(required=False, allow_blank=True)
+
+
+class DeliveryCompleteSerializer(serializers.Serializer):
+    received_quantity = serializers.DecimalField(max_digits=14, decimal_places=3)
+    receipt_reference = serializers.CharField(max_length=80, required=False, allow_blank=True)
+    custody_transferred_at = serializers.DateTimeField(required=False)
+
+
+class IncidentResolveSerializer(serializers.Serializer):
+    resolution = serializers.CharField()
+    status = serializers.CharField(max_length=40, default='Resolved')
