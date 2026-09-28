@@ -182,7 +182,7 @@ class MineSiteViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
     def get_object(self):
         site = super().get_object()
         if self.request.method not in {"GET", "HEAD", "OPTIONS"}:
-            return MineSite.objects.select_for_update().select_related("organisation").get(pk=site.pk)
+            return MineSite.objects.select_for_update(of=("self",)).select_related("organisation").get(pk=site.pk)
         return site
 
     def _assert_owns(self, site):

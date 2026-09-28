@@ -223,7 +223,7 @@ class ProcessingApplicationViewSet(ProcessingViewSetMixin, viewsets.ModelViewSet
             # Two reviewers acting on the same application would otherwise
             # interleave a stage change with a decision.
             return (
-                ProcessingApplication.objects.select_for_update()
+                ProcessingApplication.objects.select_for_update(of=("self",))
                 .select_related("processor", "organisation")
                 .get(pk=application.pk)
             )
