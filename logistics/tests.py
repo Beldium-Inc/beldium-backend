@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -20,7 +21,16 @@ from logistics.models import (
     LogisticsCompany,
     LogisticsDocument,
     LogisticsReport,
+    LogisticsPayment,
+    LogisticsTransaction,
     MonitoringEvent,
+    Movement,
+    TransportRequest,
+    Delivery,
+    Incident,
+    ActionItem,
+    OperationsEvent,
+    ComplianceFinding,
     ScopeRestriction,
     Vehicle,
 )
@@ -481,3 +491,180 @@ class LogisticsWorkflowTests(LogisticsTestCase):
         )
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["error"]["code"], "condition_already_cleared")
+
+
+class LogisticsOperationsPortalTests(LogisticsTestCase):
+    def make_ops_vehicle_driver(self):
+        vehicle = self.make_vehicle(registration="LG-220", vin="VIN00000000000220")
+        driver = self.make_driver(full_name="Halima Sule", licence_number="NGA-DL-220")
+        driver.assigned_vehicle = vehicle
+        driver.save(update_fields=["assigned_vehicle", "updated_at"])
+        return vehicle, driver
+
+    def make_movement(self, **overrides):
+        defaults = {
+            "company": self.company,
+            "reference": "MOV-1042",
+            "batch_id": "BATCH-NL024-07",
+            "rfq_id": "RFQ-8841",
+            "transaction_id": "TXN-5521",
+            "movement_type": "bulk",
+            "miner": "Nasarawa Lithium Coop",
+            "buyer": "Zhen Hua Metals",
+            "mineral": "Lithium Concentrate",
+            "quantity": "32.000",
+            "quantity_unit": "MT",
+            "origin": "Mine NL-024",
+            "destination": "Pyramid Processing Plant",
+            "status": "scheduled",
+            "pickup_at": timezone.now(),
+        }
+        return Movement.objects.create(**{**defaults, **overrides})
+
+    def test_operations_records_are_scoped_to_accessible_companies(self):
+        Movement.objects.create(
+            company=self.company,
+            reference="MOV-1001",
+            movement_type="sample",
+            mineral="Lithium",
+            quantity="0.008",
+            quantity_unit="kg",
+            origin="Mine",
+            destination="Lab",
+            status="in_transit",
+        )
+        other_company = LogisticsCompany.objects.create(
+            organisation=self.other_org,
+            contact_name="Other Owner",
+            contact_email="ops@other.example",
+            contact_phone="+2348111111111",
+            services=["general freight"],
+        )
+        Movement.objects.create(
+            company=other_company,
+            reference="MOV-OTHER",
+            movement_type="bulk",
+            mineral="Barite",
+            origin="Warehouse",
+            destination="Port",
+            status="delivered",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(reverse("logistics-movement-list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["reference"], "MOV-1001")
+
+    def test_operations_dashboard_matches_portal_summary_needs(self):
+        vehicle, driver = self.make_ops_vehicle_driver()
+        movement = self.make_movement(vehicle=vehicle, driver=driver, status="in_transit")
+        TransportRequest.objects.create(
+            company=self.company,
+            reference="TR-2296",
+            rfq_id="RFQ-8902",
+            transaction_id="TXN-5560",
+            movement_type="bulk",
+            requester="Export Desk",
+            miner="Jos Tin Collective",
+            buyer="Baltic Ore AG",
+            mineral="Cassiterite",
+            quantity="24.000",
+            origin="Mine JS-011",
+            destination="Warehouse ABJ-2",
+        )
+        ActionItem.objects.create(company=self.company, action="Assign Vehicle", target="TR-2296", urgency="Today")
+        OperationsEvent.objects.create(company=self.company, occurred_at=timezone.now(), sector="Tracking", event_type="Tracking", text="Checkpoint recorded.", unread=True)
+        ComplianceFinding.objects.create(company=self.company, reference="NC-117", area="Driver", detail="Training overdue", action="Schedule refresher", status="Open")
+        LogisticsTransaction.objects.create(
+            company=self.company,
+            transaction_id="TXN-5521",
+            buyer="Zhen Hua Metals",
+            miner="Nasarawa Lithium Coop",
+            material="Lithium",
+            quantity="32.000",
+            origin="Mine NL-024",
+            destination="Pyramid Processing",
+            movement=movement,
+            transport_fee="1840000.00",
+            stage="Bulk logistics - in transit",
+            delivery_status="In transit",
+            payment_status="50% advanced",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(reverse("logistics-operations_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["stats"]["active_jobs"], 1)
+        self.assertEqual(response.data["stats"]["new_transport_requests"], 1)
+        self.assertEqual(response.data["stats"]["unread_notifications"], 1)
+        self.assertEqual(response.data["action_items"][0]["action"], "Assign Vehicle")
+        self.assertEqual(response.data["active_movements"][0]["vehicle_registration"], "LG-220")
+
+    def test_movement_assignment_and_status_update(self):
+        vehicle, driver = self.make_ops_vehicle_driver()
+        movement = self.make_movement()
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"vehicle": str(vehicle.id), "driver": str(driver.id)},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "assigned")
+        self.assertEqual(response.data["vehicle_registration"], "LG-220")
+
+        response = self.client.post(
+            reverse("logistics-movement-set-status", args=[movement.id]),
+            {"status": "in_transit", "latitude": "9.076500", "longitude": "7.398600", "note": "Truck dispatched."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "in_transit")
+        self.assertEqual(OperationsEvent.objects.filter(company=self.company, text="Truck dispatched.").count(), 1)
+
+    def test_delivery_completion_and_incident_resolution(self):
+        movement = self.make_movement(status="in_transit")
+        delivery = Delivery.objects.create(
+            company=self.company,
+            reference="DEL-902",
+            movement=movement,
+            destination_type="Processor",
+            destination="Pyramid Processing Plant",
+            expected_quantity="32.000",
+            quantity_unit="MT",
+            status="In transit to processor",
+        )
+        incident = Incident.objects.create(
+            company=self.company,
+            reference="INC-318",
+            movement=movement,
+            incident_type="Quantity Discrepancy",
+            severity="medium",
+            status="Open",
+            occurred_at=timezone.now(),
+            description="Weighbridge discrepancy.",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            reverse("logistics-delivery-complete", args=[delivery.id]),
+            {"received_quantity": "31.920", "receipt_reference": "PR-2209"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "completed")
+        self.assertEqual(response.data["variance"], Decimal("-0.080"))
+
+        response = self.client.post(
+            reverse("logistics-incident-resolve", args=[incident.id]),
+            {"resolution": "Variance accepted after joint review.", "status": "Resolved"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "Resolved")

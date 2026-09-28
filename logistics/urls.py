@@ -17,10 +17,21 @@ for prefix, view, basename in [
     ('notifications', views.NotificationViewSet, 'logistics-notification'),
     ('alerts', views.AlertViewSet, 'logistics-alert'),
     ('reports', views.ReportViewSet, 'logistics-report'),
+    ('transport-requests', views.TransportRequestViewSet, 'logistics-transport-request'),
+    ('movements', views.MovementViewSet, 'logistics-movement'),
+    ('deliveries', views.DeliveryViewSet, 'logistics-delivery'),
+    ('operations-transactions', views.LogisticsTransactionViewSet, 'logistics-operations-transaction'),
+    ('operations-payments', views.LogisticsPaymentViewSet, 'logistics-operations-payment'),
+    ('incidents', views.IncidentViewSet, 'logistics-incident'),
+    ('operations-documents', views.OperationsDocumentViewSet, 'logistics-operations-document'),
+    ('compliance-findings', views.ComplianceFindingViewSet, 'logistics-compliance-finding'),
+    ('quality-records', views.QualityRecordViewSet, 'logistics-quality-record'),
+    ('operations-events', views.OperationsEventViewSet, 'logistics-operations-event'),
+    ('action-items', views.ActionItemViewSet, 'logistics-action-item'),
 ]:
     router.register(prefix, view, basename=basename)
 
 urlpatterns = router.urls + [
     path(name + '/', views.SummaryViewSet.as_view({'get': name}), name='logistics-' + name)
-    for name in ['me', 'dashboard', 'risk', 'audit']
+    for name in ['me', 'dashboard', 'risk', 'audit', 'operations_dashboard']
 ]

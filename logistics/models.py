@@ -240,6 +240,209 @@ class MonitoringEvent(TimeStampedModel):
     document = models.ForeignKey(LogisticsDocument, on_delete=models.CASCADE, null=True, blank=True)
 
 
+class TransportRequest(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='transport_requests')
+    reference = models.CharField(max_length=40, unique=True)
+    rfq_id = models.CharField(max_length=60, blank=True, db_index=True)
+    transaction_id = models.CharField(max_length=60, blank=True, db_index=True)
+    movement_type = models.CharField(max_length=40, db_index=True)
+    requester = models.CharField(max_length=200)
+    miner = models.CharField(max_length=200, blank=True, db_index=True)
+    buyer = models.CharField(max_length=200, blank=True, db_index=True)
+    mineral = models.CharField(max_length=120, blank=True, db_index=True)
+    quantity = models.DecimalField(max_digits=14, decimal_places=3, default=0, validators=[MinValueValidator(0)])
+    quantity_unit = models.CharField(max_length=20, default='MT')
+    origin = models.CharField(max_length=255)
+    destination = models.CharField(max_length=255)
+    required_pickup_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    status = models.CharField(max_length=30, choices=[('new', 'New'), ('accepted', 'Accepted'), ('assigned', 'Assigned'), ('blocked', 'Blocked'), ('cancelled', 'Cancelled')], default='new', db_index=True)
+    blocked_reason = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['required_pickup_at', '-created_at']
+        indexes = [models.Index(fields=['company', 'status', 'movement_type'])]
+
+
+class Movement(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='movements')
+    reference = models.CharField(max_length=40, unique=True)
+    request = models.ForeignKey(TransportRequest, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements')
+    batch_id = models.CharField(max_length=80, blank=True, db_index=True)
+    rfq_id = models.CharField(max_length=60, blank=True, db_index=True)
+    transaction_id = models.CharField(max_length=60, blank=True, db_index=True)
+    movement_type = models.CharField(max_length=40, db_index=True)
+    miner = models.CharField(max_length=200, blank=True, db_index=True)
+    buyer = models.CharField(max_length=200, blank=True, db_index=True)
+    mineral = models.CharField(max_length=120, db_index=True)
+    quantity = models.DecimalField(max_digits=14, decimal_places=3, default=0, validators=[MinValueValidator(0)])
+    quantity_unit = models.CharField(max_length=20, default='MT')
+    origin = models.CharField(max_length=255)
+    destination = models.CharField(max_length=255)
+    vehicle = models.ForeignKey(Vehicle, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements')
+    driver = models.ForeignKey(Driver, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements')
+    pickup_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    eta_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    delivered_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    status = models.CharField(max_length=30, choices=[('scheduled', 'Scheduled'), ('assigned', 'Assigned'), ('loading', 'Loading'), ('in_transit', 'In transit'), ('delayed', 'Delayed'), ('delivered', 'Delivered'), ('cancelled', 'Cancelled')], db_index=True)
+    last_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    last_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    last_gps_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-pickup_at', '-created_at']
+        indexes = [models.Index(fields=['company', 'status', 'movement_type']), models.Index(fields=['company', 'miner', 'buyer'])]
+
+
+class Delivery(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='deliveries')
+    reference = models.CharField(max_length=40, unique=True)
+    movement = models.ForeignKey(Movement, on_delete=models.CASCADE, related_name='deliveries')
+    destination_type = models.CharField(max_length=40, db_index=True)
+    destination = models.CharField(max_length=255)
+    expected_quantity = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    received_quantity = models.DecimalField(max_digits=14, decimal_places=3, null=True, blank=True)
+    quantity_unit = models.CharField(max_length=20, default='MT')
+    receipt_reference = models.CharField(max_length=80, blank=True)
+    arrived_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    custody_transferred_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=40, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-arrived_at', '-created_at']
+
+
+class LogisticsTransaction(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_transactions')
+    transaction_id = models.CharField(max_length=60, unique=True)
+    rfq_id = models.CharField(max_length=60, blank=True, db_index=True)
+    buyer = models.CharField(max_length=200, db_index=True)
+    miner = models.CharField(max_length=200, db_index=True)
+    material = models.CharField(max_length=150, db_index=True)
+    quantity = models.DecimalField(max_digits=14, decimal_places=3, default=0)
+    quantity_unit = models.CharField(max_length=20, default='MT')
+    origin = models.CharField(max_length=255)
+    destination = models.CharField(max_length=255)
+    movement = models.ForeignKey(Movement, on_delete=models.SET_NULL, null=True, blank=True, related_name='transactions')
+    transport_fee = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    stage = models.CharField(max_length=120, db_index=True)
+    delivery_status = models.CharField(max_length=60, db_index=True)
+    payment_status = models.CharField(max_length=60, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class LogisticsPayment(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_payments')
+    reference = models.CharField(max_length=40, unique=True)
+    transaction = models.ForeignKey(LogisticsTransaction, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    movement = models.ForeignKey(Movement, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    invoice_reference = models.CharField(max_length=80, blank=True, db_index=True)
+    job_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    due_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    status = models.CharField(max_length=40, db_index=True)
+    payment_date = models.DateField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class Incident(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='incidents')
+    reference = models.CharField(max_length=40, unique=True)
+    movement = models.ForeignKey(Movement, on_delete=models.SET_NULL, null=True, blank=True, related_name='incidents')
+    incident_type = models.CharField(max_length=60, db_index=True)
+    severity = models.CharField(max_length=20, choices=[('low', 'Low'), ('medium', 'Medium'), ('high', 'High'), ('critical', 'Critical')], db_index=True)
+    status = models.CharField(max_length=40, db_index=True)
+    location = models.CharField(max_length=255, blank=True)
+    occurred_at = models.DateTimeField(db_index=True)
+    description = models.TextField()
+    immediate_action = models.TextField(blank=True)
+    resolution = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-occurred_at']
+
+
+class OperationsDocument(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_documents')
+    reference = models.CharField(max_length=40, unique=True)
+    name = models.CharField(max_length=200)
+    document_type = models.CharField(max_length=80, db_index=True)
+    related_asset = models.CharField(max_length=200, blank=True)
+    issue_date = models.DateField(null=True, blank=True)
+    expiry_date = models.DateField(null=True, blank=True, db_index=True)
+    verification_status = models.CharField(max_length=40, db_index=True)
+    compliance_status = models.CharField(max_length=40, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['expiry_date', 'name']
+
+
+class ComplianceFinding(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_compliance_findings')
+    reference = models.CharField(max_length=40, unique=True)
+    area = models.CharField(max_length=80, db_index=True)
+    detail = models.TextField()
+    action = models.TextField(blank=True)
+    owner = models.CharField(max_length=160, blank=True)
+    status = models.CharField(max_length=40, db_index=True)
+    raised_at = models.DateTimeField(default=timezone.now, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-raised_at']
+
+
+class QualityRecord(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='quality_records')
+    transaction_id = models.CharField(max_length=60, db_index=True)
+    sample_status = models.CharField(max_length=160)
+    result = models.CharField(max_length=160, blank=True)
+    approval = models.CharField(max_length=80, db_index=True)
+    handling = models.CharField(max_length=200, blank=True)
+    certificate = models.CharField(max_length=80, blank=True)
+    buyer_acceptance = models.CharField(max_length=160, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+
+class OperationsEvent(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_events')
+    occurred_at = models.DateTimeField(db_index=True)
+    text = models.TextField()
+    sector = models.CharField(max_length=60, db_index=True)
+    event_type = models.CharField(max_length=60, blank=True, db_index=True)
+    unread = models.BooleanField(default=False, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-occurred_at', '-created_at']
+
+
+class ActionItem(TimeStampedModel):
+    company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='action_items')
+    action = models.CharField(max_length=160)
+    target = models.CharField(max_length=255)
+    urgency = models.CharField(max_length=80, db_index=True)
+    status = models.CharField(max_length=30, choices=[('open', 'Open'), ('done', 'Done'), ('dismissed', 'Dismissed')], default='open', db_index=True)
+    related_movement = models.ForeignKey(Movement, on_delete=models.SET_NULL, null=True, blank=True, related_name='action_items')
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['status', '-created_at']
+
+
 class Notification(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE)
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)

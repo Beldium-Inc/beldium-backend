@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Count, Sum
 from django.http import FileResponse, HttpResponse
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, OpenApiParameter
@@ -589,6 +589,216 @@ class AlertViewSet(mixins.ListModelMixin, AtomicViewSet):
         return m.MonitoringEvent.objects.filter(company_id__in=company_ids(self.request.user)).order_by('-created_at')
 
 
+class OperationsRecordViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, AtomicViewSet):
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    filterset_fields = ['company']
+    search_fields = []
+
+    def get_queryset(self):
+        return self.queryset.model.objects.filter(company_id__in=company_ids(self.request.user))
+
+    def perform_create(self, serializer):
+        company = serializer.validated_data['company']
+        assert_editor(self.request.user, company)
+        obj = serializer.save()
+        services.audit(self.request, company, obj._meta.model_name + '_created', object_id=str(obj.pk))
+
+    def perform_update(self, serializer):
+        assert_editor(self.request.user, serializer.instance.company)
+        obj = serializer.save()
+        services.audit(self.request, obj.company, obj._meta.model_name + '_updated', object_id=str(obj.pk))
+
+
+class TransportRequestViewSet(OperationsRecordViewSet):
+    queryset = m.TransportRequest.objects.none()
+    serializer_class = s.TransportRequestSerializer
+    filterset_fields = ['company', 'status', 'movement_type', 'miner', 'buyer', 'mineral']
+    search_fields = ['reference', 'rfq_id', 'transaction_id', 'requester', 'origin', 'destination']
+
+    @extend_schema(request=None, responses=s.TransportRequestSerializer)
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        item = self.get_object()
+        assert_editor(request.user, item.company)
+        if item.status == 'cancelled':
+            raise ConflictError('Cancelled transport requests cannot be accepted.')
+        item.status = 'accepted'
+        item.save(update_fields=['status', 'updated_at'])
+        services.audit(request, item.company, 'transport_request_accepted', request_id=str(item.pk))
+        return Response(self.get_serializer(item).data)
+
+
+class MovementViewSet(OperationsRecordViewSet):
+    queryset = m.Movement.objects.none()
+    serializer_class = s.MovementSerializer
+    filterset_fields = ['company', 'status', 'movement_type', 'miner', 'buyer', 'mineral', 'vehicle', 'driver']
+    search_fields = ['reference', 'batch_id', 'rfq_id', 'transaction_id', 'origin', 'destination']
+
+    def get_queryset(self):
+        return super().get_queryset().select_related('company', 'vehicle', 'driver', 'request')
+
+    @extend_schema(request=s.MovementAssignSerializer, responses=s.MovementSerializer)
+    @action(detail=True, methods=['post'])
+    def assign(self, request, pk=None):
+        movement = self.get_object()
+        assert_editor(request.user, movement.company)
+        payload = s.MovementAssignSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        vehicle = payload.validated_data.get('vehicle')
+        driver = payload.validated_data.get('driver')
+        if vehicle and vehicle.company_id != movement.company_id:
+            raise ConflictError('Choose a vehicle belonging to this logistics company.')
+        if driver and driver.company_id != movement.company_id:
+            raise ConflictError('Choose a driver belonging to this logistics company.')
+        if driver and vehicle and driver.assigned_vehicle_id and driver.assigned_vehicle_id != vehicle.pk:
+            raise ConflictError('The selected driver is assigned to another vehicle.')
+        if vehicle:
+            movement.vehicle = vehicle
+        if driver:
+            movement.driver = driver
+        if movement.status == 'scheduled':
+            movement.status = 'assigned'
+        movement.save(update_fields=['vehicle', 'driver', 'status', 'updated_at'])
+        services.audit(request, movement.company, 'movement_assigned', movement_id=str(movement.pk))
+        return Response(self.get_serializer(movement).data)
+
+    @extend_schema(request=s.MovementStatusSerializer, responses=s.MovementSerializer)
+    @action(detail=True, methods=['post'], url_path='status')
+    def set_status(self, request, pk=None):
+        movement = self.get_object()
+        assert_editor(request.user, movement.company)
+        payload = s.MovementStatusSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        movement.status = data['status']
+        occurred_at = data.get('occurred_at') or timezone.now()
+        if movement.status == 'delivered':
+            movement.delivered_at = occurred_at
+        if 'latitude' in data:
+            movement.last_latitude = data['latitude']
+        if 'longitude' in data:
+            movement.last_longitude = data['longitude']
+        if 'latitude' in data or 'longitude' in data:
+            movement.last_gps_at = occurred_at
+        movement.save(update_fields=['status', 'delivered_at', 'last_latitude', 'last_longitude', 'last_gps_at', 'updated_at'])
+        if data.get('note'):
+            m.OperationsEvent.objects.create(company=movement.company, occurred_at=occurred_at, sector='Logistics', event_type='Movement', text=data['note'])
+        services.audit(request, movement.company, 'movement_status_updated', movement_id=str(movement.pk), status=movement.status)
+        return Response(self.get_serializer(movement).data)
+
+
+class DeliveryViewSet(OperationsRecordViewSet):
+    queryset = m.Delivery.objects.none()
+    serializer_class = s.DeliverySerializer
+    filterset_fields = ['company', 'destination_type', 'status', 'movement']
+    search_fields = ['reference', 'destination', 'receipt_reference', 'movement__reference', 'movement__transaction_id']
+
+    def get_queryset(self):
+        return super().get_queryset().select_related('movement')
+
+    @extend_schema(request=s.DeliveryCompleteSerializer, responses=s.DeliverySerializer)
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        delivery = self.get_object()
+        assert_editor(request.user, delivery.company)
+        payload = s.DeliveryCompleteSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        delivery.received_quantity = data['received_quantity']
+        delivery.receipt_reference = data.get('receipt_reference', delivery.receipt_reference)
+        delivery.custody_transferred_at = data.get('custody_transferred_at') or timezone.now()
+        delivery.status = 'completed'
+        delivery.save(update_fields=['received_quantity', 'receipt_reference', 'custody_transferred_at', 'status', 'updated_at'])
+        services.audit(request, delivery.company, 'delivery_completed', delivery_id=str(delivery.pk))
+        return Response(self.get_serializer(delivery).data)
+
+
+class LogisticsTransactionViewSet(OperationsRecordViewSet):
+    queryset = m.LogisticsTransaction.objects.none()
+    serializer_class = s.LogisticsTransactionSerializer
+    filterset_fields = ['company', 'buyer', 'miner', 'material', 'stage', 'delivery_status', 'payment_status']
+    search_fields = ['transaction_id', 'rfq_id', 'origin', 'destination']
+
+
+class LogisticsPaymentViewSet(OperationsRecordViewSet):
+    queryset = m.LogisticsPayment.objects.none()
+    serializer_class = s.LogisticsPaymentSerializer
+    filterset_fields = ['company', 'status', 'payment_date']
+    search_fields = ['reference', 'invoice_reference', 'transaction__transaction_id', 'movement__reference']
+
+
+class IncidentViewSet(OperationsRecordViewSet):
+    queryset = m.Incident.objects.none()
+    serializer_class = s.IncidentSerializer
+    filterset_fields = ['company', 'incident_type', 'severity', 'status', 'movement']
+    search_fields = ['reference', 'description', 'location', 'movement__reference']
+
+    @extend_schema(request=s.IncidentResolveSerializer, responses=s.IncidentSerializer)
+    @action(detail=True, methods=['post'])
+    def resolve(self, request, pk=None):
+        incident = self.get_object()
+        assert_editor(request.user, incident.company)
+        payload = s.IncidentResolveSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        incident.resolution = payload.validated_data['resolution']
+        incident.status = payload.validated_data['status']
+        incident.save(update_fields=['resolution', 'status', 'updated_at'])
+        services.audit(request, incident.company, 'incident_resolved', incident_id=str(incident.pk))
+        return Response(self.get_serializer(incident).data)
+
+
+class OperationsDocumentViewSet(OperationsRecordViewSet):
+    queryset = m.OperationsDocument.objects.none()
+    serializer_class = s.OperationsDocumentSerializer
+    filterset_fields = ['company', 'document_type', 'verification_status', 'compliance_status']
+    search_fields = ['reference', 'name', 'related_asset']
+
+
+class ComplianceFindingViewSet(OperationsRecordViewSet):
+    queryset = m.ComplianceFinding.objects.none()
+    serializer_class = s.ComplianceFindingSerializer
+    filterset_fields = ['company', 'area', 'status']
+    search_fields = ['reference', 'detail', 'action', 'owner']
+
+
+class QualityRecordViewSet(OperationsRecordViewSet):
+    queryset = m.QualityRecord.objects.none()
+    serializer_class = s.QualityRecordSerializer
+    filterset_fields = ['company', 'transaction_id', 'approval']
+    search_fields = ['transaction_id', 'sample_status', 'result', 'certificate']
+
+
+class OperationsEventViewSet(OperationsRecordViewSet):
+    queryset = m.OperationsEvent.objects.none()
+    serializer_class = s.OperationsEventSerializer
+    filterset_fields = ['company', 'sector', 'event_type', 'unread']
+    search_fields = ['text']
+
+    @extend_schema(request=None, responses=s.OperationsEventSerializer)
+    @action(detail=True, methods=['post'], url_path='mark-read')
+    def mark_read(self, request, pk=None):
+        event = self.get_object()
+        event.unread = False
+        event.save(update_fields=['unread', 'updated_at'])
+        return Response(self.get_serializer(event).data)
+
+
+class ActionItemViewSet(OperationsRecordViewSet):
+    queryset = m.ActionItem.objects.none()
+    serializer_class = s.ActionItemSerializer
+    filterset_fields = ['company', 'status', 'urgency', 'related_movement']
+    search_fields = ['action', 'target']
+
+    @extend_schema(request=None, responses=s.ActionItemSerializer)
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        item = self.get_object()
+        assert_editor(request.user, item.company)
+        item.status = 'done'
+        item.save(update_fields=['status', 'updated_at'])
+        return Response(self.get_serializer(item).data)
+
+
 def audit_rows(company_id):
     # Do not expose internal notes or private evidence content through audit metadata.
     return list(AccountAuditEvent.objects.filter(event_type__startswith='logistics.', metadata__company_id=str(company_id)).order_by('-created_at').values('id', 'event_type', 'created_at', 'actor_id')[:200])
@@ -647,6 +857,50 @@ class SummaryViewSet(AtomicViewSet):
         return Response({'companies': data, 'company_count': len(data),
                          'totals': totals,
                          'unread_notifications': m.Notification.objects.filter(recipient=request.user, company__in=companies, read_at__isnull=True).count()})
+
+    @extend_schema(responses=s.SummarySerializer)
+    @action(detail=False, methods=['get'], url_path='operations-dashboard')
+    def operations_dashboard(self, request):
+        ids = company_ids(request.user)
+        movements = m.Movement.objects.filter(company_id__in=ids)
+        requests = m.TransportRequest.objects.filter(company_id__in=ids)
+        vehicles = m.Vehicle.objects.filter(company_id__in=ids, is_active=True)
+        drivers = m.Driver.objects.filter(company_id__in=ids, is_active=True)
+        events = m.OperationsEvent.objects.filter(company_id__in=ids)
+        payments = m.LogisticsPayment.objects.filter(company_id__in=ids)
+        totals = {
+            'active_jobs': movements.exclude(status__in=['delivered', 'cancelled']).count(),
+            'new_transport_requests': requests.filter(status='new').count(),
+            'awaiting_acceptance': requests.filter(status='new').count(),
+            'vehicles_assigned': movements.exclude(vehicle__isnull=True).exclude(status__in=['delivered', 'cancelled']).count(),
+            'drivers_active': movements.exclude(driver__isnull=True).exclude(status__in=['delivered', 'cancelled']).values('driver_id').distinct().count(),
+            'awaiting_pickup': movements.filter(status__in=['scheduled', 'assigned']).count(),
+            'loading': movements.filter(status='loading').count(),
+            'in_transit': movements.filter(status='in_transit').count(),
+            'delayed_shipments': movements.filter(status='delayed').count(),
+            'open_incidents': m.Incident.objects.filter(company_id__in=ids).exclude(status__iexact='resolved').count(),
+            'compliance_alerts': m.ComplianceFinding.objects.filter(company_id__in=ids).exclude(status__iexact='cleared').count(),
+            'available_vehicles': vehicles.exclude(movements__status__in=['assigned', 'loading', 'in_transit', 'delayed']).distinct().count(),
+            'unread_notifications': events.filter(unread=True).count(),
+            'tonnes_moved': movements.aggregate(total=Sum('quantity'))['total'] or 0,
+            'outstanding_payments': payments.aggregate(total=Sum('due_amount') - Sum('paid_amount'))['total'] or 0,
+        }
+        status_breakdown = list(movements.values('status').annotate(count=Count('id')).order_by('status'))
+        return Response({
+            'stats': totals,
+            'status_breakdown': status_breakdown,
+            'action_items': s.ActionItemSerializer(m.ActionItem.objects.filter(company_id__in=ids, status='open')[:10], many=True).data,
+            'events': s.OperationsEventSerializer(events[:20], many=True).data,
+            'active_movements': s.MovementSerializer(movements.exclude(status__in=['delivered', 'cancelled']).select_related('vehicle', 'driver')[:20], many=True).data,
+            'transport_requests': s.TransportRequestSerializer(requests.order_by('required_pickup_at', '-created_at')[:20], many=True).data,
+            'filters': {
+                'movement_types': sorted(set(movements.values_list('movement_type', flat=True)) | set(requests.values_list('movement_type', flat=True))),
+                'statuses': sorted(set(movements.values_list('status', flat=True))),
+                'miners': sorted(set(movements.exclude(miner='').values_list('miner', flat=True))),
+                'buyers': sorted(set(movements.exclude(buyer='').values_list('buyer', flat=True))),
+                'minerals': sorted(set(movements.exclude(mineral='').values_list('mineral', flat=True))),
+            },
+        })
 
     @extend_schema(responses=s.SummarySerializer)
     @action(detail=False, methods=['get'])
