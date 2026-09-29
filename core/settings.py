@@ -8,13 +8,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key-change-this-before-any-real-deployment-2026")
 DEBUG = str(config("DEBUG", default="true")).strip().lower() in {"1", "true", "yes", "on", "debug", "development"}
 ENVIRONMENT = str(config("ENVIRONMENT", default="local")).strip().lower()
-ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1, api.beldium.com, compliance.beldium.com, miners.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1, api.beldium.com, compliance.beldium.com, miners.beldium.com, logistics.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 # Render's own routing hits the app on its *.onrender.com hostname before any
 # custom domain is attached to the request, so that host needs to be allowed too.
 RENDER_EXTERNAL_HOSTNAME = config("RENDER_EXTERNAL_HOSTNAME", default="")
 if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
-CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173, https://api.beldium.com, https://compliance.beldium.com, https://miners.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173,http://localhost:5175, https://api.beldium.com, https://compliance.beldium.com, https://miners.beldium.com, https://logistics.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 
 # Which frontend origin maps to which account portal (accounts.models.User.Portal).
 # The frontends live on separate origins, so the browser's own Origin header
@@ -29,6 +30,11 @@ COMPLIANCE_PORTAL_ORIGINS = config(
 MINER_PORTAL_ORIGINS = config(
     "MINER_PORTAL_ORIGINS",
     default="https://miners.beldium.com,http://localhost:5174",
+    cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
+)
+LOGISTICS_PORTAL_ORIGINS = config(
+    "LOGISTICS_PORTAL_ORIGINS",
+    default="https://logistics.beldium.com,http://localhost:5175",
     cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
 )
 

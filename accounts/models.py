@@ -35,6 +35,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     class Portal(models.TextChoices):
         COMPLIANCE = "compliance", "Compliance"
         MINER = "miner", "Miner Hub"
+        LOGISTICS = "logistics", "Logistics Operator"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField(unique=True, db_index=True)

@@ -15,6 +15,7 @@ from accounts.tasks import send_email_verification
 
 COMPLIANCE_ORIGIN = "https://compliance.beldium.com"
 MINER_ORIGIN = "https://miners.beldium.com"
+LOGISTICS_ORIGIN = "https://logistics.beldium.com"
 
 
 class AuthenticationTests(APITestCase):
@@ -82,6 +83,17 @@ class AuthenticationTests(APITestCase):
         }, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         self.assertEqual(response.data["error"]["code"], "portal_mismatch")
+
+    def test_logistics_origin_registers_logistics_portal(self):
+        response = self.client.post(reverse("register"), {
+            "email": "logistics@example.com",
+            "password": "SafePassword-2026!",
+            "confirm_password": "SafePassword-2026!",
+            "agreed_terms": True,
+        }, HTTP_ORIGIN=LOGISTICS_ORIGIN)
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(User.objects.get(email="logistics@example.com").portal, "logistics")
 
     def test_login_without_a_recognized_origin_is_refused(self):
         User.objects.create_user(
