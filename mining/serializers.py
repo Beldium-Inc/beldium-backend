@@ -458,25 +458,57 @@ class PendingReviewSerializer(serializers.ModelSerializer):
 class InfoRequestSerializer(serializers.ModelSerializer):
     site_name = serializers.CharField(source="site.name", read_only=True)
     requested_by_name = serializers.SerializerMethodField()
+    response_by_name = serializers.SerializerMethodField()
+    response_documents = serializers.SerializerMethodField()
 
     class Meta:
         model = InfoRequest
         fields = [
             "id", "site", "site_name", "section", "subject", "details", "requested_by_name",
-            "due_by", "priority", "status", "response_message", "response_at",
-            "response_attachments", "created_at", "updated_at",
+            "due_by", "priority", "status", "response_message", "response_by_name", "response_at",
+            "response_attachments", "response_documents", "created_at", "updated_at",
         ]
         read_only_fields = [
-            "id", "site_name", "requested_by_name", "status", "response_message",
-            "response_at", "response_attachments", "created_at", "updated_at",
+            "id", "site_name", "requested_by_name", "status", "response_message", "response_by_name",
+            "response_at", "response_attachments", "response_documents", "created_at", "updated_at",
         ]
 
     def get_requested_by_name(self, obj) -> str:
         return actor_name(obj.requested_by)
 
+    def get_response_by_name(self, obj) -> str | None:
+        return actor_name(obj.response_by) if obj.response_by_id else None
+
+    @extend_schema_field(DocumentRecordSerializer(many=True))
+    def get_response_documents(self, obj):
+        """The files attached to the response, as reviewable site documents.
+
+        Each attachment is filed as a ``DocumentRecord`` on the request's site,
+        so the desk verifies it in the same document queue as everything else;
+        this just resolves the ids stored on the request back to those rows.
+        """
+        ids = [a.get("document_id") for a in obj.response_attachments or [] if isinstance(a, dict)]
+        if not ids:
+            return []
+        documents = DocumentRecord.objects.filter(id__in=[i for i in ids if i]).select_related("uploaded_by")
+        return DocumentRecordSerializer(documents, many=True, context=self.context).data
+
 
 class InfoRequestResponseSerializer(serializers.Serializer):
-    message = serializers.CharField(max_length=4000)
+    message = serializers.CharField(max_length=4000, required=False, allow_blank=True, default="")
+    files = serializers.ListField(child=serializers.FileField(), required=False, default=list)
+
+    def validate_files(self, value):
+        return [validate_upload(f) for f in value]
+
+    def validate(self, attrs):
+        if not attrs.get("message", "").strip() and not attrs.get("files"):
+            raise serializers.ValidationError("Describe the evidence or attach at least one document.")
+        return attrs
+
+
+class ApplicationDecisionSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=2000, required=False, allow_blank=True, default="")
 
 
 # --- audit ---------------------------------------------------------------------

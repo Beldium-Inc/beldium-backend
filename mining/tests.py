@@ -501,3 +501,122 @@ class OrganisationVerificationTests(MiningTestCase):
         self.assertEqual(response.status_code, 200)
         self.miner_org.refresh_from_db()
         self.assertEqual(self.miner_org.verification_status, "rejected")
+
+
+class InfoRequestResponseTests(MiningTestCase):
+    """A miner answers an information request with files the desk can review."""
+
+    def setUp(self):
+        super().setUp()
+        from mining.models import InfoRequest
+
+        self.info_request = InfoRequest.objects.create(
+            site=self.site, section=SectionKey.ENVIRONMENTAL, subject="Certified turbidity",
+            details="The exact turbidity documents", requested_by=self.operator,
+        )
+        self.site.sections.filter(key=SectionKey.ENVIRONMENTAL).update(status="info_requested")
+
+    def _file(self, name="turbidity.pdf"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return SimpleUploadedFile(name, b"%PDF-1.4 test content", content_type="application/pdf")
+
+    def respond_url(self):
+        return reverse("mining-info-request-respond", args=[self.info_request.id])
+
+    def test_response_files_become_pending_site_documents(self):
+        from mining.models import DocumentRecord
+
+        self.client.force_authenticate(self.miner)
+        response = self.client.post(
+            self.respond_url(), {"message": "Lab certificate attached", "files": [self._file()]}, format="multipart"
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["status"], "responded")
+        self.assertEqual(len(response.data["response_documents"]), 1)
+        document = DocumentRecord.objects.get(id=response.data["response_documents"][0]["id"])
+        self.assertEqual(document.site, self.site)
+        self.assertEqual(document.status, DocumentRecord.Status.PENDING)
+        section = self.site.sections.get(key=SectionKey.ENVIRONMENTAL)
+        self.assertEqual(section.status, "under_review")
+
+    def test_a_response_needs_a_message_or_a_file(self):
+        self.client.force_authenticate(self.miner)
+        response = self.client.post(self.respond_url(), {"message": "  "}, format="multipart")
+        self.assertEqual(response.status_code, 400)
+
+    def test_open_request_is_a_miner_notification_and_response_is_a_desk_notification(self):
+        self.client.force_authenticate(self.miner)
+        titles = [n["title"] for n in self.client.get(reverse("mining-dashboard")).data["notifications"]]
+        self.assertIn("Information requested: Certified turbidity", titles)
+
+        self.client.post(self.respond_url(), {"message": "Attached", "files": [self._file()]}, format="multipart")
+        self.client.force_authenticate(self.operator)
+        titles = [n["title"] for n in self.client.get(reverse("mining-dashboard")).data["notifications"]]
+        self.assertIn("Response received: Certified turbidity", titles)
+
+    def test_flagged_section_is_a_miner_notification(self):
+        self.client.force_authenticate(self.operator)
+        self.client.post(
+            reverse("mining-site-review-section", args=[self.site.id, SectionKey.CORPORATE]),
+            {"status": "flagged", "note": "Director ID does not match CAC record."},
+        )
+        self.client.force_authenticate(self.miner)
+        bodies = [n["body"] for n in self.client.get(reverse("mining-dashboard")).data["notifications"]]
+        self.assertTrue(any("Director ID does not match" in b for b in bodies))
+
+
+class ApplicationDecisionTests(MiningTestCase):
+    """The claimed reviewer verifies an application once every document is verified."""
+
+    def setUp(self):
+        super().setUp()
+        from mining.models import DocumentRecord
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.application = Application.objects.create(
+            organisation=self.miner_org, site=self.site, site_name=self.site.name, mineral="Tin",
+        )
+        self.document = DocumentRecord.objects.create(
+            site=self.site, name="Certificate of incorporation",
+            file=SimpleUploadedFile("cac.pdf", b"%PDF-1.4", content_type="application/pdf"),
+        )
+        self.client.force_authenticate(self.operator)
+
+    def approve_url(self):
+        return reverse("mining-application-approve", args=[self.application.id])
+
+    def test_approval_requires_a_claim(self):
+        response = self.client.post(self.approve_url())
+        self.assertEqual(response.status_code, 403)
+
+    def test_approval_is_blocked_until_documents_are_verified(self):
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        response = self.client.post(self.approve_url())
+        self.assertEqual(response.status_code, 409)
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.status, Application.Status.PENDING)
+
+    def test_approval_verifies_the_site_and_organisation(self):
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        self.document.status = "verified"
+        self.document.save()
+        self.miner_org.verification_status = "under_review"
+        self.miner_org.save()
+
+        response = self.client.post(self.approve_url())
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["status"], "approved")
+        self.site.refresh_from_db()
+        self.miner_org.refresh_from_db()
+        self.assertEqual(self.site.status, SiteStatus.OPERATIONAL)
+        self.assertEqual(self.miner_org.verification_status, "verified")
+
+    def test_rejection_needs_a_reason_and_keeps_it(self):
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        url = reverse("mining-application-reject", args=[self.application.id])
+        self.assertEqual(self.client.post(url, {"reason": ""}).status_code, 400)
+        response = self.client.post(url, {"reason": "Licence belongs to another company."})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "rejected")
+        self.assertIn("Licence belongs to another company.", response.data["stage"])
