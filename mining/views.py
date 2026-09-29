@@ -67,6 +67,7 @@ from mining.permissions import (
     owns_site,
 )
 from mining.serializers import (
+    ApplicationDecisionSerializer,
     ApplicationSerializer,
     CorrectiveSubmissionSerializer,
     DashboardSerializer,
@@ -717,6 +718,88 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         return Response(ApplicationSerializer(application, context={"request": request}).data)
 
 
+    def _claimed_for_decision(self, request):
+        if not can_decide(request.user):
+            raise PermissionDenied("Only the compliance desk can decide an application.")
+        application = Application.objects.select_for_update().select_related("site", "organisation").get(pk=self.get_object().pk)
+        if application.assigned_to_id != request.user.id:
+            raise PermissionDenied("Claim this application before deciding it.")
+        if application.status in {Application.Status.APPROVED, Application.Status.REJECTED}:
+            raise ConflictError("This application has already been decided.", code="application_decided")
+        return application
+
+    @staticmethod
+    def approval_blockers(application):
+        """Why the application cannot be approved yet: every submitted document must be verified.
+
+        Documents are read across every site of the organisation, the same set
+        the reviewer sees on the site review page.
+        """
+        if not application.site_id:
+            return ["This application is not linked to a mine site."]
+        organisation_id = application.organisation_id or application.site.organisation_id
+        documents = DocumentRecord.objects.filter(site__organisation_id=organisation_id).exclude(file="")
+        if not documents.exists():
+            return ["No documents have been submitted."]
+        unverified = documents.exclude(status=DocumentRecord.Status.VERIFIED).count()
+        return [f"{unverified} document(s) not verified."] if unverified else []
+
+    @extend_schema(request=None, responses=ApplicationSerializer)
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        """Verify the application: the site goes live and, once nothing else is outstanding, the organisation too."""
+        application = self._claimed_for_decision(request)
+        blockers = self.approval_blockers(application)
+        if blockers:
+            raise AppError(
+                "This application is not ready to verify: " + " ".join(blockers),
+                code="application_not_ready", status_code=409, details={"blockers": blockers},
+            )
+        application.status = Application.Status.APPROVED
+        application.stage = "Verified"
+        application.save(update_fields=["status", "stage", "updated_at"])
+        site = application.site
+        site.status = SiteStatus.OPERATIONAL
+        site.save(update_fields=["status", "updated_at"])
+        PendingReview.objects.filter(site=site).exclude(status="completed").update(status="completed")
+        organisation = application.organisation or site.organisation
+        if organisation and organisation.verification_status != "verified" and verification.readiness(organisation)["ready"]:
+            organisation.verification_status = "verified"
+            organisation.verified_at = timezone.now()
+            organisation.verified_by = request.user
+            organisation.rejection_reason = ""
+            if not organisation.submitted_at:
+                organisation.submitted_at = organisation.verified_at
+            organisation.save(update_fields=[
+                "verification_status", "verified_at", "verified_by", "rejection_reason", "submitted_at", "updated_at",
+            ])
+            record_account_event(request, "organisation.verified", organisation_id=str(organisation.id))
+        self.record(
+            "application_approved", target=application.reference, detail=f"{site.name} verified.",
+            application_id=str(application.id), site_id=str(site.id),
+        )
+        return Response(ApplicationSerializer(application, context={"request": request}).data)
+
+    @extend_schema(request=ApplicationDecisionSerializer, responses=ApplicationSerializer)
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        application = self._claimed_for_decision(request)
+        serializer = ApplicationDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data["reason"].strip()
+        if not reason:
+            raise AppError("Give a reason for rejecting this application.", code="reason_required")
+        application.status = Application.Status.REJECTED
+        # No dedicated reason column; stage is what the miner's portal shows.
+        application.stage = f"Rejected: {reason}"[:100]
+        application.save(update_fields=["status", "stage", "updated_at"])
+        self.record(
+            "application_rejected", target=application.reference, detail=reason,
+            application_id=str(application.id), site_id=str(application.site_id or ""),
+        )
+        return Response(ApplicationSerializer(application, context={"request": request}).data)
+
+
 class PendingReviewViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
     serializer_class = PendingReviewSerializer
     queryset = PendingReview.objects.none()
@@ -773,8 +856,15 @@ class InfoRequestViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         self.record("info_request_raised", target=info_request.subject, site_id=str(info_request.site_id or ""))
 
     @extend_schema(request=InfoRequestResponseSerializer, responses=InfoRequestSerializer)
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
     def respond(self, request, pk=None):
+        """The miner's answer, with any files filed as reviewable site documents.
+
+        Attachments become ``DocumentRecord`` rows on the request's site (status
+        pending), so the desk verifies them in the same document queue that
+        gates the application, rather than in a side channel only this request
+        can see. A section held on ``info_requested`` goes back to the desk.
+        """
         info_request = self.get_object()
         if not owns_site(request.user, info_request.site):
             raise PermissionDenied("You can only respond on behalf of your own site.")
@@ -782,13 +872,49 @@ class InfoRequestViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
             raise ConflictError("This information request is already closed.", code="info_request_closed")
         serializer = InfoRequestResponseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        info_request.response_message = serializer.validated_data["message"]
+        attachments = list(info_request.response_attachments or [])
+        for upload in serializer.validated_data["files"]:
+            document = DocumentRecord.objects.create(
+                site=info_request.site,
+                name=f"{info_request.subject} (response)",
+                category="Information request response",
+                file=upload,
+                uploaded_by=request.user,
+            )
+            attachments.append({"document_id": str(document.id), "name": document.name, "original_name": upload.name})
+        message = serializer.validated_data["message"].strip()
+        if message or not info_request.response_message:
+            info_request.response_message = message
+        info_request.response_attachments = attachments
         info_request.response_by = request.user
         info_request.response_at = timezone.now()
         info_request.status = InfoRequest.Status.RESPONDED
-        info_request.save(update_fields=["response_message", "response_by", "response_at", "status", "updated_at"])
-        self.record("info_request_responded", target=info_request.subject, site_id=str(info_request.site_id or ""))
-        return Response(InfoRequestSerializer(info_request).data)
+        info_request.save(update_fields=[
+            "response_message", "response_attachments", "response_by", "response_at", "status", "updated_at",
+        ])
+        if info_request.section:
+            info_request.site.sections.filter(key=info_request.section, status="info_requested").update(
+                status="under_review", updated_at=timezone.now()
+            )
+        self.record(
+            "info_request_responded", target=info_request.subject,
+            detail=f"{len(serializer.validated_data['files'])} document(s) attached." if serializer.validated_data["files"] else "",
+            site_id=str(info_request.site_id or ""),
+        )
+        return Response(InfoRequestSerializer(info_request, context={"request": request}).data)
+
+    @extend_schema(request=None, responses=InfoRequestSerializer)
+    @action(detail=True, methods=["post"])
+    def close(self, request, pk=None):
+        """The desk accepts the response and closes the request."""
+        if not can_decide(request.user):
+            raise PermissionDenied("Only the compliance operator desk can close an information request.")
+        info_request = self.get_object()
+        if info_request.status != InfoRequest.Status.CLOSED:
+            info_request.status = InfoRequest.Status.CLOSED
+            info_request.save(update_fields=["status", "updated_at"])
+            self.record("info_request_closed", target=info_request.subject, site_id=str(info_request.site_id or ""))
+        return Response(InfoRequestSerializer(info_request, context={"request": request}).data)
 
 
 class LicenceDocViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
@@ -976,7 +1102,9 @@ class MiningDashboardView(APIView):
             "kpi_trend": self._kpi_trend(applications, findings, inspections),
             "regional_compliance": self._regional(sites),
             "expiring_licences": ExpiringLicenceSerializer(expiring[:20], many=True).data,
-            "notifications": self._notifications(open_findings, env_records, expiring, inspections),
+            "notifications": self._notifications(
+                role, sites, applications, open_findings, env_records, expiring, inspections
+            ),
             "recent_applications": ApplicationSerializer(
                 applications.select_related("site")[:8], many=True
             ).data,
@@ -1034,64 +1162,84 @@ class MiningDashboardView(APIView):
             result.append(row)
         return sorted(result, key=lambda r: -r["sites"])
 
-    def _notifications(self, open_findings, env_records, expiring, inspections):
-        """The handful of items the shell's bell should surface, newest first."""
+    def _notifications(self, role, sites, applications, open_findings, env_records, expiring, inspections):
+        """What the bell and the notifications page surface, newest first.
+
+        The miner hears about anything the desk asked of them (information
+        requests, flagged/rejected sections, inspections, findings and the
+        application outcome); the desk hears about anything the miner sent back.
+        Everything is already scoped to the caller by the querysets passed in.
+        """
         items = []
-        for finding in open_findings.filter(status=NonConformity.Status.AWAITING_REVIEW)[:3]:
+
+        def add(key, obj_id, title, body, at, kind, entity, reference=""):
             items.append({
-                "id": f"nc-{finding.id}",
-                "title": f"{finding.reference} awaiting review",
-                "body": f"{finding.title} is awaiting review.",
-                "at": finding.updated_at,
-                "kind": "info",
-                "entity": "non_conformity",
-                "entity_id": str(finding.id),
-                "reference": finding.reference,
+                "id": f"{key}-{obj_id}",
+                "title": title,
+                "body": body,
+                "at": at,
+                "kind": kind,
+                "tone": {"info": "neutral", "warn": "warning", "error": "negative", "success": "positive"}[kind],
+                "entity": entity,
+                "entity_id": str(obj_id),
+                "reference": reference,
             })
-        for record in env_records.filter(status=EnvRecord.Status.BREACH)[:3]:
-            items.append({
-                "id": f"env-{record.id}",
-                "title": "Environmental limit breached",
-                "body": f"{record.metric} at {record.site.name if record.site_id else 'a registered site'} read {record.value} against a {record.limit} limit.",
-                "at": record.updated_at,
-                "kind": "error",
-                "entity": "env_record",
-                "entity_id": str(record.id),
-                "reference": "",
-            })
+
+        info_requests = InfoRequest.objects.filter(site__in=sites).select_related("site")
+        if role == MINER:
+            for request in info_requests.filter(status=InfoRequest.Status.OPEN)[:5]:
+                add("ir", request.id, f"Information requested: {request.subject}",
+                    f"{request.site.name}: {request.details or 'The compliance desk needs more information.'}"
+                    + (f" Due {request.due_by:%d %b %Y}." if request.due_by else ""),
+                    request.created_at, "warn", "info_request")
+            flagged = ReviewSection.objects.filter(
+                site__in=sites, status__in=["flagged", "rejected", "info_requested", "inspection_requested"],
+            ).select_related("site")
+            for section in flagged.order_by("-decided_at")[:5]:
+                add("sec", section.id, f"{section.get_key_display()} {section.get_status_display().lower()}",
+                    f"{section.site.name}: {section.decision_note or 'The compliance desk has asked you to act on this section.'}",
+                    section.decided_at or section.updated_at,
+                    "error" if section.status in {"flagged", "rejected"} else "warn", "review_section")
+            for finding in open_findings.filter(status__in=[NonConformity.Status.OPEN, NonConformity.Status.IN_PROGRESS])[:3]:
+                add("nc", finding.id, f"{finding.reference} needs corrective action",
+                    f"{finding.title}. Due {finding.deadline:%d %b %Y}." if finding.deadline else finding.title,
+                    finding.created_at, "warn", "non_conformity", finding.reference)
+            for application in applications.filter(status__in=[Application.Status.APPROVED, Application.Status.REJECTED])[:3]:
+                approved = application.status == Application.Status.APPROVED
+                add("app", application.id, f"{application.reference} {'verified' if approved else 'rejected'}",
+                    f"{application.site_name or 'Your site'} was verified by the compliance desk." if approved
+                    else (application.stage or "Your application was rejected."),
+                    application.updated_at, "success" if approved else "error", "application", application.reference)
+        else:
+            for request in info_requests.filter(status=InfoRequest.Status.RESPONDED)[:5]:
+                attached = len(request.response_attachments or [])
+                add("ir", request.id, f"Response received: {request.subject}",
+                    f"{request.site.name} responded" + (f" with {attached} document(s) to review." if attached else "."),
+                    request.response_at or request.updated_at, "info", "info_request")
+            for finding in open_findings.filter(status=NonConformity.Status.AWAITING_REVIEW)[:3]:
+                add("nc", finding.id, f"{finding.reference} awaiting review",
+                    f"{finding.title} is awaiting review.", finding.updated_at, "info", "non_conformity", finding.reference)
+
+        for record in env_records.filter(status=EnvRecord.Status.BREACH).select_related("site")[:3]:
+            add("env", record.id, "Environmental limit breached",
+                f"{record.metric} at {record.site.name if record.site_id else 'a registered site'} read {record.value} against a {record.limit} limit.",
+                record.updated_at, "error", "env_record")
         for licence in expiring[:3]:
             days = (licence.expires_on - timezone.localdate()).days if licence.expires_on else None
             holder = licence.site.name if licence.site_id else ""
-            items.append({
-                "id": f"lic-{licence.id}",
-                "title": f"{licence.type} {'expired' if days is not None and days < 0 else 'expiring'}",
-                "body": (
-                    f"{holder + ': ' if holder else ''}"
-                    f"{'expired' if days is not None and days < 0 else 'expires'} on {licence.expires_on:%d %b %Y}."
-                ),
-                "at": licence.updated_at,
-                "kind": "warn",
-                "entity": "licence",
-                "entity_id": str(licence.id),
-                "reference": licence.number,
-            })
-        for inspection in inspections.filter(status=Inspection.Status.SCHEDULED)[:2]:
-            items.append({
-                "id": f"ins-{inspection.id}",
-                "title": "Inspection scheduled",
-                "body": (
-                    f"{inspection.get_type_display()} at "
-                    f"{inspection.site.name if inspection.site_id else 'a registered site'}"
-                    + (f" on {inspection.scheduled_for:%d %b %Y}" if inspection.scheduled_for else "")
-                    + "."
-                ),
-                "at": inspection.updated_at,
-                "kind": "info",
-                "entity": "inspection",
-                "entity_id": str(inspection.id),
-                "reference": inspection.reference,
-            })
-        return sorted(items, key=lambda item: item["at"], reverse=True)[:8]
+            lapsed = days is not None and days < 0
+            add("lic", licence.id, f"{licence.type} {'expired' if lapsed else 'expiring'}",
+                f"{holder + ': ' if holder else ''}{'expired' if lapsed else 'expires'} on {licence.expires_on:%d %b %Y}.",
+                licence.updated_at, "warn", "licence", licence.number)
+        for inspection in inspections.filter(
+            status__in=[Inspection.Status.REQUESTED, Inspection.Status.SCHEDULED]
+        ).select_related("site")[:3]:
+            add("ins", inspection.id,
+                "Inspection scheduled" if inspection.status == Inspection.Status.SCHEDULED else "Inspection requested",
+                f"{inspection.get_type_display()} at {inspection.site.name if inspection.site_id else 'a registered site'}"
+                + (f" on {inspection.scheduled_for:%d %b %Y}" if inspection.scheduled_for else "") + ".",
+                inspection.updated_at, "info", "inspection", inspection.reference)
+        return sorted(items, key=lambda item: item["at"], reverse=True)[:12]
 
 
 class MiningCapabilityView(APIView):
