@@ -13,6 +13,38 @@ def company_reference():
     return f'BLD-LOG-{timezone.now().year}-{secrets.token_hex(5).upper()}'
 
 
+def short_reference(prefix):
+    return f'{prefix}-{timezone.now():%Y%m%d}-{secrets.token_hex(3).upper()}'
+
+
+def transport_request_reference():
+    return short_reference('TR')
+
+
+def movement_reference():
+    return short_reference('MOV')
+
+
+def delivery_reference():
+    return short_reference('DEL')
+
+
+def payment_reference():
+    return short_reference('PAY')
+
+
+def incident_reference():
+    return short_reference('INC')
+
+
+def operations_document_reference():
+    return short_reference('DOC')
+
+
+def compliance_finding_reference():
+    return short_reference('NC')
+
+
 class Domain(models.TextChoices):
     CORPORATE = 'corporate', 'Corporate verification'
     REGULATORY = 'regulatory', 'Regulatory licensing'
@@ -39,6 +71,47 @@ class EvidenceStatus(models.TextChoices):
     PENDING = 'pending', 'Pending review'
     VERIFIED = 'verified', 'Verified'
     REJECTED = 'rejected', 'Rejected'
+
+
+class DeliveryStatus(models.TextChoices):
+    PENDING = 'pending', 'Pending'
+    IN_TRANSIT = 'in_transit', 'In transit'
+    ARRIVED = 'arrived', 'Arrived'
+    COMPLETED = 'completed', 'Completed'
+    VARIANCE_FLAGGED = 'variance_flagged', 'Variance flagged'
+    CANCELLED = 'cancelled', 'Cancelled'
+
+
+class PaymentStatus(models.TextChoices):
+    NOT_INVOICED = 'not_invoiced', 'Not invoiced'
+    INVOICE_RAISED = 'invoice_raised', 'Invoice raised'
+    SUBMITTED = 'submitted', 'Submitted'
+    PART_PAID = 'part_paid', 'Part paid'
+    PAID = 'paid', 'Paid'
+    OVERDUE = 'overdue', 'Overdue'
+
+
+class IncidentStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    UNDER_INVESTIGATION = 'under_investigation', 'Under investigation'
+    RESOLVED = 'resolved', 'Resolved'
+    CLOSED = 'closed', 'Closed'
+
+
+class OperationsDocumentStatus(models.TextChoices):
+    ACTION_REQUIRED = 'action_required', 'Action required'
+    UNDER_REVIEW = 'under_review', 'Under review'
+    VERIFIED = 'verified', 'Verified'
+    EXPIRING = 'expiring', 'Expiring'
+    EXPIRED = 'expired', 'Expired'
+    REJECTED = 'rejected', 'Rejected'
+
+
+class ComplianceFindingStatus(models.TextChoices):
+    OPEN = 'open', 'Open'
+    UNDER_REVIEW = 'under_review', 'Under review'
+    CORRECTIVE_ACTION_SUBMITTED = 'corrective_action_submitted', 'Corrective action submitted'
+    CLEARED = 'cleared', 'Cleared'
 
 
 class LogisticsCompany(TimeStampedModel):
@@ -242,7 +315,7 @@ class MonitoringEvent(TimeStampedModel):
 
 class TransportRequest(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='transport_requests')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=transport_request_reference, editable=False)
     rfq_id = models.CharField(max_length=60, blank=True, db_index=True)
     transaction_id = models.CharField(max_length=60, blank=True, db_index=True)
     movement_type = models.CharField(max_length=40, db_index=True)
@@ -266,7 +339,7 @@ class TransportRequest(TimeStampedModel):
 
 class Movement(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='movements')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=movement_reference, editable=False)
     request = models.ForeignKey(TransportRequest, on_delete=models.SET_NULL, null=True, blank=True, related_name='movements')
     batch_id = models.CharField(max_length=80, blank=True, db_index=True)
     rfq_id = models.CharField(max_length=60, blank=True, db_index=True)
@@ -297,7 +370,7 @@ class Movement(TimeStampedModel):
 
 class Delivery(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='deliveries')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=delivery_reference, editable=False)
     movement = models.ForeignKey(Movement, on_delete=models.CASCADE, related_name='deliveries')
     destination_type = models.CharField(max_length=40, db_index=True)
     destination = models.CharField(max_length=255)
@@ -307,7 +380,7 @@ class Delivery(TimeStampedModel):
     receipt_reference = models.CharField(max_length=80, blank=True)
     arrived_at = models.DateTimeField(null=True, blank=True, db_index=True)
     custody_transferred_at = models.DateTimeField(null=True, blank=True)
-    status = models.CharField(max_length=40, db_index=True)
+    status = models.CharField(max_length=40, choices=DeliveryStatus.choices, default=DeliveryStatus.PENDING, db_index=True)
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -338,14 +411,14 @@ class LogisticsTransaction(TimeStampedModel):
 
 class LogisticsPayment(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_payments')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=payment_reference, editable=False)
     transaction = models.ForeignKey(LogisticsTransaction, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
     movement = models.ForeignKey(Movement, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
     invoice_reference = models.CharField(max_length=80, blank=True, db_index=True)
     job_value = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     due_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
     paid_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    status = models.CharField(max_length=40, db_index=True)
+    status = models.CharField(max_length=40, choices=PaymentStatus.choices, default=PaymentStatus.NOT_INVOICED, db_index=True)
     payment_date = models.DateField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
@@ -355,11 +428,11 @@ class LogisticsPayment(TimeStampedModel):
 
 class Incident(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='incidents')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=incident_reference, editable=False)
     movement = models.ForeignKey(Movement, on_delete=models.SET_NULL, null=True, blank=True, related_name='incidents')
     incident_type = models.CharField(max_length=60, db_index=True)
     severity = models.CharField(max_length=20, choices=[('low', 'Low'), ('medium', 'Medium'), ('high', 'High'), ('critical', 'Critical')], db_index=True)
-    status = models.CharField(max_length=40, db_index=True)
+    status = models.CharField(max_length=40, choices=IncidentStatus.choices, default=IncidentStatus.OPEN, db_index=True)
     location = models.CharField(max_length=255, blank=True)
     occurred_at = models.DateTimeField(db_index=True)
     description = models.TextField()
@@ -373,14 +446,16 @@ class Incident(TimeStampedModel):
 
 class OperationsDocument(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_documents')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=operations_document_reference, editable=False)
     name = models.CharField(max_length=200)
     document_type = models.CharField(max_length=80, db_index=True)
     related_asset = models.CharField(max_length=200, blank=True)
     issue_date = models.DateField(null=True, blank=True)
     expiry_date = models.DateField(null=True, blank=True, db_index=True)
-    verification_status = models.CharField(max_length=40, db_index=True)
-    compliance_status = models.CharField(max_length=40, db_index=True)
+    verification_status = models.CharField(max_length=40, choices=OperationsDocumentStatus.choices, default=OperationsDocumentStatus.UNDER_REVIEW, db_index=True)
+    compliance_status = models.CharField(max_length=40, choices=OperationsDocumentStatus.choices, default=OperationsDocumentStatus.UNDER_REVIEW, db_index=True)
+    file = models.FileField(upload_to='logistics/operations/%Y/%m/', null=True, blank=True)
+    original_name = models.CharField(max_length=255, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -389,12 +464,12 @@ class OperationsDocument(TimeStampedModel):
 
 class ComplianceFinding(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='operations_compliance_findings')
-    reference = models.CharField(max_length=40, unique=True)
+    reference = models.CharField(max_length=40, unique=True, default=compliance_finding_reference, editable=False)
     area = models.CharField(max_length=80, db_index=True)
     detail = models.TextField()
     action = models.TextField(blank=True)
     owner = models.CharField(max_length=160, blank=True)
-    status = models.CharField(max_length=40, db_index=True)
+    status = models.CharField(max_length=40, choices=ComplianceFindingStatus.choices, default=ComplianceFindingStatus.OPEN, db_index=True)
     raised_at = models.DateTimeField(default=timezone.now, db_index=True)
     metadata = models.JSONField(default=dict, blank=True)
 

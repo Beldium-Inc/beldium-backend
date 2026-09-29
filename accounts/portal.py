@@ -15,6 +15,8 @@ def portal_for_origin(origin: str) -> str:
         return User.Portal.COMPLIANCE
     if origin in settings.MINER_PORTAL_ORIGINS:
         return User.Portal.MINER
+    if origin in settings.LOGISTICS_PORTAL_ORIGINS:
+        return User.Portal.LOGISTICS
     return ""
 
 

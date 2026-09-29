@@ -58,6 +58,17 @@ class OrganisationAPITests(APITestCase):
         })
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+    def test_logistics_company_is_valid_organisation_type(self):
+        self.client.force_authenticate(self.member)
+        response = self.client.post(reverse("organisation-list"), {
+            "name": "Trans Sahel Logistics",
+            "organisation_type": "logistics_company",
+            "registration_number": "LG-001",
+        })
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["organisation_type"], "logistics_company")
+
     def test_duplicate_check_ignores_a_previously_rejected_organisation(self):
         Organisation.objects.create(
             name="Cosmaris Industries", organisation_type="compliance_partner", verification_status="rejected"
