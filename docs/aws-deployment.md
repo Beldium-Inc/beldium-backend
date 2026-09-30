@@ -361,10 +361,10 @@ aws iam create-role --role-name beldium-$ENV-ecs-infrastructure --assume-role-po
   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 aws iam attach-role-policy --role-name beldium-$ENV-ecs-infrastructure \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
-aws iam put-role-policy --role-name beldium-$ENV-ecs-infrastructure --policy-name express-mode-gaps --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ecs:DescribeServices\",\"ecs:UpdateService\"],\"Resource\":\"arn:aws:ecs:${AWS_REGION}:${ACCOUNT}:service/beldium-$ENV/*\"},{\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:DescribeAlarms\",\"ec2:DescribeAccountAttributes\"],\"Resource\":\"*\"}]}"
+aws iam put-role-policy --role-name beldium-$ENV-ecs-infrastructure --policy-name express-mode-gaps --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ecs:DescribeServices\",\"ecs:UpdateService\"],\"Resource\":\"arn:aws:ecs:${AWS_REGION}:${ACCOUNT}:service/beldium-$ENV/*\"},{\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:DescribeAlarms\",\"ec2:DescribeAccountAttributes\"],\"Resource\":\"*\"},{\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:PutMetricAlarm\",\"cloudwatch:DeleteAlarms\",\"cloudwatch:TagResource\"],\"Resource\":\"arn:aws:cloudwatch:${AWS_REGION}:${ACCOUNT}:alarm:*\"}]}"
 ```
 
-The second policy is required. On staging (2026-09-30), the managed policy (version v6) lacked `ecs:DescribeServices`, `ecs:UpdateService` and `ec2:DescribeAccountAttributes`, and its tag condition blocks `cloudwatch:DescribeAlarms`. Without them, creating the service rolls back ("PROVISIONING lifecycle hook(s) failed. AccessDenied"), and nothing runs.
+The second policy is required. On staging (2026-09-30), the managed policy (version v6) lacked `ecs:DescribeServices`, `ecs:UpdateService` and `ec2:DescribeAccountAttributes`, and its tag conditions block `cloudwatch:DescribeAlarms` and `cloudwatch:PutMetricAlarm` (the rollback alarm). Without them, creating the service rolls back ("PROVISIONING lifecycle hook(s) failed. AccessDenied"), and nothing runs. Updates never retry the load balancer after a failed creation. If that happens, delete the service (`aws ecs delete-express-gateway-service --service-arn ...`), wait for it to become INACTIVE, fix the permissions, and create it again.
 
 ### 10d. GitHub deploy role: assumed by the workflow through OIDC
 
