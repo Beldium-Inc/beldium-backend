@@ -341,7 +341,7 @@ aws iam attach-role-policy --role-name beldium-$ENV-ecs-execution \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 aws iam put-role-policy --role-name beldium-$ENV-ecs-execution --policy-name read-ssm --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"ssm:GetParameters\",
-  \"Resource\":\"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/beldium/$ENV/*\"}]}"
+  \"Resource\":\"arn:aws:ssm:${AWS_REGION}:${ACCOUNT}:parameter/beldium/$ENV/*\"}]}"
 ```
 
 ### 10b. Task role: what the app itself can do (S3 only)
@@ -361,7 +361,7 @@ aws iam create-role --role-name beldium-$ENV-ecs-infrastructure --assume-role-po
   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 aws iam attach-role-policy --role-name beldium-$ENV-ecs-infrastructure \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
-aws iam put-role-policy --role-name beldium-$ENV-ecs-infrastructure --policy-name express-mode-gaps --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ecs:DescribeServices\",\"ecs:UpdateService\"],\"Resource\":\"arn:aws:ecs:$AWS_REGION:$ACCOUNT:service/beldium-$ENV/*\"},{\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:DescribeAlarms\",\"ec2:DescribeAccountAttributes\"],\"Resource\":\"*\"}]}"
+aws iam put-role-policy --role-name beldium-$ENV-ecs-infrastructure --policy-name express-mode-gaps --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ecs:DescribeServices\",\"ecs:UpdateService\"],\"Resource\":\"arn:aws:ecs:${AWS_REGION}:${ACCOUNT}:service/beldium-$ENV/*\"},{\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:DescribeAlarms\",\"ec2:DescribeAccountAttributes\"],\"Resource\":\"*\"}]}"
 ```
 
 The second policy is required. On staging (2026-09-30), the managed policy (version v6) lacked `ecs:DescribeServices`, `ecs:UpdateService` and `ec2:DescribeAccountAttributes`, and its tag condition blocks `cloudwatch:DescribeAlarms`. Without them, creating the service rolls back ("PROVISIONING lifecycle hook(s) failed. AccessDenied"), and nothing runs.
@@ -373,7 +373,7 @@ The trust policy pins the role to one GitHub environment, so the staging role ca
 ```bash
 aws iam create-role --role-name beldium-$ENV-github-deploy --assume-role-policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",
-  \"Principal\":{\"Federated\":\"arn:aws:iam::$ACCOUNT:oidc-provider/token.actions.githubusercontent.com\"},
+  \"Principal\":{\"Federated\":\"arn:aws:iam::${ACCOUNT}:oidc-provider/token.actions.githubusercontent.com\"},
   \"Action\":\"sts:AssumeRoleWithWebIdentity\",
   \"Condition\":{\"StringEquals\":{
     \"token.actions.githubusercontent.com:aud\":\"sts.amazonaws.com\",
@@ -386,13 +386,13 @@ aws iam put-role-policy --role-name beldium-$ENV-github-deploy --policy-name dep
    {\"Effect\":\"Allow\",\"Action\":\"ecr:GetAuthorizationToken\",\"Resource\":\"*\"},
    {\"Effect\":\"Allow\",\"Action\":[\"ecr:BatchCheckLayerAvailability\",\"ecr:InitiateLayerUpload\",\"ecr:UploadLayerPart\",
      \"ecr:CompleteLayerUpload\",\"ecr:PutImage\",\"ecr:BatchGetImage\"],
-     \"Resource\":\"arn:aws:ecr:$AWS_REGION:$ACCOUNT:repository/beldium-backend\"},
+     \"Resource\":\"arn:aws:ecr:${AWS_REGION}:${ACCOUNT}:repository/beldium-backend\"},
    {\"Effect\":\"Allow\",\"Action\":[\"ecs:RegisterTaskDefinition\",\"ecs:DescribeTaskDefinition\"],\"Resource\":\"*\"},
    {\"Effect\":\"Allow\",\"Action\":[\"ecs:RunTask\",\"ecs:DescribeTasks\",\"ecs:UpdateService\",\"ecs:DescribeServices\",
      \"ecs:UpdateExpressGatewayService\",\"ecs:DescribeExpressGatewayService\"],
-     \"Resource\":\"*\",\"Condition\":{\"ArnEquals\":{\"ecs:cluster\":\"arn:aws:ecs:$AWS_REGION:$ACCOUNT:cluster/beldium-$ENV\"}}},
+     \"Resource\":\"*\",\"Condition\":{\"ArnEquals\":{\"ecs:cluster\":\"arn:aws:ecs:${AWS_REGION}:${ACCOUNT}:cluster/beldium-$ENV\"}}},
    {\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",
-     \"Resource\":[\"arn:aws:iam::$ACCOUNT:role/beldium-$ENV-ecs-execution\",\"arn:aws:iam::$ACCOUNT:role/beldium-$ENV-ecs-task\"],
+     \"Resource\":[\"arn:aws:iam::${ACCOUNT}:role/beldium-$ENV-ecs-execution\",\"arn:aws:iam::${ACCOUNT}:role/beldium-$ENV-ecs-task\"],
      \"Condition\":{\"StringEquals\":{\"iam:PassedToService\":\"ecs-tasks.amazonaws.com\"}}}]}"
 ```
 
@@ -428,8 +428,8 @@ docker build --platform linux/amd64 -t "$IMAGE" .      # --platform matters on A
 docker push "$IMAGE"
 
 python3 deploy/render_task_definitions.py --env $ENV --image "$IMAGE" --account-id $ACCOUNT \
-  --execution-role-arn arn:aws:iam::$ACCOUNT:role/beldium-$ENV-ecs-execution \
-  --task-role-arn arn:aws:iam::$ACCOUNT:role/beldium-$ENV-ecs-task \
+  --execution-role-arn arn:aws:iam::${ACCOUNT}:role/beldium-$ENV-ecs-execution \
+  --task-role-arn arn:aws:iam::${ACCOUNT}:role/beldium-$ENV-ecs-task \
   --out-dir /tmp/beldium-ecs
 for role in web worker beat; do
   aws ecs register-task-definition --cli-input-json file:///tmp/beldium-ecs/$role.json \
@@ -466,7 +466,7 @@ aws logs tail /ecs/beldium-$ENV --since 15m
 aws ecs create-express-gateway-service \
   --cluster beldium-$ENV \
   --service-name beldium-$ENV-web \
-  --infrastructure-role-arn arn:aws:iam::$ACCOUNT:role/beldium-$ENV-ecs-infrastructure \
+  --infrastructure-role-arn arn:aws:iam::${ACCOUNT}:role/beldium-$ENV-ecs-infrastructure \
   --task-definition-arn $(aws ecs describe-task-definition --task-definition beldium-$ENV-web --query taskDefinition.taskDefinitionArn --output text) \
   --health-check-path /health/ \
   --network-configuration "{\"subnets\":[\"$(echo "$PUBLIC_SUBNETS" | sed 's/,/","/g')\"],\"securityGroups\":[\"$TASKS_SG\"]}" \
