@@ -297,7 +297,7 @@ SECRET_KEY=<python3 -c "import secrets; print(secrets.token_urlsafe(64))">
 DATABASE_URL=postgres://beldium:<DB_PASSWORD>@<DB_HOST>:5432/beldium
 REDIS_URL=rediss://<CACHE_HOST>:6379/0?ssl_cert_reqs=required
 ALLOWED_HOSTS=api.beldium.com
-ECS_SERVICE_HOST=beldium-staging-web.ecs.us-east-1.on.aws
+ECS_SERVICE_HOST=pending.invalid
 CSRF_TRUSTED_ORIGINS=https://api.beldium.com
 CORS_ALLOWED_ORIGINS=https://compliance.beldium.com,https://miners.beldium.com
 COMPLIANCE_PORTAL_ORIGINS=https://compliance.beldium.com
@@ -309,7 +309,7 @@ AWS_STORAGE_BUCKET_NAME=beldium-staging-uploads
 NUM_PROXIES=1
 ```
 
-For staging, use staging hostnames (for example `api-staging.beldium.com` and staging frontend origins) if you have them. `ECS_SERVICE_HOST` follows the pattern `<service-name>.ecs.us-east-1.on.aws`. Step 13 confirms the real value; fix it there if it differs. Use a **different** `SECRET_KEY` for each environment.
+For staging, use staging hostnames (for example `api-staging.beldium.com` and staging frontend origins) if you have them. `ECS_SERVICE_HOST` starts as a placeholder. AWS assigns the real host when the service is created, in a random form like `be-<32 hex characters>.ecs.us-east-1.on.aws` (not the service name). Step 13 replaces the placeholder. Use a **different** `SECRET_KEY` for each environment.
 
 Load it:
 
@@ -361,7 +361,10 @@ aws iam create-role --role-name beldium-$ENV-ecs-infrastructure --assume-role-po
   '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 aws iam attach-role-policy --role-name beldium-$ENV-ecs-infrastructure \
   --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
+aws iam put-role-policy --role-name beldium-$ENV-ecs-infrastructure --policy-name express-mode-gaps --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ecs:DescribeServices\",\"ecs:UpdateService\"],\"Resource\":\"arn:aws:ecs:$AWS_REGION:$ACCOUNT:service/beldium-$ENV/*\"},{\"Effect\":\"Allow\",\"Action\":[\"cloudwatch:DescribeAlarms\",\"ec2:DescribeAccountAttributes\"],\"Resource\":\"*\"}]}"
 ```
+
+The second policy is required. On staging (2026-09-30), the managed policy (version v6) lacked `ecs:DescribeServices`, `ecs:UpdateService` and `ec2:DescribeAccountAttributes`, and its tag condition blocks `cloudwatch:DescribeAlarms`. Without them, creating the service rolls back ("PROVISIONING lifecycle hook(s) failed. AccessDenied"), and nothing runs.
 
 ### 10d. GitHub deploy role: assumed by the workflow through OIDC
 

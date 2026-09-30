@@ -9,7 +9,7 @@
 set -u
 ENV="${1:-staging}"
 export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 AWS_PAGER=""
-VARS=~/beldium-$ENV.vars
+VARS="${BELDIUM_VARS_FILE:-$HOME/beldium-$ENV.vars}"
 NEXT=""
 
 # Secrets can't be read back from AWS, so keep any already saved.
@@ -138,10 +138,31 @@ aws ecs describe-task-definition --task-definition "beldium-$ENV-web" >/dev/null
   && ok "task definitions registered" || todo "Step 12: push the first image and register task definitions (on your Mac)"
 services=$(aws ecs list-services --cluster "beldium-$ENV" --query 'serviceArns' --output text 2>/dev/null)
 for svc in web worker beat; do
-  echo "$services" | grep -q "beldium-$ENV-$svc" && ok "service beldium-$ENV-$svc" || todo "Step $([ $svc = web ] && echo 13 || echo 14): create service beldium-$ENV-$svc"
+  step=$([ $svc = web ] && echo 13 || echo 14)
+  if ! echo "$services" | grep -q "beldium-$ENV-$svc"; then
+    todo "Step $step: create service beldium-$ENV-$svc"; continue
+  fi
+  # Existing is not enough: a failed first deployment leaves the service in
+  # place with nothing running.
+  running=$(aws ecs describe-services --cluster "beldium-$ENV" --services "beldium-$ENV-$svc" \
+    --query 'services[0].runningCount' --output text 2>/dev/null)
+  if [ "${running:-0}" -ge 1 ] 2>/dev/null; then ok "service beldium-$ENV-$svc running ($running)"
+  else
+    reason=$(aws ecs describe-services --cluster "beldium-$ENV" --services "beldium-$ENV-$svc" \
+      --query 'services[0].events[0].message' --output text 2>/dev/null | cut -c1-160)
+    todo "Step $step: beldium-$ENV-$svc exists but nothing is running. Latest event: $reason"
+  fi
 done
 WEB_SERVICE_ARN=$(echo "$services" | tr '\t' '\n' | grep "beldium-$ENV-web" | head -1)
-val "$WEB_SERVICE_ARN" && keep WEB_SERVICE_ARN "$WEB_SERVICE_ARN"
+if val "$WEB_SERVICE_ARN"; then
+  keep WEB_SERVICE_ARN "$WEB_SERVICE_ARN"
+  endpoint=$(aws ecs describe-express-gateway-service --service-arn "$WEB_SERVICE_ARN" \
+    --query 'service.activeConfigurations[0].ingressPaths[0].endpoint' --output text 2>/dev/null)
+  if val "$endpoint"; then
+    health=$(curl -s --max-time 20 "https://${endpoint#https://}/health/")
+    case "$health" in *'"status": "ok"'*) ok "web health check: $health";; *) todo "Step 13: web health check failed at https://${endpoint#https://}/health/ (${health:-no answer})";; esac
+  fi
+fi
 
 echo
 if [ -n "$NEXT" ]; then echo "NEXT: $NEXT"; else echo "All checked steps are done."; fi
