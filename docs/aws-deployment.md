@@ -409,6 +409,10 @@ aws ecs create-cluster --cluster-name beldium-$ENV --capacity-providers FARGATE 
 
 ## Step 12. First image, task definitions and database schema
 
+**Easiest: let GitHub do it (no Docker on your machine).** Do the GitHub part of step 17 first (the `staging` environment and its variables; leave `WEB_SERVICE_ARN` out for now), then push this code to the `staging` branch. The workflow builds and pushes the image, registers the three task definitions, and runs `migrate`. It then skips the services because they don't exist yet, and finishes with a notice. Continue at step 13.
+
+**Or by hand, with Docker:**
+
 The services need a task definition before they can be created. After this, the GitHub workflow keeps them up to date.
 
 ```bash

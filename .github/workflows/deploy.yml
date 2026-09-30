@@ -61,8 +61,16 @@ jobs:
         env:
           IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
         run: |
-          docker build --platform linux/amd64 -t "$IMAGE" .
-          docker push "$IMAGE"
+          # Tags are immutable in ECR, so a re-run of the same commit reuses
+          # the image it already pushed instead of failing on the push.
+          found=$(aws ecr batch-get-image --repository-name "${{ vars.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ github.sha }}" --query 'length(images)' --output text)
+          if [ "$found" = "1" ]; then
+            echo "Image for ${{ github.sha }} already in ECR; skipping build."
+          else
+            docker build --platform linux/amd64 -t "$IMAGE" .
+            docker push "$IMAGE"
+          fi
           echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Register task definitions
@@ -112,7 +120,30 @@ jobs:
             exit 1
           fi
 
+      # On the very first deploy the services don't exist yet: they are
+      # created by hand from the task definitions registered above (see
+      # docs/aws-deployment.md, steps 13 and 14). Anything missing is skipped.
+      - name: Find existing services
+        id: services
+        run: |
+          worker="${{ vars.WORKER_SERVICE }}"; worker="${worker:-beldium-$DEPLOY_ENV-worker}"
+          beat="${{ vars.BEAT_SERVICE }}"; beat="${beat:-beldium-$DEPLOY_ENV-beat}"
+          exists() {
+            [ "$(aws ecs describe-services --cluster "$CLUSTER" --services "$1" \
+              --query "length(services[?status=='ACTIVE'])" --output text)" = "1" ] && echo true || echo false
+          }
+          web="${{ vars.WEB_SERVICE_ARN }}"
+          if [ -n "$web" ]; then web_exists=$(exists "$web"); else web_exists=false; fi
+          {
+            echo "worker=$worker"; echo "beat=$beat"
+            echo "web_exists=$web_exists"
+            echo "worker_exists=$(exists "$worker")"
+            echo "beat_exists=$(exists "$beat")"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
       - name: Deploy web (Express Mode)
+        if: steps.services.outputs.web_exists == 'true'
         run: |
           aws ecs update-express-gateway-service \
             --service-arn "${{ vars.WEB_SERVICE_ARN }}" \
@@ -121,20 +152,30 @@ jobs:
             --monitor-resources DEPLOYMENT --monitor-mode TEXT-ONLY
 
       - name: Deploy worker
+        if: steps.services.outputs.worker_exists == 'true'
         run: |
-          aws ecs update-service --cluster "$CLUSTER" --service "${{ vars.WORKER_SERVICE }}" \
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ steps.services.outputs.worker }}" \
             --task-definition "${{ steps.taskdefs.outputs.worker }}" --output text --query service.serviceName
 
       # Two beat processes would fire every scheduled job twice, so the old
       # task stops before the new one starts.
       - name: Deploy beat
+        if: steps.services.outputs.beat_exists == 'true'
         run: |
-          aws ecs update-service --cluster "$CLUSTER" --service "${{ vars.BEAT_SERVICE }}" \
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ steps.services.outputs.beat }}" \
             --task-definition "${{ steps.taskdefs.outputs.beat }}" \
             --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100" \
             --output text --query service.serviceName
 
       - name: Wait for services to stabilise
+        env:
+          WEB: ${{ steps.services.outputs.web_exists == 'true' && vars.WEB_SERVICE_ARN || '' }}
+          WORKER: ${{ steps.services.outputs.worker_exists == 'true' && steps.services.outputs.worker || '' }}
+          BEAT: ${{ steps.services.outputs.beat_exists == 'true' && steps.services.outputs.beat || '' }}
         run: |
-          aws ecs wait services-stable --cluster "$CLUSTER" \
-            --services "${{ vars.WEB_SERVICE_ARN }}" "${{ vars.WORKER_SERVICE }}" "${{ vars.BEAT_SERVICE }}"
+          set -- $WEB $WORKER $BEAT
+          if [ "$#" -eq 0 ]; then
+            echo "::notice::First deploy: image pushed, task definitions registered and migrations run. No services exist yet; create them (docs/aws-deployment.md steps 13 and 14)."
+            exit 0
+          fi
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$@"
