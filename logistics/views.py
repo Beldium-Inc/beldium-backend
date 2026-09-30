@@ -346,8 +346,9 @@ MOVEMENT_TRANSITIONS = {
     'scheduled': {'assigned', 'cancelled'},
     'assigned': {'loading', 'in_transit', 'cancelled'},
     'loading': {'in_transit', 'delayed', 'cancelled'},
-    'in_transit': {'delayed', 'delivered', 'cancelled'},
-    'delayed': {'in_transit', 'delivered', 'cancelled'},
+    'in_transit': {'delayed', 'arrived', 'cancelled'},
+    'delayed': {'in_transit', 'arrived', 'cancelled'},
+    'arrived': {'delivered'},
     'delivered': set(),
     'cancelled': set(),
 }
@@ -401,13 +402,6 @@ def delivery_for_movement(movement, status, occurred_at):
     if status == 'arrived' and delivery.arrived_at is None:
         delivery.arrived_at = occurred_at
         updates.append('arrived_at')
-    if status == 'completed':
-        if delivery.arrived_at is None:
-            delivery.arrived_at = occurred_at
-            updates.append('arrived_at')
-        if delivery.custody_transferred_at is None:
-            delivery.custody_transferred_at = occurred_at
-            updates.append('custody_transferred_at')
     delivery.save(update_fields=updates)
     return delivery
 
@@ -797,8 +791,8 @@ class MovementViewSet(OperationsRecordViewSet):
         if 'latitude' in data or 'longitude' in data:
             movement.last_gps_at = occurred_at
         movement.save(update_fields=['status', 'eta_at', 'delivered_at', 'last_latitude', 'last_longitude', 'last_gps_at', 'updated_at'])
-        if movement.status == 'delivered':
-            delivery_for_movement(movement, 'completed', occurred_at)
+        if movement.status in {'arrived', 'delivered'}:
+            delivery_for_movement(movement, 'arrived', occurred_at)
         if data.get('note'):
             m.OperationsEvent.objects.create(company=movement.company, occurred_at=occurred_at, sector='Logistics', event_type='Movement', text=data['note'])
         services.audit(request, movement.company, 'movement_status_updated', movement_id=str(movement.pk), status=movement.status)
@@ -825,7 +819,9 @@ class DeliveryViewSet(OperationsRecordViewSet):
         delivery.received_quantity = data['received_quantity']
         delivery.receipt_reference = data.get('receipt_reference', delivery.receipt_reference)
         delivery.custody_transferred_at = data.get('custody_transferred_at') or timezone.now()
-        delivery.status = 'completed'
+        tolerance = delivery.metadata.get('quantity_tolerance', '0.000')
+        tolerance = delivery.expected_quantity.__class__(str(tolerance))
+        delivery.status = 'variance_flagged' if abs(delivery.received_quantity - delivery.expected_quantity) > tolerance else 'completed'
         delivery.save(update_fields=['received_quantity', 'receipt_reference', 'custody_transferred_at', 'status', 'updated_at'])
         services.audit(request, delivery.company, 'delivery_completed', delivery_id=str(delivery.pk))
         return Response(self.get_serializer(delivery).data)

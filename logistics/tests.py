@@ -2,6 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 
+from django.apps import apps
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.urls import reverse
@@ -30,6 +31,7 @@ from logistics.models import (
     Incident,
     ActionItem,
     OperationsEvent,
+    OperationsDocument,
     ComplianceFinding,
     Notification,
     ScopeRestriction,
@@ -654,11 +656,29 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.client.force_authenticate(self.owner)
         response = self.client.post(
             reverse("logistics-delivery-complete", args=[delivery.id]),
-            {"received_quantity": "31.920", "receipt_reference": "PR-2209"},
+            {"received_quantity": "32.000", "receipt_reference": "PR-2209"},
             format="json",
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "completed")
+        self.assertEqual(response.data["variance"], Decimal("0.000"))
+
+        short_delivery = Delivery.objects.create(
+            company=self.company,
+            movement=movement,
+            destination_type="Processor",
+            destination="Pyramid Processing Plant",
+            expected_quantity="32.000",
+            quantity_unit="MT",
+            status="arrived",
+        )
+        response = self.client.post(
+            reverse("logistics-delivery-complete", args=[short_delivery.id]),
+            {"received_quantity": "31.920", "receipt_reference": "PR-2210"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "variance_flagged")
         self.assertEqual(response.data["variance"], Decimal("-0.080"))
 
         response = self.client.post(
@@ -776,7 +796,7 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["error"]["code"], "service_scope_restricted")
 
-    def test_movement_status_transitions_eta_and_delivery_side_effect(self):
+    def test_movement_arrival_delivery_and_completion_are_separate(self):
         movement = self.make_movement(status="scheduled")
         self.client.force_authenticate(self.owner)
 
@@ -801,7 +821,75 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNotNone(response.data["eta_at"])
 
+        arrived = self.client.post(reverse("logistics-movement-set-status", args=[movement.id]), {"status": "arrived"}, format="json")
+        self.assertEqual(arrived.status_code, 200)
+        self.assertEqual(arrived.data["status"], "arrived")
+        delivery = movement.deliveries.get()
+        self.assertEqual(delivery.status, "arrived")
+        self.assertIsNotNone(delivery.arrived_at)
+        self.assertIsNone(delivery.received_quantity)
+        self.assertIsNone(delivery.custody_transferred_at)
+
         delivered = self.client.post(reverse("logistics-movement-set-status", args=[movement.id]), {"status": "delivered"}, format="json")
         self.assertEqual(delivered.status_code, 200)
         self.assertEqual(delivered.data["status"], "delivered")
-        self.assertEqual(movement.deliveries.get().status, "completed")
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, "arrived")
+        self.assertIsNone(delivery.received_quantity)
+        self.assertIsNone(delivery.custody_transferred_at)
+
+    def test_legacy_operations_status_values_are_normalised(self):
+        from importlib import import_module
+
+        migration = import_module("logistics.migrations.0004_operationsdocument_file_and_more")
+        movement = self.make_movement(status="scheduled")
+        incident = Incident.objects.create(
+            company=self.company,
+            movement=movement,
+            incident_type="Delay",
+            severity="medium",
+            status="Resolved",
+            occurred_at=timezone.now(),
+            description="Legacy status.",
+        )
+        finding = ComplianceFinding.objects.create(
+            company=self.company,
+            area="Vehicle",
+            detail="Legacy status.",
+            status="Corrective Action Submitted",
+        )
+        delivery = Delivery.objects.create(
+            company=self.company,
+            movement=movement,
+            destination_type="Warehouse",
+            destination="ABJ-2",
+            expected_quantity="10.000",
+            status="Delivered",
+        )
+        payment = LogisticsPayment.objects.create(
+            company=self.company,
+            status="Partially Paid",
+        )
+        document = OperationsDocument.objects.create(
+            company=self.company,
+            name="Permit",
+            document_type="Permit",
+            verification_status="Action Required",
+            compliance_status="Under Review",
+        )
+
+        migration.normalise_status_values(apps, None)
+
+        for obj, expected in [
+            (incident, "resolved"),
+            (finding, "corrective_action_submitted"),
+            (delivery, "completed"),
+            (payment, "part_paid"),
+        ]:
+            obj.refresh_from_db()
+            self.assertEqual(obj.status, expected)
+            obj.full_clean()
+        document.refresh_from_db()
+        self.assertEqual(document.verification_status, "action_required")
+        self.assertEqual(document.compliance_status, "under_review")
+        document.full_clean()
