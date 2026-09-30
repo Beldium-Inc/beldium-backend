@@ -602,7 +602,8 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["stats"]["active_jobs"], 1)
         self.assertEqual(response.data["stats"]["new_transport_requests"], 1)
-        self.assertEqual(response.data["stats"]["unread_notifications"], 2)
+        self.assertEqual(response.data["stats"]["unread_notifications"], 1)
+        self.assertEqual(response.data["stats"]["unread_events"], 1)
         self.assertNotIn("awaiting_acceptance", response.data["stats"])
         self.assertEqual(response.data["action_items"][0]["action"], "Assign Vehicle")
         self.assertEqual(response.data["active_movements"][0]["vehicle_registration"], "LG-220")
@@ -796,6 +797,85 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["error"]["code"], "service_scope_restricted")
 
+    def test_assignment_rejects_assets_from_another_company_with_specific_codes(self):
+        movement = self.make_movement()
+        other_company = LogisticsCompany.objects.create(
+            organisation=self.other_org,
+            contact_name="Other Owner",
+            contact_email="ops@other.example",
+            contact_phone="+2348111111111",
+            services=["general freight"],
+        )
+        other_vehicle = self.make_vehicle(
+            company=other_company,
+            registration="OTH-001",
+            vin="VIN00000000000444",
+        )
+        other_driver = self.make_driver(
+            company=other_company,
+            full_name="Other Driver",
+            licence_number="OTH-DL-1",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"vehicle": str(other_vehicle.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "vehicle_wrong_company")
+
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"driver": str(other_driver.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "driver_wrong_company")
+
+    def test_operations_dashboard_excludes_closed_incidents_from_open_count(self):
+        Incident.objects.create(
+            company=self.company,
+            incident_type="Delay",
+            severity="low",
+            status="open",
+            occurred_at=timezone.now(),
+            description="Still open.",
+        )
+        Incident.objects.create(
+            company=self.company,
+            incident_type="Delay",
+            severity="low",
+            status="closed",
+            occurred_at=timezone.now(),
+            description="Closed incident.",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(reverse("logistics-operations_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["stats"]["open_incidents"], 1)
+
+    def test_operations_document_accepts_json_metadata_edits(self):
+        document = OperationsDocument.objects.create(
+            company=self.company,
+            name="Vehicle permit",
+            document_type="permit",
+            metadata={"owner": "ops"},
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch(
+            reverse("logistics-operations-document-detail", args=[document.id]),
+            {"metadata": {"owner": "compliance", "reviewed": True}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["metadata"]["reviewed"], True)
+
     def test_movement_arrival_delivery_and_completion_are_separate(self):
         movement = self.make_movement(status="scheduled")
         self.client.force_authenticate(self.owner)
@@ -841,7 +921,7 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
     def test_legacy_operations_status_values_are_normalised(self):
         from importlib import import_module
 
-        migration = import_module("logistics.migrations.0004_operationsdocument_file_and_more")
+        migration = import_module("logistics.migrations.0006_normalise_operations_status_values")
         movement = self.make_movement(status="scheduled")
         incident = Incident.objects.create(
             company=self.company,

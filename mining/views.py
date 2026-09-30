@@ -668,7 +668,7 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
 
     def locked_application(self):
         visible_pk = self.get_object().pk
-        return Application.objects.select_for_update(of=("self",)).get(pk=visible_pk)
+        return Application.objects.select_for_update(of=("self",)).select_related("site", "organisation").get(pk=visible_pk)
 
     @extend_schema(request=None, responses=ApplicationSerializer)
     @action(detail=True, methods=["post"])
