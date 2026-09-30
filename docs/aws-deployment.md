@@ -59,6 +59,29 @@ echo "$ACCOUNT $ENV"
 
 ---
 
+### Working in AWS CloudShell
+
+Steps 1 to 11 and 13 to 19 can all be run in CloudShell (the `>_` icon in the console's top bar). Three things to know:
+
+1. **Set the console region to US East (N. Virginia) first** (top-right menu). CloudShell and the console wizards use that region. A VPC made while the console shows Stockholm ends up in Stockholm.
+2. **CloudShell forgets shell variables** when the session ends (after about 20 to 30 minutes idle). Files in your home folder are kept. Keep every value in a file and reload it each session:
+
+```bash
+cat > ~/beldium-staging.vars <<'EOF'
+export AWS_REGION=us-east-1
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_PAGER=""
+export ENV=staging
+export APP=beldium
+save() { echo "export $1=\"${!1}\"" >> ~/beldium-$ENV.vars; echo "saved $1=${!1}"; }
+EOF
+source ~/beldium-staging.vars
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text); save ACCOUNT
+```
+
+   Start every new session with `source ~/beldium-staging.vars`. After creating something, `save NAME` stores its ID. For production, make `~/beldium-production.vars` the same way with `ENV=production`.
+3. **Step 12 needs Docker and this repository**, so run it on your own machine, not in CloudShell.
+
 ## Step 1. Billing alarm (once)
 
 In the console: **Billing and Cost Management → Budgets → Create budget → Monthly cost budget**. Set an amount and your email. This is the cheapest insurance against a forgotten resource.
@@ -119,12 +142,17 @@ aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
   --query 'Subnets[].[SubnetId,AvailabilityZone,Tags[?Key==`Name`]|[0].Value]' --output table
 ```
 
-Copy the IDs from the table:
+The table should show four subnets: two with `public` in the name and two with `private`. Pick them up by name:
 
 ```bash
-export PUBLIC_SUBNETS=subnet-aaa,subnet-bbb     # the two with "public" in the name
-export PRIVATE_SUBNETS=subnet-ccc,subnet-ddd    # the two with "private" in the name
+save VPC_ID
+PUBLIC_SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*public*" \
+  --query 'Subnets[].SubnetId' --output text | tr '\t' ','); save PUBLIC_SUBNETS
+PRIVATE_SUBNETS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Name,Values=*private*" \
+  --query 'Subnets[].SubnetId' --output text | tr '\t' ','); save PRIVATE_SUBNETS
 ```
+
+Each should show two IDs separated by a comma.
 
 ### Security groups
 
@@ -138,7 +166,7 @@ CACHE_SG=$(aws ec2 create-security-group --vpc-id "$VPC_ID" \
 
 aws ec2 authorize-security-group-ingress --group-id "$DB_SG" --protocol tcp --port 5432 --source-group "$TASKS_SG"
 aws ec2 authorize-security-group-ingress --group-id "$CACHE_SG" --protocol tcp --port 6379 --source-group "$TASKS_SG"
-echo "TASKS_SG=$TASKS_SG DB_SG=$DB_SG CACHE_SG=$CACHE_SG"
+save TASKS_SG; save DB_SG; save CACHE_SG
 ```
 
 `beldium-<env>-tasks` gets no inbound rules. Express Mode adds its own load balancer security group, which lets the load balancer reach the web container (see step 13).
@@ -150,15 +178,15 @@ echo "TASKS_SG=$TASKS_SG DB_SG=$DB_SG CACHE_SG=$CACHE_SG"
 Check which 18.x versions RDS offers:
 
 ```bash
-aws rds describe-db-engine-versions --engine postgres \
-  --query "DBEngineVersions[?starts_with(EngineVersion,'18')].EngineVersion" --output text
-export PG_VERSION=18.x    # pick the newest from the list
+PG_VERSION=$(aws rds describe-db-engine-versions --engine postgres \
+  --query "DBEngineVersions[?starts_with(EngineVersion,'18.')].EngineVersion" --output text | tr '\t' '\n' | sort -V | tail -1)
+save PG_VERSION     # should print 18.something; if empty, RDS has no 18.x in this region
 ```
 
 Create a password that needs no URL escaping, and keep it in your password manager:
 
 ```bash
-export DB_PASSWORD=$(openssl rand -hex 24)
+DB_PASSWORD=$(openssl rand -hex 24); save DB_PASSWORD    # also copy it into your password manager
 ```
 
 ```bash
@@ -178,9 +206,8 @@ aws rds create-db-instance \
   --backup-retention-period 7 --copy-tags-to-snapshot
 
 aws rds wait db-instance-available --db-instance-identifier beldium-$ENV   # about 10 minutes
-export DB_HOST=$(aws rds describe-db-instances --db-instance-identifier beldium-$ENV \
-  --query 'DBInstances[0].Endpoint.Address' --output text)
-echo "$DB_HOST"
+DB_HOST=$(aws rds describe-db-instances --db-instance-identifier beldium-$ENV \
+  --query 'DBInstances[0].Endpoint.Address' --output text); save DB_HOST
 ```
 
 **Production differences:** a larger class (for example `db.t4g.medium` or `db.m7g.large`, based on Render's current usage), `--multi-az`, `--backup-retention-period 14`, `--deletion-protection`.
@@ -194,8 +221,9 @@ RDS for Postgres 15 and later requires SSL by default. psycopg uses SSL automati
 **Do not use ElastiCache Serverless.** It runs in cluster mode, which Celery's Redis transport does not support. Use a node-based replication group with cluster mode off.
 
 ```bash
-aws elasticache describe-cache-engine-versions --engine valkey --query 'CacheEngineVersions[].EngineVersion' --output text
-export VALKEY_VERSION=8.x     # pick the newest 8.x
+VALKEY_VERSION=$(aws elasticache describe-cache-engine-versions --engine valkey \
+  --query "CacheEngineVersions[?starts_with(EngineVersion,'8.')].EngineVersion" --output text | tr '\t' '\n' | sort -V | tail -1)
+save VALKEY_VERSION
 
 aws elasticache create-cache-subnet-group --cache-subnet-group-name beldium-$ENV \
   --cache-subnet-group-description "Beldium $ENV" \
@@ -211,9 +239,8 @@ aws elasticache create-replication-group \
   --transit-encryption-enabled --at-rest-encryption-enabled
 
 aws elasticache wait replication-group-available --replication-group-id beldium-$ENV
-export CACHE_HOST=$(aws elasticache describe-replication-groups --replication-group-id beldium-$ENV \
-  --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' --output text)
-echo "$CACHE_HOST"
+CACHE_HOST=$(aws elasticache describe-replication-groups --replication-group-id beldium-$ENV \
+  --query 'ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.Address' --output text); save CACHE_HOST
 ```
 
 **Production differences:** `--cache-node-type cache.t4g.small`, `--num-cache-clusters 2 --automatic-failover-enabled --multi-az-enabled`.
@@ -227,7 +254,7 @@ Because transit encryption is on, the URL starts with `rediss://` and ends with 
 Bucket names are global. If `beldium-<env>-uploads` is taken, add a suffix and use that name everywhere below.
 
 ```bash
-export BUCKET=beldium-$ENV-uploads
+BUCKET=beldium-$ENV-uploads; save BUCKET
 aws s3api create-bucket --bucket "$BUCKET"
 aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
