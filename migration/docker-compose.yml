@@ -1,0 +1,44 @@
+# Two throwaway Postgres 18 databases for rehearsing the old -> v2 merge.
+# Local only: nothing here can reach Render or AWS. Put pg_dump files in
+# ./dumps (gitignored); they are mounted read-only at /dumps.
+#
+#   docker compose -f migration/docker-compose.yml up -d
+#   docker compose -f migration/docker-compose.yml down -v   # wipe both
+services:
+  old_db:
+    image: postgres:18
+    container_name: old_db
+    environment:
+      POSTGRES_USER: merge
+      POSTGRES_PASSWORD: local-only
+      POSTGRES_DB: old
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - old_data:/var/lib/postgresql
+      - ./dumps:/dumps:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U merge -d old"]
+      interval: 2s
+      retries: 30
+
+  v2_db:
+    image: postgres:18
+    container_name: v2_db
+    environment:
+      POSTGRES_USER: merge
+      POSTGRES_PASSWORD: local-only
+      POSTGRES_DB: v2
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - v2_data:/var/lib/postgresql
+      - ./dumps:/dumps:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U merge -d v2"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  old_data:
+  v2_data:
