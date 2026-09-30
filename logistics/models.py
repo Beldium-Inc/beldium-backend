@@ -357,7 +357,7 @@ class Movement(TimeStampedModel):
     pickup_at = models.DateTimeField(null=True, blank=True, db_index=True)
     eta_at = models.DateTimeField(null=True, blank=True, db_index=True)
     delivered_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    status = models.CharField(max_length=30, choices=[('scheduled', 'Scheduled'), ('assigned', 'Assigned'), ('loading', 'Loading'), ('in_transit', 'In transit'), ('delayed', 'Delayed'), ('delivered', 'Delivered'), ('cancelled', 'Cancelled')], db_index=True)
+    status = models.CharField(max_length=30, choices=[('scheduled', 'Scheduled'), ('assigned', 'Assigned'), ('loading', 'Loading'), ('in_transit', 'In transit'), ('delayed', 'Delayed'), ('arrived', 'Arrived'), ('delivered', 'Delivered'), ('cancelled', 'Cancelled')], db_index=True)
     last_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     last_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     last_gps_at = models.DateTimeField(null=True, blank=True)

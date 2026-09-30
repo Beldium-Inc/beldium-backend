@@ -4,6 +4,83 @@ import logistics.models
 from django.db import migrations, models
 
 
+STATUS_MAPPINGS = {
+    ("Incident", "status"): {
+        "open": "open",
+        "under investigation": "under_investigation",
+        "under_investigation": "under_investigation",
+        "resolved": "resolved",
+        "closed": "closed",
+    },
+    ("ComplianceFinding", "status"): {
+        "open": "open",
+        "under review": "under_review",
+        "under_review": "under_review",
+        "corrective action submitted": "corrective_action_submitted",
+        "corrective_action_submitted": "corrective_action_submitted",
+        "cleared": "cleared",
+        "closed": "cleared",
+    },
+    ("Delivery", "status"): {
+        "pending": "pending",
+        "in transit": "in_transit",
+        "in_transit": "in_transit",
+        "arrived": "arrived",
+        "completed": "completed",
+        "delivered": "completed",
+        "variance": "variance_flagged",
+        "variance flagged": "variance_flagged",
+        "variance_flagged": "variance_flagged",
+    },
+    ("LogisticsPayment", "status"): {
+        "not invoiced": "not_invoiced",
+        "not_invoiced": "not_invoiced",
+        "invoice generated": "invoice_raised",
+        "invoice raised": "invoice_raised",
+        "invoice_raised": "invoice_raised",
+        "submitted": "submitted",
+        "pending": "submitted",
+        "partially paid": "part_paid",
+        "part paid": "part_paid",
+        "part_paid": "part_paid",
+        "paid": "paid",
+        "overdue": "overdue",
+    },
+    ("OperationsDocument", "verification_status"): {
+        "verified": "verified",
+        "under review": "under_review",
+        "under_review": "under_review",
+        "action required": "action_required",
+        "action_required": "action_required",
+        "rejected": "rejected",
+        "expiring": "expiring",
+        "expired": "expired",
+    },
+    ("OperationsDocument", "compliance_status"): {
+        "verified": "verified",
+        "under review": "under_review",
+        "under_review": "under_review",
+        "action required": "action_required",
+        "action_required": "action_required",
+        "rejected": "rejected",
+        "expiring": "expiring",
+        "expired": "expired",
+    },
+}
+
+
+def normalise_status_values(apps, schema_editor):
+    for (model_name, field), mapping in STATUS_MAPPINGS.items():
+        model = apps.get_model("logistics", model_name)
+        for pk, value in model.objects.values_list("pk", field):
+            key = str(value).strip().casefold()
+            if key not in mapping:
+                raise ValueError(f"Unknown legacy logistics status for {model_name}.{field}: {value!r}")
+            normalised = mapping[key]
+            if value != normalised:
+                model.objects.filter(pk=pk).update(**{field: normalised})
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -21,6 +98,7 @@ class Migration(migrations.Migration):
             name='original_name',
             field=models.CharField(blank=True, max_length=255),
         ),
+        migrations.RunPython(normalise_status_values, migrations.RunPython.noop),
         migrations.AlterField(
             model_name='compliancefinding',
             name='reference',

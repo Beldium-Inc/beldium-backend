@@ -666,6 +666,10 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         application = serializer.save()
         self.record("application_updated", target=application.reference, application_id=str(application.id))
 
+    def locked_application(self):
+        visible_pk = self.get_object().pk
+        return Application.objects.select_for_update(of=("self",)).get(pk=visible_pk)
+
     @extend_schema(request=None, responses=ApplicationSerializer)
     @action(detail=True, methods=["post"])
     def claim(self, request, pk=None):
@@ -680,7 +684,7 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         """
         if not can_decide(request.user):
             raise PermissionDenied("Only the compliance desk can claim an application.")
-        application = Application.objects.select_for_update().get(pk=self.get_object().pk)
+        application = self.locked_application()
         if application.assigned_to_id and application.assigned_to_id != request.user.id:
             raise ConflictError(
                 "This application has already been claimed by another reviewer.",
@@ -706,7 +710,7 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         re-claim it themselves — exactly the takeover claiming is meant to
         prevent. Only Django staff (Beldium itself) gets the override.
         """
-        application = Application.objects.select_for_update().get(pk=self.get_object().pk)
+        application = self.locked_application()
         if application.assigned_to_id != request.user.id and not (request.user.is_staff or request.user.is_superuser):
             raise PermissionDenied("You have not claimed this application.")
         if application.assigned_to_id is not None:

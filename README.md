@@ -56,6 +56,11 @@ Registration, the six-digit email code, sign-in, the current-user profile, the o
 register and join requests are wired through. With the default console email backend the
 verification code is printed in this terminal, not emailed.
 
+The logistics portal uses `https://logistics.beldium.com` in production and
+`http://localhost:5175` in development. If `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`,
+or `LOGISTICS_PORTAL_ORIGINS` are set in the deployment environment, include those
+values there as well; environment values replace the defaults in `core/settings.py`.
+
 The Processing Compliance dashboard is fully wired: every screen under `/processing` reads
 this API and every review action writes to it. Seed a demo register first, or the screens
 open empty:
