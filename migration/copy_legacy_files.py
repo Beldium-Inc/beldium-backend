@@ -89,6 +89,10 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
+    # Credentials from `aws login` refresh through AWS's sign-in service, which
+    # needs a default region even though every client below names its own.
+    os.environ.setdefault("AWS_DEFAULT_REGION", args.region)
+    os.environ.setdefault("AWS_REGION", args.region)
     import boto3
 
     jobs = plan(args.old)
