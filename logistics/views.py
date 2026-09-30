@@ -13,7 +13,7 @@ from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.generics import get_object_or_404
-from rest_framework.parsers import MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
@@ -747,9 +747,9 @@ class MovementViewSet(OperationsRecordViewSet):
         vehicle = payload.validated_data.get('vehicle')
         driver = payload.validated_data.get('driver')
         if vehicle and vehicle.company_id != movement.company_id:
-            raise ConflictError('Choose a vehicle belonging to this logistics company.')
+            raise ConflictError('Choose a vehicle belonging to this logistics company.', code='vehicle_wrong_company')
         if driver and driver.company_id != movement.company_id:
-            raise ConflictError('Choose a driver belonging to this logistics company.')
+            raise ConflictError('Choose a driver belonging to this logistics company.', code='driver_wrong_company')
         if driver and vehicle and driver.assigned_vehicle_id and driver.assigned_vehicle_id != vehicle.pk:
             raise ConflictError('The selected driver is assigned to another vehicle.')
         assert_unrestricted_service(movement.company, movement.movement_type)
@@ -866,7 +866,7 @@ class OperationsDocumentViewSet(OperationsRecordViewSet):
     serializer_class = s.OperationsDocumentSerializer
     filterset_fields = ['company', 'document_type', 'verification_status', 'compliance_status']
     search_fields = ['reference', 'name', 'related_asset']
-    parser_classes = [MultiPartParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     def perform_create(self, serializer):
         company = serializer.validated_data['company']
@@ -1007,10 +1007,11 @@ class SummaryViewSet(AtomicViewSet):
             'loading': movements.filter(status='loading').count(),
             'in_transit': movements.filter(status='in_transit').count(),
             'delayed_shipments': movements.filter(status='delayed').count(),
-            'open_incidents': m.Incident.objects.filter(company_id__in=ids).exclude(status='resolved').count(),
+            'open_incidents': m.Incident.objects.filter(company_id__in=ids).exclude(status__in=['resolved', 'closed']).count(),
             'compliance_alerts': m.ComplianceFinding.objects.filter(company_id__in=ids).exclude(status='cleared').count(),
             'available_vehicles': vehicles.exclude(movements__status__in=['assigned', 'loading', 'in_transit', 'delayed']).distinct().count(),
-            'unread_notifications': m.Notification.objects.filter(recipient=request.user, company_id__in=ids, read_at__isnull=True).count() + events.filter(unread=True).count(),
+            'unread_notifications': m.Notification.objects.filter(recipient=request.user, company_id__in=ids, read_at__isnull=True).count(),
+            'unread_events': events.filter(unread=True).count(),
             'tonnes_moved': movements.aggregate(total=Sum('quantity'))['total'] or 0,
             'outstanding_payments': payments.aggregate(total=Sum('due_amount') - Sum('paid_amount'))['total'] or 0,
         }
