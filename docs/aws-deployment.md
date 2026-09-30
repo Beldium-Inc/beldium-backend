@@ -652,6 +652,35 @@ Migrations run while the old code still serves traffic. Keep each migration back
 
 Run any management command the same way as step 15, with `"command":["manage","<command>", "<args>"]`.
 
+### Loading data through a tunnel
+
+The databases are private: nothing on the internet can reach them. To load data, open a temporary tunnel from your computer through the running worker task, using AWS Session Manager. There's no new server and no public access.
+
+**Once per environment (CloudShell):** allow Session Manager on the worker.
+
+```bash
+aws iam put-role-policy --role-name beldium-$ENV-ecs-task --policy-name ecs-exec --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["ssmmessages:CreateControlChannel","ssmmessages:CreateDataChannel","ssmmessages:OpenControlChannel","ssmmessages:OpenDataChannel"],"Resource":"*"}]}'
+aws ecs update-service --cluster beldium-$ENV --service beldium-$ENV-worker --enable-execute-command --force-new-deployment --query service.enableExecuteCommand
+aws ecs wait services-stable --cluster beldium-$ENV --services beldium-$ENV-worker
+```
+
+**On your computer, once:** `brew install --cask session-manager-plugin`, then `aws login --region us-east-1`.
+
+**Each time:**
+
+- Window 1: `bash deploy/db-tunnel.sh <env>`. Leave it open.
+- Window 2: `export TARGET=$(bash deploy/db-url.sh <env>)`. `$TARGET` now reaches the environment's database. The password is never printed.
+
+Restore a dump into it. `-n public` leaves the schema itself alone. `--single-transaction` means it fully succeeds or changes nothing:
+
+```bash
+pg_restore --clean --if-exists --no-owner --no-acl --single-transaction --exit-on-error -n public -d "$TARGET" migration/dumps/v2.dump
+```
+
+Then use `migration/merge.py`, `reactivate_users.py`, `verify.sql` and `smoke_test.py` with `--target "$TARGET"` (see `migration/README.md`).
+
+Afterwards, force a new deployment of the web service so it drops old connections. When the environment no longer needs loading, turn the tunnel access off again: `update-service ... --no-enable-execute-command --force-new-deployment`, then `aws iam delete-role-policy --role-name beldium-$ENV-ecs-task --policy-name ecs-exec`.
+
 ### Moving uploaded files off Render
 
 Render has no `AWS_STORAGE_BUCKET_NAME` set, so uploads live on the Render service's disk under `media/`. `copy_media_to_s3` reads every FileField in the database, uploads each file to the bucket under the same key, and lists records whose file is missing on disk. It only reads the database and never overwrites an existing object.
