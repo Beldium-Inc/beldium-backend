@@ -113,8 +113,16 @@ echo "Step 8. Log group"
   && ok "/ecs/beldium-$ENV" || todo "Step 8: create the log group"
 
 echo "Step 9. Settings in SSM"
-n=$(aws ssm get-parameters-by-path --path "/beldium/$ENV/" --query 'length(Parameters)' --output text 2>/dev/null)
-[ "${n:-0}" -ge 14 ] 2>/dev/null && ok "$n parameters" || todo "Step 9: load the settings (found ${n:-0} of 14)"
+# Results come back 10 per page, so count names across all pages.
+names=$(aws ssm get-parameters-by-path --path "/beldium/$ENV/" --query 'Parameters[].Name' --output text 2>/dev/null | tr '\t' '\n' | sed 's|.*/||' | grep -v '^$')
+n=$(echo "$names" | grep -c . )
+missing=""
+for want in SECRET_KEY DATABASE_URL REDIS_URL ALLOWED_HOSTS ECS_SERVICE_HOST CSRF_TRUSTED_ORIGINS CORS_ALLOWED_ORIGINS \
+            COMPLIANCE_PORTAL_ORIGINS MINER_PORTAL_ORIGINS FRONTEND_URL DEFAULT_FROM_EMAIL EMAIL_HOST_PASSWORD \
+            AWS_STORAGE_BUCKET_NAME NUM_PROXIES; do
+  echo "$names" | grep -qx "$want" || missing="$missing $want"
+done
+[ -z "$missing" ] && ok "all 14 parameters" || todo "Step 9: missing settings ($n of 14 stored):$missing"
 
 echo "Step 10. IAM roles"
 for role in ecs-execution ecs-task ecs-infrastructure github-deploy; do
