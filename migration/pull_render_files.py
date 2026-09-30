@@ -66,21 +66,41 @@ ALL_FILE_COLUMNS = [
 ]
 
 
+TIMEOUT = 120  # seconds; a sleeping Render instance can take about a minute to wake
+
+
 def post_json(url, body, origin):
     request = Request(url, data=json.dumps(body).encode(), method="POST",
                       headers={"Content-Type": "application/json", "Origin": origin, "User-Agent": "beldium-migration/1.0"})
-    with urlopen(request, timeout=30) as response:
+    with urlopen(request, timeout=TIMEOUT) as response:
         return json.loads(response.read())
+
+
+def wake(api):
+    """Hit a public page first so a sleeping instance is up before the login."""
+    print("Waking the API (can take up to a minute)...", flush=True)
+    started = time.monotonic()
+    try:
+        with urlopen(Request(f"{api}/api/v1/platform-stats/", headers={"User-Agent": "beldium-migration/1.0"}), timeout=TIMEOUT):
+            pass
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        sys.exit(f"The API did not answer within {TIMEOUT}s ({exc}). Check it is up, then run this again.")
+    print(f"API answered in {time.monotonic() - started:.1f}s.")
 
 
 def login(api, origin):
     email = input("Staff email: ").strip()
     password = getpass.getpass("Password (not shown): ")
-    try:
-        tokens = post_json(f"{api}/api/v1/auth/token/", {"email": email, "password": password}, origin)
-    except HTTPError as exc:
-        sys.exit(f"Login failed ({exc.code}): {exc.read().decode(errors='replace')[:300]}")
-    return tokens["access"], tokens["refresh"]
+    for attempt in (1, 2):
+        try:
+            tokens = post_json(f"{api}/api/v1/auth/token/", {"email": email, "password": password}, origin)
+            return tokens["access"], tokens["refresh"]
+        except HTTPError as exc:
+            sys.exit(f"Login failed ({exc.code}): {exc.read().decode(errors='replace')[:300]}")
+        except (URLError, TimeoutError, OSError) as exc:
+            if attempt == 2:
+                sys.exit(f"Login timed out twice ({exc}). Nothing was downloaded; run this again in a few minutes.")
+            print("Login timed out; trying once more...", flush=True)
 
 
 def refresh_access(api, refresh, origin):
@@ -108,6 +128,7 @@ def main():
                  "A new upload type has files; add it to SOURCES first.")
     print(f"{len(jobs)} files referenced in the database.")
 
+    wake(api)
     access, refresh = login(api, args.origin)
     args.out.mkdir(parents=True, exist_ok=True)
     report_path = args.out.parent / "media-pull-report.csv"
@@ -125,7 +146,7 @@ def main():
                     request = Request(f"{api}{path}", headers={"Authorization": f"Bearer {access}", "Origin": args.origin,
                                                                "User-Agent": "beldium-migration/1.0"})
                     try:
-                        with urlopen(request, timeout=120) as response:
+                        with urlopen(request, timeout=TIMEOUT) as response:
                             data = response.read()
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         dest.write_bytes(data)
@@ -137,8 +158,8 @@ def main():
                         # 404: record gone; 500: record exists but the file is
                         # no longer on Render's disk (storage open fails).
                         result = f"http_{exc.code}"
-                    except URLError as exc:
-                        result = f"network_error: {exc.reason}"
+                    except (URLError, TimeoutError, OSError) as exc:
+                        result = f"network_error: {getattr(exc, 'reason', exc)}"
                     break
                 time.sleep(0.2)  # stay well clear of any rate limit
             counts[result] = counts.get(result, 0) + 1
