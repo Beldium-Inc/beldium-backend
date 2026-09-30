@@ -39,7 +39,10 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    # "Production" (any case) already belongs to Vercel's deployments in this
+    # repository, so AWS production uses its own GitHub environment name.
+    # DEPLOY_ENV, which names the AWS resources, stays "production".
+    environment: ${{ github.ref_name == 'main' && 'aws-production' || 'staging' }}
     env:
       DEPLOY_ENV: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
       CLUSTER: ${{ vars.ECS_CLUSTER }}

@@ -114,6 +114,8 @@ def main():
     parser.add_argument("--origin", default="https://compliance.beldium.com",
                         help="Frontend origin to log in through; use https://miners.beldium.com if the account belongs to the miner portal")
     parser.add_argument("--out", type=Path, default=Path("migration/dumps/media"))
+    parser.add_argument("--check", action="store_true",
+                        help="Offline: list files the database references that are not downloaded yet; no login")
     args = parser.parse_args()
     api = args.api.rstrip("/")
 
@@ -127,6 +129,12 @@ def main():
         sys.exit(f"The database references {total} files but this script knows how to fetch {len(jobs)}. "
                  "A new upload type has files; add it to SOURCES first.")
     print(f"{len(jobs)} files referenced in the database.")
+    if args.check:
+        missing = sorted({key for _, key, _ in jobs if not (args.out / key).is_file()})
+        for key in missing:
+            print(f"  not downloaded: {key}")
+        print(f"{len(missing)} file(s) not downloaded yet." if missing else "Every referenced file is downloaded.")
+        sys.exit(1 if missing else 0)
 
     wake(api)
     access, refresh = login(api, args.origin)

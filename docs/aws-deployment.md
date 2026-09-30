@@ -368,7 +368,7 @@ The second policy is required. On staging (2026-09-30), the managed policy (vers
 
 ### 10d. GitHub deploy role: assumed by the workflow through OIDC
 
-The trust policy pins the role to one GitHub environment, so the staging role can never deploy production. The repository has GitHub's "immutable subject" OIDC setting on, so GitHub identifies it as `repo:Beldium-Inc@255878329/beldium-backend@1355855179:environment:<env>` (owner and repo IDs included). The policy accepts that form and the older name-only form. Check the current form with `gh api repos/Beldium-Inc/beldium-backend/actions/oidc/customization/sub`.
+Set `GH_ENV` first: `GH_ENV=staging` for staging, `GH_ENV=aws-production` for production. The trust policy pins the role to one GitHub environment, so the staging role can never deploy production. The repository has GitHub's "immutable subject" OIDC setting on, so GitHub identifies it as `repo:Beldium-Inc@255878329/beldium-backend@1355855179:environment:<env>` (owner and repo IDs included). The policy accepts that form and the older name-only form. Check the current form with `gh api repos/Beldium-Inc/beldium-backend/actions/oidc/customization/sub`.
 
 ```bash
 aws iam create-role --role-name beldium-$ENV-github-deploy --assume-role-policy-document "{
@@ -378,8 +378,8 @@ aws iam create-role --role-name beldium-$ENV-github-deploy --assume-role-policy-
   \"Condition\":{\"StringEquals\":{
     \"token.actions.githubusercontent.com:aud\":\"sts.amazonaws.com\",
     \"token.actions.githubusercontent.com:sub\":[
-      \"repo:Beldium-Inc@255878329/beldium-backend@1355855179:environment:$ENV\",
-      \"repo:Beldium-Inc/beldium-backend:environment:$ENV\"]}}}]}"
+      \"repo:Beldium-Inc@255878329/beldium-backend@1355855179:environment:${GH_ENV}\",
+      \"repo:Beldium-Inc/beldium-backend:environment:${GH_ENV}\"]}}}]}"
 
 aws iam put-role-policy --role-name beldium-$ENV-github-deploy --policy-name deploy --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[
@@ -576,7 +576,7 @@ Express Mode keeps manual changes like these unless a later Express Mode update 
 
 ## Step 17. GitHub
 
-**Settings → Environments → New environment**: create `staging` and `production`. On `production`, add yourself under **Required reviewers**, so every production deploy waits for a click.
+**Settings → Environments → New environment**: create `staging` and `aws-production`. The name is not `production`: the repository's existing `Production` environment belongs to Vercel's deployments, and GitHub environment names ignore case. The workflow maps `main` to `aws-production`, and still names the AWS resources `beldium-production-*`. On `production`, add yourself under **Required reviewers**, so every production deploy waits for a click.
 
 Add these **variables** (Environment variables, not secrets; none are sensitive) to each environment:
 
