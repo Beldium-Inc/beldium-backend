@@ -365,7 +365,7 @@ aws iam attach-role-policy --role-name beldium-$ENV-ecs-infrastructure \
 
 ### 10d. GitHub deploy role: assumed by the workflow through OIDC
 
-The trust policy pins the role to one GitHub environment, so the staging role can never deploy production.
+The trust policy pins the role to one GitHub environment, so the staging role can never deploy production. The repository has GitHub's "immutable subject" OIDC setting on, so GitHub identifies it as `repo:Beldium-Inc@255878329/beldium-backend@1355855179:environment:<env>` (owner and repo IDs included). The policy accepts that form and the older name-only form. Check the current form with `gh api repos/Beldium-Inc/beldium-backend/actions/oidc/customization/sub`.
 
 ```bash
 aws iam create-role --role-name beldium-$ENV-github-deploy --assume-role-policy-document "{
@@ -374,7 +374,9 @@ aws iam create-role --role-name beldium-$ENV-github-deploy --assume-role-policy-
   \"Action\":\"sts:AssumeRoleWithWebIdentity\",
   \"Condition\":{\"StringEquals\":{
     \"token.actions.githubusercontent.com:aud\":\"sts.amazonaws.com\",
-    \"token.actions.githubusercontent.com:sub\":\"repo:Beldium-Inc/beldium-backend:environment:$ENV\"}}}]}"
+    \"token.actions.githubusercontent.com:sub\":[
+      \"repo:Beldium-Inc@255878329/beldium-backend@1355855179:environment:$ENV\",
+      \"repo:Beldium-Inc/beldium-backend:environment:$ENV\"]}}}]}"
 
 aws iam put-role-policy --role-name beldium-$ENV-github-deploy --policy-name deploy --policy-document "{
   \"Version\":\"2012-10-17\",\"Statement\":[
