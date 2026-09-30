@@ -44,3 +44,30 @@ These don't map one-to-one onto v2 tables. An old miner profile's fields are spr
 - `compliance_personnel`: 1
 
 `copy_media_to_s3 --dry-run`, run on the Render service, shows how many of the 109 files still exist on disk.
+
+The 109 references point to **22 distinct files**: many compliance-document records share the same file.
+
+## Decisions (2026-09-30) and rehearsal results
+
+| Question | Decision | Implemented in |
+|---|---|---|
+| Old business records | Move them into v2 | `mapping.py` |
+| 2 inactive, unverified accounts | Reactivate them; they then verify their email | `reactivate_users.py` |
+| Reuse Render's `SECRET_KEY` | No. Users sign in once more after cutover, with the same password | nothing to do |
+| Render Shell access | None. Files are pulled through the live API with a staff login | `pull_render_files.py` |
+
+Rehearsal on a throwaway copy of v2 (`merge_rehearsal`):
+
+- Users: all 16 old users matched by email. Matching on phone was dropped: phones are shared between accounts, and it wrongly made one user ambiguous.
+- Inserted: 10 organisations (6 mining companies, 4 compliance partners), 10 owner memberships, 6 mine sites, 4 licences, 11 site documents. Row counts rose by exactly the logged inserts.
+- `verify.sql`: no orphaned foreign keys, no duplicate emails, no duplicate registration numbers.
+- A re-run inserted nothing. The dry run changed nothing.
+- Django `full_clean()` passed for all 41 inserted records. Every new organisation has a Beldium ID and an owner, and every site has a code.
+- Licences arrive as `expired`: every old expiry date is before 2026-09-30.
+- One old miner document has no file; it arrives without one, as in the old system.
+- One owner already had a v2 organisation under an unrelated name. The old organisation is created separately; review it after cutover.
+- `reactivate_users.py` matched exactly the 2 accounts, and refuses to run if the count differs.
+- `pull_render_files.py` tested against a local server: staff can reach every file type, downloads are byte-identical, and shared files are fetched once.
+- `copy_legacy_files.py`: 7 distinct B2 files. The planned keys match the `legacy/` keys the merge stores exactly.
+
+Not moved, on purpose: wallets (all zero), buyer profile (a code only), custom compliance roles and the team member (the only member is the profile owner, who gets an owner membership), government ID documents (6 links; they would become visible to site reviewers). Profile fields v2 has no column for (e.g. mining method, depth range, estimated output) stay in the archived old dump.

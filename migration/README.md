@@ -14,6 +14,10 @@ The old Render database (`Beldium-backend`) holds customer records that are not 
 | `merge.py` | Inserts the missing rows, remaps foreign keys, logs every row | Target only, one transaction; `--dry-run` rolls back |
 | `merge_engine.py` | Matching and insert rules shared by `find_missing.py` and `merge.py` | - |
 | `mapping.py` | Which old table feeds which v2 table, and the natural keys | - |
+| `reactivate_users.py` | Reactivates the 2 accounts that were inactive in both databases; preview by default | Target only, with `--apply --expect N` |
+| `pull_render_files.py` | Downloads every uploaded file from the live API with a staff login (no Render Shell needed) | No (GET only) |
+| `copy_legacy_files.py` | Copies the old documents from Backblaze B2 to the S3 `legacy/` keys | S3 only |
+| `FINDINGS.md` | What the real data contains, the decisions taken, and rehearsal results | - |
 | `verify.sql` | Row counts per table, orphaned foreign keys, duplicate emails and registration numbers | No |
 
 Dumps go in `dumps/`, output goes in `out/`. Both are gitignored because they contain customer data.
@@ -119,7 +123,7 @@ Not run by these scripts. Outline for sign-off:
 
 ## Known limits
 
-- Only `accounts_user` is mapped. Its old columns are known from `accounts/management/commands/import_legacy_users.py`. All other tables wait on step 3.
+- The mapping is complete for the real data; see `FINDINGS.md` for what is moved and what is deliberately left behind.
 - `created_at` for merged users is set to the merge time, unless the old table turns out to have a join date to map.
 - Old users already copied into v2 by `import_legacy_users` kept their old IDs. They match on email and are skipped as duplicates, which is correct.
 - Uploaded files referenced by merged old rows are not copied. If the old database has file columns, their files need a separate copy.

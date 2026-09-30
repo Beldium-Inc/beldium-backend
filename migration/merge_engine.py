@@ -86,6 +86,17 @@ class TableMap:
     source_pk: str = "id"
     target_pk: str = "id"
     source_where: str | None = None  # optional SQL filter on the old table
+    # Optional SELECT that replaces the old table, for rows that need joins
+    # (e.g. a licence together with the site its miner owns). `source` is then
+    # only a name for the log.
+    source_sql: str | None = None
+    # Name in the summary and log; defaults to target. Needed when two old
+    # tables feed the same v2 table.
+    label: str | None = None
+
+    @property
+    def name(self):
+        return self.label or self.target
 
 
 def now():
@@ -127,11 +138,17 @@ class Merger:
         return {name: {"type": type_, "nullable": nullable, "has_default": has_default}
                 for name, type_, nullable, has_default in rows}
 
+    def _source_columns(self, m):
+        if not m.source_sql:
+            return self._columns(self.source, m.source)
+        cursor = self.source.execute(sql.SQL("SELECT * FROM ({}) s LIMIT 0").format(sql.SQL(m.source_sql)))
+        return {col.name: {} for col in cursor.description}
+
     def validate(self):
         problems = []
         merged = set()
         for m in self.mappings:
-            source_cols = self._columns(self.source, m.source)
+            source_cols = self._source_columns(m)
             target_cols = self._columns(self.target, m.target)
             self.target_columns[m.target] = target_cols
             if not source_cols:
@@ -223,15 +240,18 @@ class Merger:
     def merge_table(self, m):
         index = self._load_index(m)
         id_map = self.id_maps.setdefault(m.target, {})
-        counts = self.summary.setdefault(m.target, {})
+        counts = self.summary.setdefault(m.name, {})
 
         def record(action, source_pk, **extra):
             counts[action] = counts.get(action, 0) + 1
-            self._log(table=m.target, source_table=m.source, source_pk=source_pk, action=action, **extra)
+            self._log(table=m.target, mapping=m.name, source_table=m.source, source_pk=source_pk, action=action, **extra)
 
-        query = sql.SQL("SELECT * FROM {schema}.{table}{where} ORDER BY {pk}").format(
-            schema=sql.Identifier(self.schema),
-            table=sql.Identifier(m.source),
+        if m.source_sql:
+            origin = sql.SQL("({}) s").format(sql.SQL(m.source_sql))
+        else:
+            origin = sql.SQL("{}.{}").format(sql.Identifier(self.schema), sql.Identifier(m.source))
+        query = sql.SQL("SELECT * FROM {origin}{where} ORDER BY {pk}").format(
+            origin=origin,
             where=sql.SQL(f" WHERE {m.source_where}") if m.source_where else sql.SQL(""),
             pk=sql.Identifier(m.source_pk),
         )

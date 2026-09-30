@@ -69,7 +69,7 @@ def main():
         print(f"\n{len(review)} rows need a person to look at them (skipped, or matched on a secondary key only).")
         print(f"See entries with review=true or action skipped_* in {log_path}")
     if PENDING:
-        print(f"\nNot mapped yet, so not checked: {', '.join(t for t, _, _ in PENDING)}")
+        print(f"\nDeliberately left in the old database: {', '.join(t for t, _, _ in PENDING)}")
 
 
 if __name__ == "__main__":

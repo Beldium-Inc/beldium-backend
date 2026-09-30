@@ -62,7 +62,7 @@ def main():
     print_summary(summary, heading)
     print(f"Log: {args.log}")
     if PENDING:
-        print(f"Not mapped yet, so not merged: {', '.join(t for t, _, _ in PENDING)}")
+        print(f"Deliberately left in the old database: {', '.join(t for t, _, _ in PENDING)}")
 
 
 if __name__ == "__main__":

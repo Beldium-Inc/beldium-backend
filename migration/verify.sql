@@ -57,10 +57,11 @@ GROUP BY 1
 HAVING count(*) > 1;
 
 \echo '== 5. Users sharing a phone number, last 10 digits (review; can be legitimate)'
-SELECT right(regexp_replace(phone_number, '\D', '', 'g'), 10) AS phone, count(*) AS accounts
-FROM accounts_user
-WHERE length(regexp_replace(phone_number, '\D', '', 'g')) >= 7
-GROUP BY 1
+SELECT '******' || right(phone, 4) AS phone_ending, count(*) AS accounts
+FROM (SELECT right(regexp_replace(phone_number, '\D', '', 'g'), 10) AS phone
+      FROM accounts_user
+      WHERE length(regexp_replace(phone_number, '\D', '', 'g')) >= 7) numbers
+GROUP BY phone
 HAVING count(*) > 1;
 
 \echo '== 6. Organisations sharing a registration number within a country (expect none)'
