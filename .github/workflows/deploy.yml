@@ -94,7 +94,7 @@ jobs:
             --launch-type FARGATE \
             --task-definition "$TASK_DEF" \
             --started-by "deploy-${GITHUB_SHA::7}" \
-            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.TASK_SUBNETS }}],securityGroups=[${{ vars.TASK_SECURITY_GROUPS }}],assignPublicIp=DISABLED}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.TASK_SUBNETS }}],securityGroups=[${{ vars.TASK_SECURITY_GROUPS }}],assignPublicIp=${{ vars.TASK_ASSIGN_PUBLIC_IP || 'ENABLED' }}}" \
             --overrides '{"containerOverrides":[{"name":"Main","command":["migrate"]}]}' \
             --query 'tasks[0].taskArn' --output text)
           if [ -z "$task" ] || [ "$task" = "None" ]; then
