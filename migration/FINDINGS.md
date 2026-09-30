@@ -43,7 +43,7 @@ These don't map one-to-one onto v2 tables. An old miner profile's fields are spr
 - `mining_licencedoc`: 2
 - `compliance_personnel`: 1
 
-`copy_media_to_s3 --dry-run`, run on the Render service, shows how many of the 109 files still exist on disk.
+`pull_render_files.py` downloads them through the live API (there is no Render Shell). Its report shows which files still exist on Render's disk.
 
 The 109 references point to **22 distinct files**: many compliance-document records share the same file.
 
