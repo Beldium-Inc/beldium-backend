@@ -81,6 +81,7 @@ ACCOUNT=$(aws sts get-caller-identity --query Account --output text); save ACCOU
 
    Start every new session with `source ~/beldium-staging.vars`. After creating something, `save NAME` stores its ID. For production, make `~/beldium-production.vars` the same way with `ENV=production`.
 3. **Step 12 needs Docker and this repository**, so run it on your own machine, not in CloudShell.
+4. **Lost track of where you are?** Upload `deploy/aws-status.sh` (CloudShell **Actions → Upload file**), then run `bash aws-status.sh` followed by `source ~/beldium-staging.vars`. It only reads from AWS. It marks each step done, in progress or missing, rebuilds the variables file from what exists, and names the next step.
 
 ## Step 1. Billing alarm (once)
 
@@ -209,6 +210,15 @@ aws rds wait db-instance-available --db-instance-identifier beldium-$ENV   # abo
 DB_HOST=$(aws rds describe-db-instances --db-instance-identifier beldium-$ENV \
   --query 'DBInstances[0].Endpoint.Address' --output text); save DB_HOST
 ```
+
+**Lost the database password?** If the instance exists but `DB_PASSWORD` was never saved, set a new one. This changes only the password, not the data:
+
+```bash
+DB_PASSWORD=$(openssl rand -hex 24); save DB_PASSWORD
+aws rds modify-db-instance --db-instance-identifier beldium-$ENV --master-user-password "$DB_PASSWORD" --apply-immediately
+```
+
+The instance must be `available` first. The new password takes effect within a minute or two.
 
 **Production differences:** a larger class (for example `db.t4g.medium` or `db.m7g.large`, based on Render's current usage), `--multi-az`, `--backup-retention-period 14`, `--deletion-protection`.
 
