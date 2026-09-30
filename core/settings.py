@@ -2,13 +2,58 @@ from datetime import timedelta
 from pathlib import Path
 
 from decouple import config
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key-change-this-before-any-real-deployment-2026")
-DEBUG = str(config("DEBUG", default="true")).strip().lower() in {"1", "true", "yes", "on", "debug", "development"}
 ENVIRONMENT = str(config("ENVIRONMENT", default="local")).strip().lower()
+# Staging and production run the same image with the same settings; only the
+# values differ. Anything that tightens security keys off DEPLOYED, not off
+# the literal name "production", so staging is never the weaker of the two.
+DEPLOYED_ENVIRONMENTS = frozenset({"production", "staging"})
+DEPLOYED = ENVIRONMENT in DEPLOYED_ENVIRONMENTS
+
+# A deployed instance must never boot on a fallback. Most defaults below are
+# for local development (SQLite, localhost origins, console email, local
+# disk), and silently running production on any of them loses data or
+# weakens security, so a missing value stops the process instead. This runs
+# at import, so it covers gunicorn, Celery and every manage.py command alike.
+REQUIRED_WHEN_DEPLOYED = (
+    "SECRET_KEY",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "ALLOWED_HOSTS",
+    "CSRF_TRUSTED_ORIGINS",
+    "CORS_ALLOWED_ORIGINS",
+    "COMPLIANCE_PORTAL_ORIGINS",
+    "MINER_PORTAL_ORIGINS",
+    "FRONTEND_URL",
+    "DEFAULT_FROM_EMAIL",
+    "EMAIL_HOST_PASSWORD",
+    "AWS_STORAGE_BUCKET_NAME",
+    "NUM_PROXIES",
+)
+if DEPLOYED:
+    _missing = [name for name in REQUIRED_WHEN_DEPLOYED if not str(config(name, default="")).strip()]
+    if _missing:
+        raise ImproperlyConfigured(
+            f"ENVIRONMENT={ENVIRONMENT} but these required settings are missing or empty: {', '.join(_missing)}"
+        )
+
+SECRET_KEY = config("SECRET_KEY", default="unsafe-development-key-change-this-before-any-real-deployment-2026")
+DEBUG = str(config("DEBUG", default="false")).strip().lower() in {"1", "true", "yes", "on", "debug", "development"}
+if DEBUG and DEPLOYED:
+    raise ImproperlyConfigured(f"DEBUG must be off when ENVIRONMENT={ENVIRONMENT}.")
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1, api.beldium.com, compliance.beldium.com, miners.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+# The ECS Express Mode service URL (e.g. "xxxx.ecs.us-east-1.on.aws") is only
+# known once the service exists, so it is added separately from ALLOWED_HOSTS
+# and can be set after the first deploy. Optional: api.beldium.com works
+# without it.
+ECS_SERVICE_HOST = config("ECS_SERVICE_HOST", default="").strip()
+if ECS_SERVICE_HOST:
+    ALLOWED_HOSTS.append(ECS_SERVICE_HOST)
+    CSRF_TRUSTED_ORIGINS.append(f"https://{ECS_SERVICE_HOST}")
 # Render's own routing hits the app on its *.onrender.com hostname before any
 # custom domain is attached to the request, so that host needs to be allowed too.
 RENDER_EXTERNAL_HOSTNAME = config("RENDER_EXTERNAL_HOSTNAME", default="")
@@ -32,7 +77,7 @@ MINER_PORTAL_ORIGINS = config(
     cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
 )
 
-if ENVIRONMENT == "production":
+if DEPLOYED:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
@@ -69,6 +114,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First, so load balancer probes are answered before host validation and
+    # the HTTPS redirect: the ALB health checker sends the task's private IP
+    # as Host, over plain HTTP. See common/health.py.
+    "common.health.HealthCheckMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     # Gunicorn doesn't serve static files itself, and nothing else was — every
@@ -194,7 +243,9 @@ MICROSOFT_OAUTH_TENANT_ID = config("MICROSOFT_OAUTH_TENANT_ID", default="common"
 CELERY_BROKER_URL = config("REDIS_URL", default="redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-CELERY_TASK_ALWAYS_EAGER = str(config("CELERY_TASK_ALWAYS_EAGER", default="true")).strip().lower() in {
+# Deployed environments run a real worker and beat as their own ECS services
+# (see deploy/docker-entrypoint.sh). Local development runs tasks inline.
+CELERY_TASK_ALWAYS_EAGER = str(config("CELERY_TASK_ALWAYS_EAGER", default="false" if DEPLOYED else "true")).strip().lower() in {
     "1", "true", "yes", "on"
 }
 CELERY_TASK_EAGER_PROPAGATES = str(
@@ -204,7 +255,7 @@ CELERY_TASK_EAGER_PROPAGATES = str(
 # Throttle counters live in the cache, so a per-process cache means each gunicorn
 # worker enforces its own private allowance and every limit below is effectively
 # multiplied by the worker count. Anything that rate-limits needs a shared cache.
-CACHE_URL = config("CACHE_URL", default=CELERY_BROKER_URL if ENVIRONMENT == "production" else "")
+CACHE_URL = config("CACHE_URL", default=CELERY_BROKER_URL if DEPLOYED else "")
 if CACHE_URL:
     CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": CACHE_URL}}
 else:
@@ -354,8 +405,11 @@ SPECTACULAR_SETTINGS = {
 # filesystem; production can switch to any S3-compatible provider without
 # changing application code.
 if config("AWS_STORAGE_BUCKET_NAME", default=""):
-    AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID", default="")
-    AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY", default="")
+    # On ECS, leave both unset: boto3 then uses the task role. Keys are only
+    # for running outside AWS (e.g. copying media off Render).
+    if config("AWS_ACCESS_KEY_ID", default=""):
+        AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
+        AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
     AWS_STORAGE_BUCKET_NAME = config("AWS_STORAGE_BUCKET_NAME")
     AWS_S3_REGION_NAME = config("AWS_S3_REGION_NAME", default="us-east-1")
     AWS_S3_ENDPOINT_URL = config("AWS_S3_ENDPOINT_URL", default=None)
@@ -365,6 +419,11 @@ if config("AWS_STORAGE_BUCKET_NAME", default=""):
         AWS_S3_ENDPOINT_URL = f"https://{AWS_S3_ENDPOINT_URL}"
     AWS_DEFAULT_ACL = None
     AWS_QUERYSTRING_AUTH = True
+    # django-storages overwrites same-named objects by default, unlike the
+    # filesystem storage this replaces. upload_to only varies by month, so two
+    # customers uploading "licence.pdf" in the same month would otherwise
+    # silently replace each other's document.
+    AWS_S3_FILE_OVERWRITE = False
     STORAGES = {
         "default": {"BACKEND": "storages.backends.s3.S3Storage"},
         "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},

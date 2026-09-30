@@ -1,0 +1,44 @@
+{
+  "region": "us-east-1",
+  "family_prefix": "beldium",
+  "log_group": "/ecs/beldium-{env}",
+  "ssm_prefix": "/beldium/{env}/",
+  "parameters": [
+    "SECRET_KEY",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "ALLOWED_HOSTS",
+    "ECS_SERVICE_HOST",
+    "CSRF_TRUSTED_ORIGINS",
+    "CORS_ALLOWED_ORIGINS",
+    "COMPLIANCE_PORTAL_ORIGINS",
+    "MINER_PORTAL_ORIGINS",
+    "FRONTEND_URL",
+    "DEFAULT_FROM_EMAIL",
+    "EMAIL_HOST_PASSWORD",
+    "AWS_STORAGE_BUCKET_NAME",
+    "NUM_PROXIES"
+  ],
+  "roles": {
+    "web": {
+      "cpu": "1024",
+      "memory": "2048",
+      "command": ["web"],
+      "port": 8000,
+      "environment": {"GUNICORN_WORKERS": "3", "GUNICORN_TIMEOUT": "90"}
+    },
+    "worker": {
+      "cpu": "512",
+      "memory": "1024",
+      "command": ["worker"],
+      "environment": {"CELERY_CONCURRENCY": "2"},
+      "stop_timeout": 120
+    },
+    "beat": {
+      "cpu": "256",
+      "memory": "512",
+      "command": ["beat"],
+      "environment": {}
+    }
+  }
+}

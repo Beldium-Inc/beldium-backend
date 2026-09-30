@@ -1,0 +1,140 @@
+name: Deploy
+
+# staging branch -> staging environment, main -> production.
+# Each GitHub environment holds its own AWS identifiers as variables (see
+# docs/aws-deployment.md). No AWS keys are stored: the job assumes an IAM role
+# through GitHub's OIDC provider.
+on:
+  push:
+    branches: [main, staging]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run tests
+        env:
+          ENVIRONMENT: ci
+          SECRET_KEY: ci-only-not-a-real-key-ci-only-not-a-real-key-0123456789
+        run: python manage.py test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+    env:
+      DEPLOY_ENV: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          docker build --platform linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Register task definitions
+        id: taskdefs
+        run: |
+          python deploy/render_task_definitions.py \
+            --env "$DEPLOY_ENV" \
+            --image "${{ steps.image.outputs.uri }}" \
+            --account-id "${{ vars.AWS_ACCOUNT_ID }}" \
+            --execution-role-arn "${{ vars.ECS_EXECUTION_ROLE_ARN }}" \
+            --task-role-arn "${{ vars.ECS_TASK_ROLE_ARN }}" \
+            --out-dir build/ecs
+          for role in web worker beat; do
+            arn=$(aws ecs register-task-definition \
+              --cli-input-json "file://build/ecs/$role.json" \
+              --query taskDefinition.taskDefinitionArn --output text)
+            echo "$role=$arn" >> "$GITHUB_OUTPUT"
+          done
+
+      # Runs before any service moves to the new image, so old code briefly
+      # runs against the new schema. Migrations must stay backwards compatible
+      # for one release (add columns first, drop them in a later release).
+      - name: Run migrations (one-off task)
+        env:
+          TASK_DEF: ${{ steps.taskdefs.outputs.web }}
+        run: |
+          task=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --launch-type FARGATE \
+            --task-definition "$TASK_DEF" \
+            --started-by "deploy-${GITHUB_SHA::7}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.TASK_SUBNETS }}],securityGroups=[${{ vars.TASK_SECURITY_GROUPS }}],assignPublicIp=DISABLED}" \
+            --overrides '{"containerOverrides":[{"name":"Main","command":["migrate"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          if [ -z "$task" ] || [ "$task" = "None" ]; then
+            echo "::error::Migration task failed to start"; exit 1
+          fi
+          echo "Migration task: $task"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].containers[?name==`Main`].exitCode | [0]' --output text)
+          reason=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].stoppedReason' --output text)
+          echo "Exit code: $code ($reason)"
+          if [ "$code" != "0" ]; then
+            echo "::error::Migrations failed. Logs: CloudWatch group /ecs/beldium-$DEPLOY_ENV, stream prefix web/Main/${task##*/}"
+            exit 1
+          fi
+
+      - name: Deploy web (Express Mode)
+        run: |
+          aws ecs update-express-gateway-service \
+            --service-arn "${{ vars.WEB_SERVICE_ARN }}" \
+            --task-definition-arn "${{ steps.taskdefs.outputs.web }}" \
+            --health-check-path /health/ \
+            --monitor-resources DEPLOYMENT --monitor-mode TEXT-ONLY
+
+      - name: Deploy worker
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ vars.WORKER_SERVICE }}" \
+            --task-definition "${{ steps.taskdefs.outputs.worker }}" --output text --query service.serviceName
+
+      # Two beat processes would fire every scheduled job twice, so the old
+      # task stops before the new one starts.
+      - name: Deploy beat
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ vars.BEAT_SERVICE }}" \
+            --task-definition "${{ steps.taskdefs.outputs.beat }}" \
+            --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100" \
+            --output text --query service.serviceName
+
+      - name: Wait for services to stabilise
+        run: |
+          aws ecs wait services-stable --cluster "$CLUSTER" \
+            --services "${{ vars.WEB_SERVICE_ARN }}" "${{ vars.WORKER_SERVICE }}" "${{ vars.BEAT_SERVICE }}"
