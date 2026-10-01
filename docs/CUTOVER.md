@@ -216,7 +216,7 @@ Everyone has to log in again (production has its own secret key). Their password
 
    ```bash
    for e in production staging; do
-     aws ecs update-service --cluster beldium-$e --service beldium-$e-worker --no-enable-execute-command --force-new-deployment --query service.serviceName --output text
+     aws ecs update-service --cluster beldium-$e --service beldium-$e-worker --disable-execute-command --force-new-deployment --query service.serviceName --output text
      aws iam delete-role-policy --role-name beldium-$e-ecs-task --policy-name ecs-exec
    done
    ```

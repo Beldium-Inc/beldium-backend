@@ -683,7 +683,7 @@ pg_restore --clean --if-exists --no-owner --no-acl --single-transaction --exit-o
 
 Then use `migration/merge.py`, `reactivate_users.py`, `verify.sql` and `smoke_test.py` with `--target "$TARGET"` (see `migration/README.md`).
 
-Afterwards, force a new deployment of the web service so it drops old connections. When the environment no longer needs loading, turn the tunnel access off again: `update-service ... --no-enable-execute-command --force-new-deployment`, then `aws iam delete-role-policy --role-name beldium-$ENV-ecs-task --policy-name ecs-exec`.
+Afterwards, force a new deployment of the web service so it drops old connections. When the environment no longer needs loading, turn the tunnel access off again: `update-service ... --disable-execute-command --force-new-deployment`, then `aws iam delete-role-policy --role-name beldium-$ENV-ecs-task --policy-name ecs-exec`.
 
 ### Moving uploaded files off Render
 
