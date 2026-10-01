@@ -38,7 +38,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     # "Production" (any case) already belongs to Vercel's deployments in this
     # repository, so AWS production uses its own GitHub environment name.
     # DEPLOY_ENV, which names the AWS resources, stays "production".
@@ -183,4 +183,17 @@ jobs:
             echo "::notice::First deploy: image pushed, task definitions registered and migrations run. No services exist yet; create them (docs/aws-deployment.md steps 13 and 14)."
             exit 0
           fi
-          aws ecs wait services-stable --cluster "$CLUSTER" --services "$@"
+          # One waiter call gives up after 10 minutes. Express Mode replaces
+          # production's two web tasks one canary step at a time, which takes
+          # longer than that, so a healthy rollout used to be reported as failed.
+          for attempt in 1 2 3; do
+            if aws ecs wait services-stable --cluster "$CLUSTER" --services "$@"; then
+              echo "All services stable."
+              exit 0
+            fi
+            echo "Still rolling out after $((attempt * 10)) minutes."
+          done
+          echo "::error::Services did not stabilise within 30 minutes. Check the service events in ECS."
+          aws ecs describe-services --cluster "$CLUSTER" --services "$@" \
+            --query 'services[].[serviceName,runningCount,desiredCount,deployments[0].rolloutState,events[0].message]' --output text
+          exit 1
