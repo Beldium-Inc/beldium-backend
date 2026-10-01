@@ -341,7 +341,12 @@ class TransportRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.TransportRequest
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
     def get_quantity_display(self, obj):
         return f'{obj.quantity:g} {obj.quantity_unit}'
@@ -355,7 +360,12 @@ class MovementSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.Movement
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
     def get_quantity_display(self, obj):
         return f'{obj.quantity:g} {obj.quantity_unit}'
@@ -369,7 +379,12 @@ class DeliverySerializer(serializers.ModelSerializer):
     class Meta:
         model = m.Delivery
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
     def get_variance(self, obj):
         if obj.received_quantity is None:
@@ -385,6 +400,11 @@ class LogisticsTransactionSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
+
 
 class LogisticsPaymentSerializer(serializers.ModelSerializer):
     transaction_id = serializers.CharField(source='transaction.transaction_id', read_only=True)
@@ -394,7 +414,12 @@ class LogisticsPaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.LogisticsPayment
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
     def get_outstanding_amount(self, obj):
         return obj.due_amount - obj.paid_amount
@@ -408,21 +433,46 @@ class IncidentSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.Incident
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
 
 class OperationsDocumentSerializer(serializers.ModelSerializer):
+    download_url = serializers.SerializerMethodField()
+
     class Meta:
         model = m.OperationsDocument
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at', 'original_name']
+
+    def validate_file(self, value):
+        return validate_file(value)
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
+
+    def get_download_url(self, obj):
+        if not obj.file:
+            return None
+        return self.context['request'].build_absolute_uri(reverse('logistics-operations-document-download', args=[obj.pk]))
 
 
 class ComplianceFindingSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.ComplianceFinding
         fields = '__all__'
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
 
 class QualityRecordSerializer(serializers.ModelSerializer):
@@ -431,12 +481,22 @@ class QualityRecordSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
+
 
 class OperationsEventSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.OperationsEvent
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
 
 
 class ActionItemSerializer(serializers.ModelSerializer):
@@ -447,6 +507,15 @@ class ActionItemSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate_company(self, value):
+        if self.instance and value.pk != self.instance.company_id:
+            raise serializers.ValidationError('The company cannot be changed.')
+        return value
+
+
+class TransportRequestDeclineSerializer(serializers.Serializer):
+    reason = serializers.CharField()
+
 
 class MovementAssignSerializer(serializers.Serializer):
     vehicle = serializers.PrimaryKeyRelatedField(queryset=m.Vehicle.objects.filter(is_active=True), required=False)
@@ -456,6 +525,7 @@ class MovementAssignSerializer(serializers.Serializer):
 class MovementStatusSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=m.Movement._meta.get_field('status').choices)
     occurred_at = serializers.DateTimeField(required=False)
+    eta_at = serializers.DateTimeField(required=False)
     latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False)
     longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False)
     note = serializers.CharField(required=False, allow_blank=True)
@@ -469,4 +539,4 @@ class DeliveryCompleteSerializer(serializers.Serializer):
 
 class IncidentResolveSerializer(serializers.Serializer):
     resolution = serializers.CharField()
-    status = serializers.CharField(max_length=40, default='Resolved')
+    status = serializers.ChoiceField(choices=m.IncidentStatus.choices, default=m.IncidentStatus.RESOLVED)

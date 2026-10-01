@@ -299,9 +299,10 @@ REDIS_URL=rediss://<CACHE_HOST>:6379/0?ssl_cert_reqs=required
 ALLOWED_HOSTS=api.beldium.com
 ECS_SERVICE_HOST=pending.invalid
 CSRF_TRUSTED_ORIGINS=https://api.beldium.com
-CORS_ALLOWED_ORIGINS=https://compliance.beldium.com,https://miners.beldium.com
+CORS_ALLOWED_ORIGINS=https://compliance.beldium.com,https://miners.beldium.com,https://logistics.beldium.com
 COMPLIANCE_PORTAL_ORIGINS=https://compliance.beldium.com
 MINER_PORTAL_ORIGINS=https://miners.beldium.com
+LOGISTICS_PORTAL_ORIGINS=https://logistics.beldium.com
 FRONTEND_URL=https://compliance.beldium.com
 DEFAULT_FROM_EMAIL=noreply@beldium.com
 EMAIL_HOST_PASSWORD=<Resend API key>
@@ -319,7 +320,7 @@ while IFS='=' read -r name value; do
   aws ssm put-parameter --name "/beldium/$ENV/$name" --type SecureString --value "$value" --overwrite >/dev/null \
     && echo "set $name"
 done < ~/beldium-$ENV.params
-aws ssm get-parameters-by-path --path /beldium/$ENV/ --query 'Parameters[].Name' --output text | tr '\t' '\n' | wc -l   # expect 14
+aws ssm get-parameters-by-path --path /beldium/$ENV/ --query 'Parameters[].Name' --output text | tr '\t' '\n' | wc -l   # expect 15
 ```
 
 Store the file in your password manager, then delete it from disk.

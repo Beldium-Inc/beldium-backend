@@ -13,7 +13,7 @@ from rest_framework import mixins, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.generics import get_object_or_404
-from rest_framework.parsers import MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
@@ -341,6 +341,71 @@ def visible_documents(user, queryset):
     return queryset.filter(Q(application__company_id__in=private_ids) | (~Q(domain='driver') & Q(driver__isnull=True)))
 
 
+ACTIVE_MOVEMENT_STATUSES = {'assigned', 'loading', 'in_transit', 'delayed'}
+MOVEMENT_TRANSITIONS = {
+    'scheduled': {'assigned', 'cancelled'},
+    'assigned': {'loading', 'in_transit', 'cancelled'},
+    'loading': {'in_transit', 'delayed', 'cancelled'},
+    'in_transit': {'delayed', 'arrived', 'cancelled'},
+    'delayed': {'in_transit', 'arrived', 'cancelled'},
+    'arrived': {'delivered'},
+    'delivered': set(),
+    'cancelled': set(),
+}
+
+
+def assert_assignable_vehicle(vehicle, movement):
+    today = timezone.localdate()
+    if not vehicle.is_active:
+        raise ConflictError('Choose an active vehicle.', code='vehicle_inactive')
+    if vehicle.insurance_expiry < today:
+        raise ConflictError('Vehicle insurance has expired.', code='vehicle_insurance_expired')
+    if vehicle.roadworthiness_expiry < today:
+        raise ConflictError('Vehicle roadworthiness has expired.', code='vehicle_roadworthiness_expired')
+    if m.Movement.objects.filter(vehicle=vehicle, status__in=ACTIVE_MOVEMENT_STATUSES).exclude(pk=movement.pk).exists():
+        raise ConflictError('Vehicle is already assigned to an active movement.', code='vehicle_unavailable')
+
+
+def assert_assignable_driver(driver, movement):
+    today = timezone.localdate()
+    if not driver.is_active:
+        raise ConflictError('Choose an active driver.', code='driver_inactive')
+    if driver.licence_expiry < today:
+        raise ConflictError('Driver licence has expired.', code='driver_licence_expired')
+    if driver.medical_expiry < today:
+        raise ConflictError('Driver medical clearance has expired.', code='driver_medical_expired')
+    if m.Movement.objects.filter(driver=driver, status__in=ACTIVE_MOVEMENT_STATUSES).exclude(pk=movement.pk).exists():
+        raise ConflictError('Driver is already assigned to an active movement.', code='driver_unavailable')
+
+
+def assert_unrestricted_service(company, movement_type):
+    if not movement_type:
+        return
+    if company.restrictions.filter(service_scope__iexact=movement_type, resolved_at__isnull=True).exists():
+        raise ConflictError('This service scope is currently restricted.', code='service_scope_restricted')
+
+
+def delivery_for_movement(movement, status, occurred_at):
+    delivery, _ = m.Delivery.objects.get_or_create(
+        movement=movement,
+        defaults={
+            'company': movement.company,
+            'destination_type': movement.metadata.get('destination_type', 'destination'),
+            'destination': movement.destination,
+            'expected_quantity': movement.quantity,
+            'quantity_unit': movement.quantity_unit,
+            'status': status,
+        },
+    )
+    updates = ['status', 'updated_at']
+    delivery.status = status
+    if status == 'arrived' and delivery.arrived_at is None:
+        delivery.arrived_at = occurred_at
+        updates.append('arrived_at')
+    delivery.save(update_fields=updates)
+    return delivery
+
+
 class DocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicViewSet):
     queryset = m.LogisticsDocument.objects.none()
     serializer_class = s.DocumentSerializer
@@ -620,18 +685,53 @@ class TransportRequestViewSet(OperationsRecordViewSet):
     def accept(self, request, pk=None):
         item = self.get_object()
         assert_editor(request.user, item.company)
-        if item.status == 'cancelled':
-            raise ConflictError('Cancelled transport requests cannot be accepted.')
+        if item.status not in {'new', 'blocked'}:
+            raise ConflictError('Only new or blocked transport requests can be accepted.', code='transport_request_not_acceptible')
+        assert_unrestricted_service(item.company, item.movement_type)
         item.status = 'accepted'
         item.save(update_fields=['status', 'updated_at'])
-        services.audit(request, item.company, 'transport_request_accepted', request_id=str(item.pk))
+        movement = item.movements.first()
+        if movement is None:
+            movement = m.Movement.objects.create(
+                company=item.company,
+                request=item,
+                rfq_id=item.rfq_id,
+                transaction_id=item.transaction_id,
+                movement_type=item.movement_type,
+                miner=item.miner,
+                buyer=item.buyer,
+                mineral=item.mineral or item.metadata.get('mineral', ''),
+                quantity=item.quantity,
+                quantity_unit=item.quantity_unit,
+                origin=item.origin,
+                destination=item.destination,
+                pickup_at=item.required_pickup_at,
+                status='scheduled',
+                metadata=item.metadata,
+            )
+        services.audit(request, item.company, 'transport_request_accepted', request_id=str(item.pk), movement_id=str(movement.pk))
+        return Response(self.get_serializer(item).data)
+
+    @extend_schema(request=s.TransportRequestDeclineSerializer, responses=s.TransportRequestSerializer)
+    @action(detail=True, methods=['post'])
+    def decline(self, request, pk=None):
+        item = self.get_object()
+        assert_editor(request.user, item.company)
+        if item.status not in {'new', 'blocked'}:
+            raise ConflictError('Only new or blocked transport requests can be declined.', code='transport_request_not_declinable')
+        payload = s.TransportRequestDeclineSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        item.status = 'cancelled'
+        item.blocked_reason = payload.validated_data['reason']
+        item.save(update_fields=['status', 'blocked_reason', 'updated_at'])
+        services.audit(request, item.company, 'transport_request_declined', request_id=str(item.pk))
         return Response(self.get_serializer(item).data)
 
 
 class MovementViewSet(OperationsRecordViewSet):
     queryset = m.Movement.objects.none()
     serializer_class = s.MovementSerializer
-    filterset_fields = ['company', 'status', 'movement_type', 'miner', 'buyer', 'mineral', 'vehicle', 'driver']
+    filterset_fields = ['company', 'request', 'status', 'movement_type', 'miner', 'buyer', 'mineral', 'vehicle', 'driver']
     search_fields = ['reference', 'batch_id', 'rfq_id', 'transaction_id', 'origin', 'destination']
 
     def get_queryset(self):
@@ -647,11 +747,16 @@ class MovementViewSet(OperationsRecordViewSet):
         vehicle = payload.validated_data.get('vehicle')
         driver = payload.validated_data.get('driver')
         if vehicle and vehicle.company_id != movement.company_id:
-            raise ConflictError('Choose a vehicle belonging to this logistics company.')
+            raise ConflictError('Choose a vehicle belonging to this logistics company.', code='vehicle_wrong_company')
         if driver and driver.company_id != movement.company_id:
-            raise ConflictError('Choose a driver belonging to this logistics company.')
+            raise ConflictError('Choose a driver belonging to this logistics company.', code='driver_wrong_company')
         if driver and vehicle and driver.assigned_vehicle_id and driver.assigned_vehicle_id != vehicle.pk:
             raise ConflictError('The selected driver is assigned to another vehicle.')
+        assert_unrestricted_service(movement.company, movement.movement_type)
+        if vehicle:
+            assert_assignable_vehicle(vehicle, movement)
+        if driver:
+            assert_assignable_driver(driver, movement)
         if vehicle:
             movement.vehicle = vehicle
         if driver:
@@ -670,8 +775,13 @@ class MovementViewSet(OperationsRecordViewSet):
         payload = s.MovementStatusSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
         data = payload.validated_data
+        next_status = data['status']
+        if next_status not in MOVEMENT_TRANSITIONS[movement.status]:
+            raise ConflictError('That movement status transition is not allowed.', code='invalid_movement_status_transition')
         movement.status = data['status']
         occurred_at = data.get('occurred_at') or timezone.now()
+        if data.get('eta_at'):
+            movement.eta_at = data['eta_at']
         if movement.status == 'delivered':
             movement.delivered_at = occurred_at
         if 'latitude' in data:
@@ -680,7 +790,9 @@ class MovementViewSet(OperationsRecordViewSet):
             movement.last_longitude = data['longitude']
         if 'latitude' in data or 'longitude' in data:
             movement.last_gps_at = occurred_at
-        movement.save(update_fields=['status', 'delivered_at', 'last_latitude', 'last_longitude', 'last_gps_at', 'updated_at'])
+        movement.save(update_fields=['status', 'eta_at', 'delivered_at', 'last_latitude', 'last_longitude', 'last_gps_at', 'updated_at'])
+        if movement.status in {'arrived', 'delivered'}:
+            delivery_for_movement(movement, 'arrived', occurred_at)
         if data.get('note'):
             m.OperationsEvent.objects.create(company=movement.company, occurred_at=occurred_at, sector='Logistics', event_type='Movement', text=data['note'])
         services.audit(request, movement.company, 'movement_status_updated', movement_id=str(movement.pk), status=movement.status)
@@ -707,7 +819,9 @@ class DeliveryViewSet(OperationsRecordViewSet):
         delivery.received_quantity = data['received_quantity']
         delivery.receipt_reference = data.get('receipt_reference', delivery.receipt_reference)
         delivery.custody_transferred_at = data.get('custody_transferred_at') or timezone.now()
-        delivery.status = 'completed'
+        tolerance = delivery.metadata.get('quantity_tolerance', '0.000')
+        tolerance = delivery.expected_quantity.__class__(str(tolerance))
+        delivery.status = 'variance_flagged' if abs(delivery.received_quantity - delivery.expected_quantity) > tolerance else 'completed'
         delivery.save(update_fields=['received_quantity', 'receipt_reference', 'custody_transferred_at', 'status', 'updated_at'])
         services.audit(request, delivery.company, 'delivery_completed', delivery_id=str(delivery.pk))
         return Response(self.get_serializer(delivery).data)
@@ -723,7 +837,7 @@ class LogisticsTransactionViewSet(OperationsRecordViewSet):
 class LogisticsPaymentViewSet(OperationsRecordViewSet):
     queryset = m.LogisticsPayment.objects.none()
     serializer_class = s.LogisticsPaymentSerializer
-    filterset_fields = ['company', 'status', 'payment_date']
+    filterset_fields = ['company', 'transaction', 'status', 'payment_date']
     search_fields = ['reference', 'invoice_reference', 'transaction__transaction_id', 'movement__reference']
 
 
@@ -752,6 +866,22 @@ class OperationsDocumentViewSet(OperationsRecordViewSet):
     serializer_class = s.OperationsDocumentSerializer
     filterset_fields = ['company', 'document_type', 'verification_status', 'compliance_status']
     search_fields = ['reference', 'name', 'related_asset']
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def perform_create(self, serializer):
+        company = serializer.validated_data['company']
+        assert_editor(self.request.user, company)
+        file = serializer.validated_data.get('file')
+        obj = serializer.save(original_name=Path(file.name).name if file else '')
+        services.audit(self.request, company, 'operations_document_created', object_id=str(obj.pk))
+
+    @extend_schema(responses=OpenApiTypes.BINARY)
+    @action(detail=True, methods=['get'])
+    def download(self, request, pk=None):
+        document = self.get_object()
+        if not document.file:
+            raise ConflictError('This operations document has no file.', code='document_file_missing')
+        return FileResponse(document.file.open('rb'), as_attachment=True, filename=document.original_name or document.file.name.split('/')[-1])
 
 
 class ComplianceFindingViewSet(OperationsRecordViewSet):
@@ -871,17 +1001,17 @@ class SummaryViewSet(AtomicViewSet):
         totals = {
             'active_jobs': movements.exclude(status__in=['delivered', 'cancelled']).count(),
             'new_transport_requests': requests.filter(status='new').count(),
-            'awaiting_acceptance': requests.filter(status='new').count(),
             'vehicles_assigned': movements.exclude(vehicle__isnull=True).exclude(status__in=['delivered', 'cancelled']).count(),
             'drivers_active': movements.exclude(driver__isnull=True).exclude(status__in=['delivered', 'cancelled']).values('driver_id').distinct().count(),
             'awaiting_pickup': movements.filter(status__in=['scheduled', 'assigned']).count(),
             'loading': movements.filter(status='loading').count(),
             'in_transit': movements.filter(status='in_transit').count(),
             'delayed_shipments': movements.filter(status='delayed').count(),
-            'open_incidents': m.Incident.objects.filter(company_id__in=ids).exclude(status__iexact='resolved').count(),
-            'compliance_alerts': m.ComplianceFinding.objects.filter(company_id__in=ids).exclude(status__iexact='cleared').count(),
+            'open_incidents': m.Incident.objects.filter(company_id__in=ids).exclude(status__in=['resolved', 'closed']).count(),
+            'compliance_alerts': m.ComplianceFinding.objects.filter(company_id__in=ids).exclude(status='cleared').count(),
             'available_vehicles': vehicles.exclude(movements__status__in=['assigned', 'loading', 'in_transit', 'delayed']).distinct().count(),
-            'unread_notifications': events.filter(unread=True).count(),
+            'unread_notifications': m.Notification.objects.filter(recipient=request.user, company_id__in=ids, read_at__isnull=True).count(),
+            'unread_events': events.filter(unread=True).count(),
             'tonnes_moved': movements.aggregate(total=Sum('quantity'))['total'] or 0,
             'outstanding_payments': payments.aggregate(total=Sum('due_amount') - Sum('paid_amount'))['total'] or 0,
         }

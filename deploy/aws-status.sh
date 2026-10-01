@@ -118,11 +118,11 @@ names=$(aws ssm get-parameters-by-path --path "/beldium/$ENV/" --query 'Paramete
 n=$(echo "$names" | grep -c . )
 missing=""
 for want in SECRET_KEY DATABASE_URL REDIS_URL ALLOWED_HOSTS ECS_SERVICE_HOST CSRF_TRUSTED_ORIGINS CORS_ALLOWED_ORIGINS \
-            COMPLIANCE_PORTAL_ORIGINS MINER_PORTAL_ORIGINS FRONTEND_URL DEFAULT_FROM_EMAIL EMAIL_HOST_PASSWORD \
+            COMPLIANCE_PORTAL_ORIGINS MINER_PORTAL_ORIGINS LOGISTICS_PORTAL_ORIGINS FRONTEND_URL DEFAULT_FROM_EMAIL EMAIL_HOST_PASSWORD \
             AWS_STORAGE_BUCKET_NAME NUM_PROXIES; do
   echo "$names" | grep -qx "$want" || missing="$missing $want"
 done
-[ -z "$missing" ] && ok "all 14 parameters" || todo "Step 9: missing settings ($n of 14 stored):$missing"
+[ -z "$missing" ] && ok "all 15 parameters" || todo "Step 9: missing settings ($n of 15 stored):$missing"
 
 echo "Step 10. IAM roles"
 for role in ecs-execution ecs-task ecs-infrastructure github-deploy; do

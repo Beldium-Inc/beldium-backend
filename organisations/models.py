@@ -14,6 +14,7 @@ def generate_beldium_id():
 
 class OrganisationType(models.TextChoices):
     MINING_COMPANY = "mining_company", "Mining company"
+    LOGISTICS_COMPANY = "logistics_company", "Logistics company"
     COMPLIANCE_PARTNER = "compliance_partner", "Compliance partner"
     REGULATOR = "regulator", "Regulator"
     LABORATORY = "laboratory", "Laboratory"

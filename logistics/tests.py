@@ -2,6 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 
+from django.apps import apps
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from django.urls import reverse
@@ -30,7 +31,9 @@ from logistics.models import (
     Incident,
     ActionItem,
     OperationsEvent,
+    OperationsDocument,
     ComplianceFinding,
+    Notification,
     ScopeRestriction,
     Vehicle,
 )
@@ -562,7 +565,6 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         movement = self.make_movement(vehicle=vehicle, driver=driver, status="in_transit")
         TransportRequest.objects.create(
             company=self.company,
-            reference="TR-2296",
             rfq_id="RFQ-8902",
             transaction_id="TXN-5560",
             movement_type="bulk",
@@ -576,7 +578,8 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         )
         ActionItem.objects.create(company=self.company, action="Assign Vehicle", target="TR-2296", urgency="Today")
         OperationsEvent.objects.create(company=self.company, occurred_at=timezone.now(), sector="Tracking", event_type="Tracking", text="Checkpoint recorded.", unread=True)
-        ComplianceFinding.objects.create(company=self.company, reference="NC-117", area="Driver", detail="Training overdue", action="Schedule refresher", status="Open")
+        ComplianceFinding.objects.create(company=self.company, area="Driver", detail="Training overdue", action="Schedule refresher", status="open")
+        Notification.objects.create(company=self.company, recipient=self.owner, title="Compliance", body="Review requested")
         LogisticsTransaction.objects.create(
             company=self.company,
             transaction_id="TXN-5521",
@@ -600,6 +603,8 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.assertEqual(response.data["stats"]["active_jobs"], 1)
         self.assertEqual(response.data["stats"]["new_transport_requests"], 1)
         self.assertEqual(response.data["stats"]["unread_notifications"], 1)
+        self.assertEqual(response.data["stats"]["unread_events"], 1)
+        self.assertNotIn("awaiting_acceptance", response.data["stats"])
         self.assertEqual(response.data["action_items"][0]["action"], "Assign Vehicle")
         self.assertEqual(response.data["active_movements"][0]["vehicle_registration"], "LG-220")
 
@@ -632,21 +637,19 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         movement = self.make_movement(status="in_transit")
         delivery = Delivery.objects.create(
             company=self.company,
-            reference="DEL-902",
             movement=movement,
             destination_type="Processor",
             destination="Pyramid Processing Plant",
             expected_quantity="32.000",
             quantity_unit="MT",
-            status="In transit to processor",
+            status="in_transit",
         )
         incident = Incident.objects.create(
             company=self.company,
-            reference="INC-318",
             movement=movement,
             incident_type="Quantity Discrepancy",
             severity="medium",
-            status="Open",
+            status="open",
             occurred_at=timezone.now(),
             description="Weighbridge discrepancy.",
         )
@@ -654,17 +657,319 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.client.force_authenticate(self.owner)
         response = self.client.post(
             reverse("logistics-delivery-complete", args=[delivery.id]),
-            {"received_quantity": "31.920", "receipt_reference": "PR-2209"},
+            {"received_quantity": "32.000", "receipt_reference": "PR-2209"},
             format="json",
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "completed")
+        self.assertEqual(response.data["variance"], Decimal("0.000"))
+
+        short_delivery = Delivery.objects.create(
+            company=self.company,
+            movement=movement,
+            destination_type="Processor",
+            destination="Pyramid Processing Plant",
+            expected_quantity="32.000",
+            quantity_unit="MT",
+            status="arrived",
+        )
+        response = self.client.post(
+            reverse("logistics-delivery-complete", args=[short_delivery.id]),
+            {"received_quantity": "31.920", "receipt_reference": "PR-2210"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["status"], "variance_flagged")
         self.assertEqual(response.data["variance"], Decimal("-0.080"))
 
         response = self.client.post(
             reverse("logistics-incident-resolve", args=[incident.id]),
-            {"resolution": "Variance accepted after joint review.", "status": "Resolved"},
+            {"resolution": "Variance accepted after joint review.", "status": "resolved"},
             format="json",
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["status"], "Resolved")
+        self.assertEqual(response.data["status"], "resolved")
+
+    def test_accepting_transport_request_creates_movement_and_decline_records_reason(self):
+        request_item = TransportRequest.objects.create(
+            company=self.company,
+            rfq_id="RFQ-9001",
+            transaction_id="TXN-9001",
+            movement_type="mineral haulage",
+            requester="Marketplace",
+            miner="Jos Tin Collective",
+            buyer="Baltic Ore AG",
+            mineral="Cassiterite",
+            quantity="24.000",
+            origin="Mine JS-011",
+            destination="Warehouse ABJ-2",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(reverse("logistics-transport-request-accept", args=[request_item.id]))
+
+        self.assertEqual(response.status_code, 200)
+        request_item.refresh_from_db()
+        self.assertEqual(request_item.status, "accepted")
+        movement = request_item.movements.get()
+        self.assertTrue(movement.reference.startswith("MOV-"))
+        self.assertEqual(movement.origin, request_item.origin)
+        self.assertEqual(movement.status, "scheduled")
+
+        second = TransportRequest.objects.create(
+            company=self.company,
+            movement_type="sample",
+            requester="Quality",
+            quantity="8.400",
+            quantity_unit="kg",
+            origin="Mine KD-019",
+            destination="ABC Laboratory",
+        )
+        response = self.client.post(
+            reverse("logistics-transport-request-decline", args=[second.id]),
+            {"reason": "No vehicle available."},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        second.refresh_from_db()
+        self.assertEqual(second.status, "cancelled")
+        self.assertEqual(second.blocked_reason, "No vehicle available.")
+
+    def test_operations_references_are_server_generated_and_company_cannot_be_moved(self):
+        other_company = LogisticsCompany.objects.create(
+            organisation=self.other_org,
+            contact_name="Other Owner",
+            contact_email="ops@other.example",
+            contact_phone="+2348111111111",
+            services=["general freight"],
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            reverse("logistics-transport-request-list"),
+            {
+                "company": str(self.company.id),
+                "reference": "TR-BROWSER",
+                "movement_type": "sample",
+                "requester": "Quality",
+                "quantity": "1.000",
+                "origin": "Mine",
+                "destination": "Lab",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertNotEqual(response.data["reference"], "TR-BROWSER")
+        response = self.client.patch(
+            reverse("logistics-transport-request-detail", args=[response.data["id"]]),
+            {"company": str(other_company.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("company", response.data["error"]["details"])
+
+    def test_assignment_rejects_expired_assets_and_restricted_scope(self):
+        expired_vehicle = self.make_vehicle(
+            registration="LG-999",
+            vin="VIN00000000000999",
+            insurance_expiry=timezone.localdate() - timedelta(days=1),
+        )
+        movement = self.make_movement(movement_type="mineral haulage")
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"vehicle": str(expired_vehicle.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "vehicle_insurance_expired")
+
+        ScopeRestriction.objects.create(company=self.company, service_scope="mineral haulage", reason="Pending renewal")
+        vehicle, driver = self.make_ops_vehicle_driver()
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"vehicle": str(vehicle.id), "driver": str(driver.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "service_scope_restricted")
+
+    def test_assignment_rejects_assets_from_another_company_with_specific_codes(self):
+        movement = self.make_movement()
+        other_company = LogisticsCompany.objects.create(
+            organisation=self.other_org,
+            contact_name="Other Owner",
+            contact_email="ops@other.example",
+            contact_phone="+2348111111111",
+            services=["general freight"],
+        )
+        other_vehicle = self.make_vehicle(
+            company=other_company,
+            registration="OTH-001",
+            vin="VIN00000000000444",
+        )
+        other_driver = self.make_driver(
+            company=other_company,
+            full_name="Other Driver",
+            licence_number="OTH-DL-1",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"vehicle": str(other_vehicle.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "vehicle_wrong_company")
+
+        response = self.client.post(
+            reverse("logistics-movement-assign", args=[movement.id]),
+            {"driver": str(other_driver.id)},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "driver_wrong_company")
+
+    def test_operations_dashboard_excludes_closed_incidents_from_open_count(self):
+        Incident.objects.create(
+            company=self.company,
+            incident_type="Delay",
+            severity="low",
+            status="open",
+            occurred_at=timezone.now(),
+            description="Still open.",
+        )
+        Incident.objects.create(
+            company=self.company,
+            incident_type="Delay",
+            severity="low",
+            status="closed",
+            occurred_at=timezone.now(),
+            description="Closed incident.",
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(reverse("logistics-operations_dashboard"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["stats"]["open_incidents"], 1)
+
+    def test_operations_document_accepts_json_metadata_edits(self):
+        document = OperationsDocument.objects.create(
+            company=self.company,
+            name="Vehicle permit",
+            document_type="permit",
+            metadata={"owner": "ops"},
+        )
+
+        self.client.force_authenticate(self.owner)
+        response = self.client.patch(
+            reverse("logistics-operations-document-detail", args=[document.id]),
+            {"metadata": {"owner": "compliance", "reviewed": True}},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["metadata"]["reviewed"], True)
+
+    def test_movement_arrival_delivery_and_completion_are_separate(self):
+        movement = self.make_movement(status="scheduled")
+        self.client.force_authenticate(self.owner)
+
+        invalid = self.client.post(
+            reverse("logistics-movement-set-status", args=[movement.id]),
+            {"status": "delivered"},
+            format="json",
+        )
+        self.assertEqual(invalid.status_code, 409)
+        self.assertEqual(invalid.data["error"]["code"], "invalid_movement_status_transition")
+
+        self.assertEqual(
+            self.client.post(reverse("logistics-movement-set-status", args=[movement.id]), {"status": "assigned"}, format="json").status_code,
+            200,
+        )
+        eta = timezone.now() + timedelta(hours=2)
+        response = self.client.post(
+            reverse("logistics-movement-set-status", args=[movement.id]),
+            {"status": "in_transit", "eta_at": eta.isoformat()},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.data["eta_at"])
+
+        arrived = self.client.post(reverse("logistics-movement-set-status", args=[movement.id]), {"status": "arrived"}, format="json")
+        self.assertEqual(arrived.status_code, 200)
+        self.assertEqual(arrived.data["status"], "arrived")
+        delivery = movement.deliveries.get()
+        self.assertEqual(delivery.status, "arrived")
+        self.assertIsNotNone(delivery.arrived_at)
+        self.assertIsNone(delivery.received_quantity)
+        self.assertIsNone(delivery.custody_transferred_at)
+
+        delivered = self.client.post(reverse("logistics-movement-set-status", args=[movement.id]), {"status": "delivered"}, format="json")
+        self.assertEqual(delivered.status_code, 200)
+        self.assertEqual(delivered.data["status"], "delivered")
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.status, "arrived")
+        self.assertIsNone(delivery.received_quantity)
+        self.assertIsNone(delivery.custody_transferred_at)
+
+    def test_legacy_operations_status_values_are_normalised(self):
+        from importlib import import_module
+
+        migration = import_module("logistics.migrations.0006_normalise_operations_status_values")
+        movement = self.make_movement(status="scheduled")
+        incident = Incident.objects.create(
+            company=self.company,
+            movement=movement,
+            incident_type="Delay",
+            severity="medium",
+            status="Resolved",
+            occurred_at=timezone.now(),
+            description="Legacy status.",
+        )
+        finding = ComplianceFinding.objects.create(
+            company=self.company,
+            area="Vehicle",
+            detail="Legacy status.",
+            status="Corrective Action Submitted",
+        )
+        delivery = Delivery.objects.create(
+            company=self.company,
+            movement=movement,
+            destination_type="Warehouse",
+            destination="ABJ-2",
+            expected_quantity="10.000",
+            status="Delivered",
+        )
+        payment = LogisticsPayment.objects.create(
+            company=self.company,
+            status="Partially Paid",
+        )
+        document = OperationsDocument.objects.create(
+            company=self.company,
+            name="Permit",
+            document_type="Permit",
+            verification_status="Action Required",
+            compliance_status="Under Review",
+        )
+
+        migration.normalise_status_values(apps, None)
+
+        for obj, expected in [
+            (incident, "resolved"),
+            (finding, "corrective_action_submitted"),
+            (delivery, "completed"),
+            (payment, "part_paid"),
+        ]:
+            obj.refresh_from_db()
+            self.assertEqual(obj.status, expected)
+            obj.full_clean()
+        document.refresh_from_db()
+        self.assertEqual(document.verification_status, "action_required")
+        self.assertEqual(document.compliance_status, "under_review")
+        document.full_clean()

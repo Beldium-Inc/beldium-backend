@@ -51,6 +51,13 @@ SOURCES = [
     ("mining document",
      "SELECT NULL, id, file FROM mining_documentrecord WHERE coalesce(file, '') <> ''",
      "/api/v1/mining/documents/{1}/download/"),
+    # Staff see every logistics company and document (logistics/permissions.py:13, logistics/views.py:338).
+    ("logistics document",
+     "SELECT NULL, id, file FROM logistics_logisticsdocument WHERE coalesce(file, '') <> ''",
+     "/api/v1/logistics/documents/{1}/download/"),
+    ("logistics operations document",
+     "SELECT NULL, id, file FROM logistics_operationsdocument WHERE coalesce(file, '') <> ''",
+     "/api/v1/logistics/operations-documents/{1}/download/"),
 ]
 # Other upload fields (export, logistics, marketplace, processing, warehousing,
 # compliance condition evidence) held no files in the 2026-09-30 copy; see
@@ -58,7 +65,7 @@ SOURCES = [
 ALL_FILE_COLUMNS = [
     ("compliance_personnel", "cv"), ("compliance_personnel", "certificate"),
     ("compliance_compliancedocument", "file"), ("compliance_conditionevidence", "file"),
-    ("export_exportdocument", "file"), ("logistics_logisticsdocument", "file"),
+    ("export_exportdocument", "file"), ("logistics_logisticsdocument", "file"), ("logistics_operationsdocument", "file"),
     ("marketplace_productdocument", "file"), ("mining_evidence", "file"), ("mining_licencedoc", "file"),
     ("mining_documentrecord", "file"), ("mining_correctivesubmission", "file"),
     ("processing_processingdocument", "file"), ("processing_nonconformityevidence", "file"),

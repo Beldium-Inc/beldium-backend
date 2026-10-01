@@ -169,6 +169,7 @@ class DeployedSettingsTests(SimpleTestCase):
             "CORS_ALLOWED_ORIGINS": "https://compliance.beldium.com",
             "COMPLIANCE_PORTAL_ORIGINS": "https://compliance.beldium.com",
             "MINER_PORTAL_ORIGINS": "https://miners.beldium.com",
+            "LOGISTICS_PORTAL_ORIGINS": "https://logistics.beldium.com",
             "FRONTEND_URL": "https://compliance.beldium.com",
             "DEFAULT_FROM_EMAIL": "noreply@beldium.com",
             "EMAIL_HOST_PASSWORD": "re_test",
