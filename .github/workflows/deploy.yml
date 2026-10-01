@@ -152,7 +152,9 @@ jobs:
             --service-arn "${{ vars.WEB_SERVICE_ARN }}" \
             --task-definition-arn "${{ steps.taskdefs.outputs.web }}" \
             --health-check-path /health/ \
-            --monitor-resources DEPLOYMENT --monitor-mode TEXT-ONLY
+            --query 'service.status.statusCode' --output text
+          # No --monitor-resources: it needs ecs:ListServiceDeployments and
+          # more, and "Wait for services to stabilise" below already waits.
 
       - name: Deploy worker
         if: steps.services.outputs.worker_exists == 'true'

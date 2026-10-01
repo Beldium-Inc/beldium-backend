@@ -397,7 +397,7 @@ aws iam put-role-policy --role-name beldium-$ENV-github-deploy --policy-name dep
      \"Condition\":{\"StringEquals\":{\"iam:PassedToService\":\"ecs-tasks.amazonaws.com\"}}}]}"
 ```
 
-Not yet verified against a live deploy: whether the Express Mode update or monitor call needs more read permissions (load balancer or CloudWatch describe calls). If the "Deploy web" step fails with `AccessDenied`, add the action named in the error to this policy. If an action can't be scoped to the cluster, move it to a statement without the condition.
+The workflow doesn't use `--monitor-resources` on the Express update, because that option also needs `ecs:ListServiceDeployments` (found on staging). The `services-stable` wait that follows covers the rollout.
 
 Wait about a minute before step 13. New roles take time to become usable.
 
