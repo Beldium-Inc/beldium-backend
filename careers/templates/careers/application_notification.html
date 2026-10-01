@@ -1,0 +1,13 @@
+<!doctype html><html lang="en"><body style="font-family:Arial,sans-serif;background:#f4f6f3;padding:32px;color:#17221b">
+<main style="max-width:640px;margin:auto;background:#fff;padding:32px;border-radius:12px">
+<p style="font-weight:700;color:#357a4a">BELDIUM CAREERS</p>
+<h1 style="font-size:20px">{{ subject }}</h1>
+<table style="border-collapse:collapse;width:100%">
+{% for label, value in rows %}<tr><td style="padding:6px 12px 6px 0;color:#64748b;vertical-align:top;white-space:nowrap">{{ label }}</td><td style="padding:6px 0">{{ value|linebreaksbr }}</td></tr>
+{% endfor %}</table>
+{% if documents %}<h2 style="font-size:16px;margin-top:24px">Documents</h2>
+<table style="border-collapse:collapse;width:100%">
+{% for label, filename in documents %}<tr><td style="padding:6px 12px 6px 0;color:#64748b;vertical-align:top">{{ label }}</td><td style="padding:6px 0">{{ filename }}</td></tr>
+{% endfor %}</table>{% endif %}
+<p style="margin-top:24px"><a href="{{ admin_url }}">Open this application and its documents</a> (staff sign-in required)</p>
+</main></body></html>

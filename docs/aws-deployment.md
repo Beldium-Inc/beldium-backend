@@ -306,6 +306,8 @@ LOGISTICS_PORTAL_ORIGINS=https://logistics.beldium.com
 FRONTEND_URL=https://compliance.beldium.com
 DEFAULT_FROM_EMAIL=noreply@beldium.com
 EMAIL_HOST_PASSWORD=<Resend API key>
+# Optional: inbox told about each careers-hub submission (default support@beldium.com)
+CAREERS_NOTIFY_EMAIL=support@beldium.com
 AWS_STORAGE_BUCKET_NAME=beldium-staging-uploads
 NUM_PROXIES=1
 ```

@@ -118,6 +118,7 @@ INSTALLED_APPS = [
     "quality",
     "finance",
     "ecosystem",
+    "careers",
 ]
 
 MIDDLEWARE = [
@@ -238,6 +239,8 @@ EMAIL_BACKEND = config(
 )
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@beldium.com")
 FRONTEND_URL = config("FRONTEND_URL", default="http://localhost:8080")
+# Inbox told about each new careers-hub submission (see careers/tasks.py).
+CAREERS_NOTIFY_EMAIL = config("CAREERS_NOTIFY_EMAIL", default="support@beldium.com")
 # Phone OTPs send through Termii (see accounts/tasks.py:send_phone_verification).
 # TERMII_SENDER_ID defaults to Termii's shared "N-Alert" ID, which works
 # out of the box in Nigeria without registering a custom sender ID first.
@@ -312,6 +315,11 @@ REST_FRAMEWORK = {
         "login_email": "20/1h",
         "token_refresh": "120/1h",
         "sensitive_action": "10/1h",
+        # The careers forms are public. A partner application is one create,
+        # up to fourteen document uploads, then a submit.
+        "careers_submit": "20/1h",
+        "careers_upload": "200/1h",
+        "careers_status": "60/1h",
     },
     "PAGE_SIZE": 20,
 }
