@@ -1,0 +1,27 @@
+# Secrets and local state
+.env
+.env.*
+!.env.example
+*.sqlite3
+media/
+staticfiles/
+
+# Tooling
+.git/
+.github/
+.claude/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.DS_Store
+
+# Not needed at runtime
+docs/
+migration/
+MIGRATION_AUDIT.md
+README.md
+Dockerfile
+.dockerignore

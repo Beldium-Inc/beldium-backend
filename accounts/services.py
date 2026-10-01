@@ -69,13 +69,14 @@ def blacklist_user_refresh_tokens(user):
 def _run_in_background(target, *, on_error):
     """Fire a task off a background thread instead of blocking the request.
 
-    There's no separate Celery worker process (CELERY_TASK_ALWAYS_EAGER=True),
-    so a plain `.delay()` call runs the send synchronously and makes every
-    auth/registration request wait on Resend — 5-6s even when it succeeds,
-    much worse when it's slow. This returns to the caller immediately; the
-    send happens off-thread and any failure is only logged, never surfaced
-    to the request (the OTP flows already treat "resend" as the recovery
-    path for a dropped email).
+    Deployed environments run a Celery worker, so `.delay()` only publishes
+    to Redis. Locally CELERY_TASK_ALWAYS_EAGER=True, and there a plain
+    `.delay()` runs the send synchronously and makes every auth/registration
+    request wait on Resend — 5-6s even when it succeeds. Either way this
+    returns to the caller immediately, and any failure (Resend down, or Redis
+    unreachable when publishing) is only logged, never surfaced to the
+    request (the OTP flows already treat "resend" as the recovery path for a
+    dropped email).
     """
     def _wrapped():
         from django.db import close_old_connections

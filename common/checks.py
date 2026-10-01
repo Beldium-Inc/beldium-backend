@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.core.checks import Error, Warning as CheckWarning, register
+from django.core.checks import Error, Tags, Warning as CheckWarning, register
 
 
 # Placeholders that ship in this repository. Either of them reaching a running
@@ -12,7 +12,7 @@ PLACEHOLDER_KEYS = frozenset({
 MINIMUM_LENGTH = 50
 
 
-@register()
+@register(Tags.security)
 def secret_key_is_strong(app_configs, **kwargs):
     """SECRET_KEY signs every access and refresh token this API issues.
 
@@ -36,12 +36,12 @@ def secret_key_is_strong(app_configs, **kwargs):
         'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(64))"'
     )
 
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT in settings.DEPLOYED_ENVIRONMENTS:
         return [Error(detail, id="beldium.E001")]
     return [CheckWarning(detail, id="beldium.W001")]
 
 
-@register()
+@register(Tags.security)
 def throttle_cache_is_shared(app_configs, **kwargs):
     """Every rate limit in this project counts in the default cache.
 
@@ -60,12 +60,12 @@ def throttle_cache_is_shared(app_configs, **kwargs):
         "sign-in, registration and the verification endpoints will not hold across "
         "workers. Set CACHE_URL to a shared Redis instance."
     )
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT in settings.DEPLOYED_ENVIRONMENTS:
         return [Error(detail, id="beldium.E002")]
     return [CheckWarning(detail, id="beldium.W002")]
 
 
-@register()
+@register(Tags.security)
 def forwarded_header_trust_is_declared(app_configs, **kwargs):
     """NUM_PROXIES decides how much of X-Forwarded-For we believe.
 

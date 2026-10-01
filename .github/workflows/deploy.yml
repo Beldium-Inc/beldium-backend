@@ -1,0 +1,186 @@
+name: Deploy
+
+# staging branch -> staging environment, main -> production.
+# Each GitHub environment holds its own AWS identifiers as variables (see
+# docs/aws-deployment.md). No AWS keys are stored: the job assumes an IAM role
+# through GitHub's OIDC provider.
+on:
+  push:
+    branches: [main, staging]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run tests
+        env:
+          ENVIRONMENT: ci
+          SECRET_KEY: ci-only-not-a-real-key-ci-only-not-a-real-key-0123456789
+        run: python manage.py test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # "Production" (any case) already belongs to Vercel's deployments in this
+    # repository, so AWS production uses its own GitHub environment name.
+    # DEPLOY_ENV, which names the AWS resources, stays "production".
+    environment: ${{ github.ref_name == 'main' && 'aws-production' || 'staging' }}
+    env:
+      DEPLOY_ENV: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      CLUSTER: ${{ vars.ECS_CLUSTER }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume deploy role (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: image
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+        run: |
+          # Tags are immutable in ECR, so a re-run of the same commit reuses
+          # the image it already pushed instead of failing on the push.
+          found=$(aws ecr batch-get-image --repository-name "${{ vars.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ github.sha }}" --query 'length(images)' --output text)
+          if [ "$found" = "1" ]; then
+            echo "Image for ${{ github.sha }} already in ECR; skipping build."
+          else
+            docker build --platform linux/amd64 -t "$IMAGE" .
+            docker push "$IMAGE"
+          fi
+          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Register task definitions
+        id: taskdefs
+        run: |
+          python deploy/render_task_definitions.py \
+            --env "$DEPLOY_ENV" \
+            --image "${{ steps.image.outputs.uri }}" \
+            --account-id "${{ vars.AWS_ACCOUNT_ID }}" \
+            --execution-role-arn "${{ vars.ECS_EXECUTION_ROLE_ARN }}" \
+            --task-role-arn "${{ vars.ECS_TASK_ROLE_ARN }}" \
+            --out-dir build/ecs
+          for role in web worker beat; do
+            arn=$(aws ecs register-task-definition \
+              --cli-input-json "file://build/ecs/$role.json" \
+              --query taskDefinition.taskDefinitionArn --output text)
+            echo "$role=$arn" >> "$GITHUB_OUTPUT"
+          done
+
+      # Runs before any service moves to the new image, so old code briefly
+      # runs against the new schema. Migrations must stay backwards compatible
+      # for one release (add columns first, drop them in a later release).
+      - name: Run migrations (one-off task)
+        env:
+          TASK_DEF: ${{ steps.taskdefs.outputs.web }}
+        run: |
+          task=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --launch-type FARGATE \
+            --task-definition "$TASK_DEF" \
+            --started-by "deploy-${GITHUB_SHA::7}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.TASK_SUBNETS }}],securityGroups=[${{ vars.TASK_SECURITY_GROUPS }}],assignPublicIp=${{ vars.TASK_ASSIGN_PUBLIC_IP || 'ENABLED' }}}" \
+            --overrides '{"containerOverrides":[{"name":"Main","command":["migrate"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          if [ -z "$task" ] || [ "$task" = "None" ]; then
+            echo "::error::Migration task failed to start"; exit 1
+          fi
+          echo "Migration task: $task"
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].containers[?name==`Main`].exitCode | [0]' --output text)
+          reason=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].stoppedReason' --output text)
+          echo "Exit code: $code ($reason)"
+          if [ "$code" != "0" ]; then
+            echo "::error::Migrations failed. Logs: CloudWatch group /ecs/beldium-$DEPLOY_ENV, stream prefix web/Main/${task##*/}"
+            exit 1
+          fi
+
+      # On the very first deploy the services don't exist yet: they are
+      # created by hand from the task definitions registered above (see
+      # docs/aws-deployment.md, steps 13 and 14). Anything missing is skipped.
+      - name: Find existing services
+        id: services
+        run: |
+          worker="${{ vars.WORKER_SERVICE }}"; worker="${worker:-beldium-$DEPLOY_ENV-worker}"
+          beat="${{ vars.BEAT_SERVICE }}"; beat="${beat:-beldium-$DEPLOY_ENV-beat}"
+          exists() {
+            [ "$(aws ecs describe-services --cluster "$CLUSTER" --services "$1" \
+              --query "length(services[?status=='ACTIVE'])" --output text)" = "1" ] && echo true || echo false
+          }
+          web="${{ vars.WEB_SERVICE_ARN }}"
+          if [ -n "$web" ]; then web_exists=$(exists "$web"); else web_exists=false; fi
+          {
+            echo "worker=$worker"; echo "beat=$beat"
+            echo "web_exists=$web_exists"
+            echo "worker_exists=$(exists "$worker")"
+            echo "beat_exists=$(exists "$beat")"
+          } >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
+      - name: Deploy web (Express Mode)
+        if: steps.services.outputs.web_exists == 'true'
+        run: |
+          aws ecs update-express-gateway-service \
+            --service-arn "${{ vars.WEB_SERVICE_ARN }}" \
+            --task-definition-arn "${{ steps.taskdefs.outputs.web }}" \
+            --health-check-path /health/ \
+            --query 'service.status.statusCode' --output text
+          # No --monitor-resources: it needs ecs:ListServiceDeployments and
+          # more, and "Wait for services to stabilise" below already waits.
+
+      - name: Deploy worker
+        if: steps.services.outputs.worker_exists == 'true'
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ steps.services.outputs.worker }}" \
+            --task-definition "${{ steps.taskdefs.outputs.worker }}" --output text --query service.serviceName
+
+      # Two beat processes would fire every scheduled job twice, so the old
+      # task stops before the new one starts.
+      - name: Deploy beat
+        if: steps.services.outputs.beat_exists == 'true'
+        run: |
+          aws ecs update-service --cluster "$CLUSTER" --service "${{ steps.services.outputs.beat }}" \
+            --task-definition "${{ steps.taskdefs.outputs.beat }}" \
+            --deployment-configuration "minimumHealthyPercent=0,maximumPercent=100" \
+            --output text --query service.serviceName
+
+      - name: Wait for services to stabilise
+        env:
+          WEB: ${{ steps.services.outputs.web_exists == 'true' && vars.WEB_SERVICE_ARN || '' }}
+          WORKER: ${{ steps.services.outputs.worker_exists == 'true' && steps.services.outputs.worker || '' }}
+          BEAT: ${{ steps.services.outputs.beat_exists == 'true' && steps.services.outputs.beat || '' }}
+        run: |
+          set -- $WEB $WORKER $BEAT
+          if [ "$#" -eq 0 ]; then
+            echo "::notice::First deploy: image pushed, task definitions registered and migrations run. No services exist yet; create them (docs/aws-deployment.md steps 13 and 14)."
+            exit 0
+          fi
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$@"
