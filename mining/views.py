@@ -29,7 +29,7 @@ from accounts.models import AccountAuditEvent
 from organisations.models import Organisation
 from common.exceptions import AppError, ConflictError
 from common.files import serve_stored_file
-from mining import audit, checklist, reports, scoring, verification
+from mining import audit, checklist, notifications, reports, scoring, verification
 from mining.models import (
     Application,
     CorrectiveSubmission,
@@ -659,6 +659,9 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
                 raise PermissionDenied("You cannot file an application for another organisation.")
         application = serializer.save(created_by=self.request.user)
         self.record("application_created", target=application.reference, detail=application.site_name, application_id=str(application.id))
+        # The in-app bell is derived from pending, unclaimed applications; the
+        # email is sent only once the row is committed so the link resolves.
+        transaction.on_commit(lambda: notifications.notify_desk_of_application(application))
 
     def perform_update(self, serializer):
         if not can_decide(self.request.user) and serializer.instance.created_by_id != self.request.user.id:
@@ -733,30 +736,92 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         return application
 
     @staticmethod
-    def approval_blockers(application):
-        """Why the application cannot be approved yet: every submitted document must be verified.
+    def application_organisation(application):
+        return application.organisation or (application.site.organisation if application.site_id else None)
 
-        Documents are read across every site of the organisation, the same set
-        the reviewer sees on the site review page.
-        """
+    @classmethod
+    def approval_blockers(cls, application):
+        """Why the mine site cannot be verified yet: the organisation is verified first, then every site document."""
         if not application.site_id:
             return ["This application is not linked to a mine site."]
-        organisation_id = application.organisation_id or application.site.organisation_id
-        documents = DocumentRecord.objects.filter(site__organisation_id=organisation_id).exclude(file="")
-        if not documents.exists():
-            return ["No documents have been submitted."]
-        unverified = documents.exclude(status=DocumentRecord.Status.VERIFIED).count()
-        return [f"{unverified} document(s) not verified."] if unverified else []
+        return verification.site_blockers(cls.application_organisation(application))
+
+    @extend_schema(request=None, responses=ApplicationSerializer)
+    @action(detail=True, methods=["post"], url_path="verify-organisation", url_name="verify-organisation")
+    @transaction.atomic
+    def verify_organisation(self, request, pk=None):
+        """Stage one: verify the mining organisation that filed this claimed application."""
+        application = self._claimed_for_decision(request)
+        organisation = self.application_organisation(application)
+        if organisation is None:
+            raise AppError("This application has no mining organisation.", code="no_organisation", status_code=409)
+        if organisation.verification_status == "verified":
+            return Response(ApplicationSerializer(application, context={"request": request}).data)
+        state = verification.readiness(organisation)
+        if not state["ready"]:
+            raise AppError(
+                "This organisation is not ready to verify: " + " ".join(state["blockers"]),
+                code="organisation_not_ready", status_code=409, details=state,
+            )
+        organisation.verification_status = "verified"
+        organisation.verified_at = timezone.now()
+        organisation.verified_by = request.user
+        organisation.rejection_reason = ""
+        if not organisation.submitted_at:
+            organisation.submitted_at = organisation.verified_at
+        organisation.save(update_fields=[
+            "verification_status", "verified_at", "verified_by", "rejection_reason", "submitted_at", "updated_at",
+        ])
+        if application.status == Application.Status.PENDING:
+            application.status = Application.Status.UNDER_REVIEW
+            application.stage = "Organisation verified"
+            application.save(update_fields=["status", "stage", "updated_at"])
+        record_account_event(request, "organisation.verified", organisation_id=str(organisation.id))
+        self.record(
+            "organisation_verified", target=application.reference, detail=f"{organisation.name} verified.",
+            application_id=str(application.id),
+        )
+        return Response(ApplicationSerializer(application, context={"request": request}).data)
+
+    @extend_schema(request=ApplicationDecisionSerializer, responses=ApplicationSerializer)
+    @action(detail=True, methods=["post"], url_path="reject-organisation", url_name="reject-organisation")
+    @transaction.atomic
+    def reject_organisation(self, request, pk=None):
+        application = self._claimed_for_decision(request)
+        organisation = self.application_organisation(application)
+        if organisation is None:
+            raise AppError("This application has no mining organisation.", code="no_organisation", status_code=409)
+        serializer = ApplicationDecisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reason = serializer.validated_data["reason"].strip()
+        if not reason:
+            raise AppError("Give a reason for rejecting this organisation.", code="reason_required")
+        organisation.verification_status = "rejected"
+        organisation.verified_at = None
+        organisation.verified_by = request.user
+        organisation.rejection_reason = reason
+        organisation.save(update_fields=[
+            "verification_status", "verified_at", "verified_by", "rejection_reason", "updated_at",
+        ])
+        application.status = Application.Status.REJECTED
+        application.stage = f"Rejected: {reason}"[:100]
+        application.save(update_fields=["status", "stage", "updated_at"])
+        record_account_event(request, "organisation.rejected", organisation_id=str(organisation.id))
+        self.record(
+            "organisation_rejected", target=application.reference, detail=reason, application_id=str(application.id),
+        )
+        return Response(ApplicationSerializer(application, context={"request": request}).data)
 
     @extend_schema(request=None, responses=ApplicationSerializer)
     @action(detail=True, methods=["post"])
+    @transaction.atomic
     def approve(self, request, pk=None):
-        """Verify the application: the site goes live and, once nothing else is outstanding, the organisation too."""
+        """Stage two: verify the mine site. The site goes live and the miner's workspace opens fully."""
         application = self._claimed_for_decision(request)
         blockers = self.approval_blockers(application)
         if blockers:
             raise AppError(
-                "This application is not ready to verify: " + " ".join(blockers),
+                "This site is not ready to verify: " + " ".join(blockers),
                 code="application_not_ready", status_code=409, details={"blockers": blockers},
             )
         application.status = Application.Status.APPROVED
@@ -766,18 +831,6 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         site.status = SiteStatus.OPERATIONAL
         site.save(update_fields=["status", "updated_at"])
         PendingReview.objects.filter(site=site).exclude(status="completed").update(status="completed")
-        organisation = application.organisation or site.organisation
-        if organisation and organisation.verification_status != "verified" and verification.readiness(organisation)["ready"]:
-            organisation.verification_status = "verified"
-            organisation.verified_at = timezone.now()
-            organisation.verified_by = request.user
-            organisation.rejection_reason = ""
-            if not organisation.submitted_at:
-                organisation.submitted_at = organisation.verified_at
-            organisation.save(update_fields=[
-                "verification_status", "verified_at", "verified_by", "rejection_reason", "submitted_at", "updated_at",
-            ])
-            record_account_event(request, "organisation.verified", organisation_id=str(organisation.id))
         self.record(
             "application_approved", target=application.reference, detail=f"{site.name} verified.",
             application_id=str(application.id), site_id=str(site.id),
@@ -1215,6 +1268,14 @@ class MiningDashboardView(APIView):
                     else (application.stage or "Your application was rejected."),
                     application.updated_at, "success" if approved else "error", "application", application.reference)
         else:
+            for application in applications.filter(
+                status=Application.Status.PENDING, assigned_to__isnull=True
+            ).order_by("-created_at")[:5]:
+                add("newapp", application.id, f"New application {application.reference}",
+                    f"{application.site_name or 'A mining site'}"
+                    + (f" ({application.mineral})" if application.mineral else "")
+                    + " was submitted and is waiting to be claimed.",
+                    application.created_at, "info", "application", application.reference)
             for request in info_requests.filter(status=InfoRequest.Status.RESPONDED)[:5]:
                 attached = len(request.response_attachments or [])
                 add("ir", request.id, f"Response received: {request.subject}",
@@ -1334,6 +1395,7 @@ class MiningOrganisationVerificationView(APIView):
             "verification_status": organisation.verification_status,
             "verified_at": organisation.verified_at,
             "rejection_reason": organisation.rejection_reason,
+            "verified_by": str(organisation.verified_by_id) if organisation.verified_by_id else None,
             **verification.readiness(organisation),
         }
 
@@ -1349,6 +1411,12 @@ class MiningOrganisationVerificationView(APIView):
     def post(self, request, pk=None, decision=None):
         self._require_desk(request)
         organisation = get_object_or_404(Organisation, pk=pk, organisation_type="mining_company")
+        # The decision is made inside a claimed application's review, so only
+        # the reviewer holding the claim may take it.
+        if not Application.objects.filter(
+            Q(organisation=organisation) | Q(site__organisation=organisation), assigned_to=request.user,
+        ).exists():
+            raise PermissionDenied("Claim this organisation's application to decide it.")
         if decision == "verify":
             state = verification.readiness(organisation)
             if not state["ready"]:

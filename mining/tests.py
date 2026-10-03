@@ -470,37 +470,14 @@ class OrganisationVerificationTests(MiningTestCase):
     def url(self, decision):
         return reverse("mining-organisation-decision", args=[self.miner_org.id, decision])
 
-    def test_cannot_verify_until_every_site_is_verified(self):
+    def test_desk_cannot_decide_without_claiming_the_application(self):
         self.client.force_authenticate(self.operator)
-        response = self.client.post(self.url("verify"))
-        self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["error"]["code"], "organisation_not_ready")
-
-    def test_desk_verifies_ready_organisation_and_miner_dashboard_flips(self):
-        self.client.force_authenticate(self.operator)
-        for key, _ in SectionKey.choices:
-            self.client.post(reverse("mining-site-review-section", args=[self.site.id, key]), {"status": "verified"})
-        listing = self.client.get(reverse("mining-organisation-verification")).data["results"]
-        row = next(r for r in listing if r["id"] == str(self.miner_org.id))
-        self.assertTrue(row["ready"])
-
-        response = self.client.post(self.url("verify"))
-        self.assertEqual(response.status_code, 200, response.data)
-        self.miner_org.refresh_from_db()
-        self.assertEqual(self.miner_org.verification_status, "verified")
-        self.assertIsNotNone(self.miner_org.submitted_at)
+        self.assertEqual(self.client.post(self.url("verify")).status_code, 403)
+        self.assertEqual(self.client.post(self.url("reject"), {"reason": "x"}).status_code, 403)
 
     def test_miner_cannot_verify_own_organisation(self):
         self.client.force_authenticate(self.miner)
         self.assertEqual(self.client.post(self.url("verify")).status_code, 403)
-
-    def test_reject_needs_reason(self):
-        self.client.force_authenticate(self.operator)
-        self.assertEqual(self.client.post(self.url("reject")).status_code, 400)
-        response = self.client.post(self.url("reject"), {"reason": "Licence not supplied"})
-        self.assertEqual(response.status_code, 200)
-        self.miner_org.refresh_from_db()
-        self.assertEqual(self.miner_org.verification_status, "rejected")
 
 
 class InfoRequestResponseTests(MiningTestCase):
@@ -581,6 +558,8 @@ class ApplicationDecisionTests(MiningTestCase):
             site=self.site, name="Certificate of incorporation",
             file=SimpleUploadedFile("cac.pdf", b"%PDF-1.4", content_type="application/pdf"),
         )
+        self.miner_org.verification_status = "under_review"
+        self.miner_org.save()
         self.client.force_authenticate(self.operator)
 
     def approve_url(self):
@@ -597,20 +576,72 @@ class ApplicationDecisionTests(MiningTestCase):
         self.application.refresh_from_db()
         self.assertEqual(self.application.status, Application.Status.PENDING)
 
-    def test_approval_verifies_the_site_and_organisation(self):
+    def verify_org_url(self):
+        return reverse("mining-application-verify-organisation", args=[self.application.id])
+
+    def test_site_cannot_be_verified_before_the_organisation(self):
         self.client.post(reverse("mining-application-claim", args=[self.application.id]))
         self.document.status = "verified"
         self.document.save()
-        self.miner_org.verification_status = "under_review"
-        self.miner_org.save()
+        response = self.client.post(self.approve_url())
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Verify the mining organisation first.", response.data["error"]["details"]["blockers"])
+
+    def test_organisation_needs_its_documents_verified(self):
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        self.assertEqual(self.client.post(self.verify_org_url()).status_code, 409)
+
+    def test_staged_verification_organisation_then_site(self):
+        from mining.models import DocumentRecord
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        self.document.status = "verified"
+        self.document.save()
+        response = self.client.post(self.verify_org_url())
+        self.assertEqual(response.status_code, 200, response.data)
+        self.miner_org.refresh_from_db()
+        self.assertEqual(self.miner_org.verification_status, "verified")
+
+        # Still no site documents: the site stays closed.
+        self.assertEqual(self.client.post(self.approve_url()).status_code, 409)
+        site_doc = DocumentRecord.objects.create(
+            site=self.site, name="Environmental management plan",
+            file=SimpleUploadedFile("emp.pdf", b"%PDF-1.4", content_type="application/pdf"),
+        )
+        self.assertEqual(self.client.post(self.approve_url()).status_code, 409)
+        site_doc.status = "verified"
+        site_doc.save()
 
         response = self.client.post(self.approve_url())
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["status"], "approved")
         self.site.refresh_from_db()
-        self.miner_org.refresh_from_db()
         self.assertEqual(self.site.status, SiteStatus.OPERATIONAL)
-        self.assertEqual(self.miner_org.verification_status, "verified")
+
+    def test_new_application_reaches_the_desk_bell_and_inbox(self):
+        from django.core import mail
+        from organisations.models import Organisation
+
+        Organisation.objects.filter(pk__in=[m.organisation_id for m in self.operator.organisation_memberships.all()]).update(
+            email="desk@example.com", verification_status="verified",
+        )
+        self.client.force_authenticate(self.miner)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("mining-application-list"),
+                {"organisation": str(self.miner_org.id), "site": str(self.site.id), "site_name": "Pit A", "mineral": "Gold"},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 201, response.data)
+        import threading
+        for t in threading.enumerate():
+            if t is not threading.current_thread() and t.daemon:
+                t.join(timeout=5)
+        self.assertTrue(any("desk@example.com" in m.to for m in mail.outbox), [m.to for m in mail.outbox])
+        self.client.force_authenticate(self.operator)
+        titles = [n["title"] for n in self.client.get(reverse("mining-dashboard")).data["notifications"]]
+        self.assertTrue(any(t.startswith("New application") for t in titles), titles)
 
     def test_rejection_needs_a_reason_and_keeps_it(self):
         self.client.post(reverse("mining-application-claim", args=[self.application.id]))
