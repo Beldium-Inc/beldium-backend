@@ -740,9 +740,21 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         return application.organisation or (application.site.organisation if application.site_id else None)
 
     @classmethod
+    def application_site(cls, application):
+        """The site this application is about: the linked one, else the organisation's first.
+
+        Some applications are filed before the miner has a site record to
+        link; the organisation's own site is the one under review then.
+        """
+        if application.site_id:
+            return application.site
+        organisation = cls.application_organisation(application)
+        return organisation.mine_sites.order_by("created_at").first() if organisation else None
+
+    @classmethod
     def approval_blockers(cls, application):
         """Why the mine site cannot be verified yet: the organisation is verified first, then every site document."""
-        if not application.site_id:
+        if cls.application_site(application) is None:
             return ["This application is not linked to a mine site."]
         return verification.site_blockers(cls.application_organisation(application))
 
@@ -827,7 +839,10 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         application.status = Application.Status.APPROVED
         application.stage = "Verified"
         application.save(update_fields=["status", "stage", "updated_at"])
-        site = application.site
+        site = self.application_site(application)
+        if not application.site_id:
+            application.site = site
+            application.save(update_fields=["site", "updated_at"])
         site.status = SiteStatus.OPERATIONAL
         site.save(update_fields=["status", "updated_at"])
         PendingReview.objects.filter(site=site).exclude(status="completed").update(status="completed")
