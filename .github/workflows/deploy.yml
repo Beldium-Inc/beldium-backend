@@ -33,7 +33,7 @@ jobs:
         env:
           ENVIRONMENT: ci
           SECRET_KEY: ci-only-not-a-real-key-ci-only-not-a-real-key-0123456789
-        run: python manage.py test
+        run: python manage.py test --parallel
 
   deploy:
     needs: test
