@@ -728,7 +728,10 @@ class ApplicationViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
     def _claimed_for_decision(self, request):
         if not can_decide(request.user):
             raise PermissionDenied("Only the compliance desk can decide an application.")
-        application = Application.objects.select_for_update().select_related("site", "organisation").get(pk=self.get_object().pk)
+        # of=("self",): Postgres cannot lock the nullable side of the site/organisation joins.
+        application = (
+            Application.objects.select_for_update(of=("self",)).select_related("site", "organisation").get(pk=self.get_object().pk)
+        )
         if application.assigned_to_id != request.user.id:
             raise PermissionDenied("Claim this application before deciding it.")
         if application.status in {Application.Status.APPROVED, Application.Status.REJECTED}:
