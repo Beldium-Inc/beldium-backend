@@ -1303,26 +1303,29 @@ class MiningDashboardView(APIView):
                 add("nc", finding.id, f"{finding.reference} awaiting review",
                     f"{finding.title} is awaiting review.", finding.updated_at, "info", "non_conformity", finding.reference)
 
-        for record in env_records.filter(status=EnvRecord.Status.BREACH).select_related("site")[:3]:
-            add("env", record.id, "Environmental limit breached",
-                f"{record.metric} at {record.site.name if record.site_id else 'a registered site'} read {record.value} against a {record.limit} limit.",
-                record.updated_at, "error", "env_record")
-        for licence in expiring[:3]:
-            days = (licence.expires_on - timezone.localdate()).days if licence.expires_on else None
-            holder = licence.site.name if licence.site_id else ""
-            lapsed = days is not None and days < 0
-            add("lic", licence.id, f"{licence.type} {'expired' if lapsed else 'expiring'}",
-                f"{holder + ': ' if holder else ''}{'expired' if lapsed else 'expires'} on {licence.expires_on:%d %b %Y}.",
-                licence.updated_at, "warn", "licence", licence.number)
-        for inspection in inspections.filter(
-            status__in=[Inspection.Status.REQUESTED, Inspection.Status.SCHEDULED]
-        ).select_related("site")[:3]:
-            add("ins", inspection.id,
-                "Inspection scheduled" if inspection.status == Inspection.Status.SCHEDULED else "Inspection requested",
-                f"{inspection.get_type_display()} at {inspection.site.name if inspection.site_id else 'a registered site'}"
-                + (f" on {inspection.scheduled_for:%d %b %Y}" if inspection.scheduled_for else "") + ".",
-                inspection.updated_at, "info", "inspection", inspection.reference)
-        return sorted(items, key=lambda item: item["at"], reverse=True)[:12]
+        # The desk's bell is the review queue; licence, environmental and inspection
+        # notices are the operator's own housekeeping, so only miners and the regulator get them.
+        if role != OPERATOR:
+            for record in env_records.filter(status=EnvRecord.Status.BREACH).select_related("site")[:3]:
+                add("env", record.id, "Environmental limit breached",
+                    f"{record.metric} at {record.site.name if record.site_id else 'a registered site'} read {record.value} against a {record.limit} limit.",
+                    record.updated_at, "error", "env_record")
+            for licence in expiring[:3]:
+                days = (licence.expires_on - timezone.localdate()).days if licence.expires_on else None
+                holder = licence.site.name if licence.site_id else ""
+                lapsed = days is not None and days < 0
+                add("lic", licence.id, f"{licence.type} {'expired' if lapsed else 'expiring'}",
+                    f"{holder + ': ' if holder else ''}{'expired' if lapsed else 'expires'} on {licence.expires_on:%d %b %Y}.",
+                    licence.updated_at, "warn", "licence", licence.number)
+            for inspection in inspections.filter(
+                status__in=[Inspection.Status.REQUESTED, Inspection.Status.SCHEDULED]
+            ).select_related("site")[:3]:
+                add("ins", inspection.id,
+                    "Inspection scheduled" if inspection.status == Inspection.Status.SCHEDULED else "Inspection requested",
+                    f"{inspection.get_type_display()} at {inspection.site.name if inspection.site_id else 'a registered site'}"
+                    + (f" on {inspection.scheduled_for:%d %b %Y}" if inspection.scheduled_for else "") + ".",
+                    inspection.updated_at, "info", "inspection", inspection.reference)
+        return sorted(items, key=lambda item: item["at"], reverse=True)[:50]
 
 
 class MiningCapabilityView(APIView):
