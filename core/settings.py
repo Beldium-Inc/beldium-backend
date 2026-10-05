@@ -46,7 +46,7 @@ DEBUG = str(config("DEBUG", default="false")).strip().lower() in {"1", "true", "
 if DEBUG and DEPLOYED:
     raise ImproperlyConfigured(f"DEBUG must be off when ENVIRONMENT={ENVIRONMENT}.")
 ALLOWED_HOSTS = config("ALLOWED_HOSTS", default="localhost,127.0.0.1, api.beldium.com, compliance.beldium.com, miners.beldium.com, logistics.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
-CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="https://qac.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 # The ECS Express Mode service URL (e.g. "xxxx.ecs.us-east-1.on.aws") is only
 # known once the service exists, so it is added separately from ALLOWED_HOSTS
 # and can be set after the first deploy. Optional: api.beldium.com works
@@ -60,7 +60,7 @@ if ECS_SERVICE_HOST:
 RENDER_EXTERNAL_HOSTNAME = config("RENDER_EXTERNAL_HOSTNAME", default="")
 if RENDER_EXTERNAL_HOSTNAME:
     ALLOWED_HOSTS.append(RENDER_EXTERNAL_HOSTNAME)
-CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173,http://localhost:5175, https://api.beldium.com, https://compliance.beldium.com, https://miners.beldium.com, https://logistics.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
+CORS_ALLOWED_ORIGINS = config("CORS_ALLOWED_ORIGINS", default="http://localhost:8080,http://localhost:3000,http://localhost:5173,http://localhost:5175, https://api.beldium.com, https://compliance.beldium.com, https://miners.beldium.com, https://logistics.beldium.com, https://qac.beldium.com", cast=lambda value: [x.strip() for x in value.split(",") if x.strip()])
 CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 
 # Which frontend origin maps to which account portal (accounts.models.User.Portal).
