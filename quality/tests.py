@@ -129,13 +129,21 @@ class QualityApplicationFlowTests(APITestCase):
 class SampleWorkflowTests(APITestCase):
     def setUp(self):
         self.operator = make_user("op3@quality.test", is_staff=True)
+        self.miner_user = make_user("miner3@quality.test")
         self.partner_user = make_user("partner3@quality.test")
+        self.miner_org = make_org("Third Mining Co", OrganisationType.MINING_COMPANY)
         self.partner_org = make_org("Third Assay Labs", OrganisationType.LABORATORY)
+        OrganisationMembership.objects.create(organisation=self.miner_org, user=self.miner_user, role=MembershipRole.OWNER)
         OrganisationMembership.objects.create(organisation=self.partner_org, user=self.partner_user, role=MembershipRole.OWNER)
-        self.spec = BuyerSpec.objects.create(name="Gold Spec A", buyer_org="Buyer Co", material="gold")
+        self.spec = BuyerSpec.objects.create(
+            name="Gold Spec A",
+            buyer_org="Buyer Co",
+            material="gold",
+            limits=[{"analyte": "Au", "unit": "%", "min": "95", "max": "", "method": "ICP-MS"}],
+        )
 
     def test_full_sample_to_certificate_flow(self):
-        self.client.force_authenticate(self.partner_user)
+        self.client.force_authenticate(self.miner_user)
 
         resp = self.client.post(reverse("quality-sample-list"), {
             "material": "gold", "lot": "L1", "mine_site": "Site A", "origin": "Nigeria",
@@ -152,15 +160,17 @@ class SampleWorkflowTests(APITestCase):
         self.assertEqual(resp.data["status"], "in_transit")
         self.assertEqual(len(resp.data["custody"]), 1)
 
+        self.client.force_authenticate(self.operator)
         resp = self.client.post(reverse("quality-sample-test-request", args=[sample_id]), {
             "methods": ["ICP-MS"], "priority": "standard", "turnaround": "48h",
         }, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.data["status"], "testing")
         result_id = resp.data["results"][0]["id"]
+        self.assertEqual(resp.data["results"][0]["analyte"], "Au")
 
         resp = self.client.patch(reverse("quality-sample-result", args=[sample_id, result_id]), {
-            "verdict": "pass", "value": "99.2",
+            "verdict": "fail", "value": "99.2", "unit": "%", "uncertainty": "0.1",
         }, format="json")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.data["verdict"], "pass")
@@ -172,6 +182,7 @@ class SampleWorkflowTests(APITestCase):
         self.assertEqual(resp.data["status"], "reviewed")
 
         # Only operators can issue certificates.
+        self.client.force_authenticate(self.partner_user)
         resp = self.client.post(reverse("quality-sample-certificate", args=[sample_id]))
         self.assertEqual(resp.status_code, 403)
 
@@ -180,9 +191,20 @@ class SampleWorkflowTests(APITestCase):
         self.assertEqual(resp.status_code, 201, resp.content)
         cert_id = resp.data["id"]
         self.assertEqual(resp.data["status"], "active")
+        self.assertIsNotNone(resp.data["valid_until"])
 
         sample = Sample.objects.get(pk=sample_id)
         self.assertEqual(sample.status, SampleStatus.CERTIFIED)
+        cert = Certificate.objects.get(pk=cert_id)
+
+        self.client.force_authenticate(user=None)
+        resp = self.client.get(reverse("quality-certificate-verify", args=[cert.verification_hash]))
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.data["status"], "active")
+        cert.refresh_from_db()
+        self.assertEqual(cert.scans, 1)
+
+        self.client.force_authenticate(self.operator)
 
         resp = self.client.post(reverse("quality-certificate-revoke", args=[cert_id]))
         self.assertEqual(resp.status_code, 200, resp.content)
@@ -190,6 +212,16 @@ class SampleWorkflowTests(APITestCase):
 
         cert = Certificate.objects.get(pk=cert_id)
         self.assertEqual(cert.status, CertificateStatus.REVOKED)
+
+    def test_sample_status_cannot_skip_state_machine(self):
+        self.client.force_authenticate(self.miner_user)
+        resp = self.client.post(reverse("quality-sample-list"), {
+            "material": "gold", "buyer_spec": str(self.spec.id),
+        }, format="json")
+        sample_id = resp.data["id"]
+        self.client.force_authenticate(self.operator)
+        resp = self.client.patch(reverse("quality-sample-detail", args=[sample_id]), {"status": "certified"}, format="json")
+        self.assertEqual(resp.status_code, 409)
 
 
 class NonConformityFlowTests(APITestCase):

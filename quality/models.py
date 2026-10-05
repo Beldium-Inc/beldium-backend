@@ -1,11 +1,16 @@
 import secrets
 import uuid
+from pathlib import Path
 
 from django.conf import settings
+from django.core.validators import FileExtensionValidator
 from django.db import models
 from django.utils import timezone
 
 from common.models import TimeStampedModel
+
+
+UPLOAD_EXTENSIONS = ["pdf", "doc", "docx", "jpg", "jpeg", "png", "xls", "xlsx", "zip"]
 
 
 def application_reference():
@@ -144,6 +149,15 @@ class Sample(TimeStampedModel):
     miner_org = models.CharField(max_length=255, blank=True)
     partner_org = models.CharField(max_length=255, blank=True)
     buyer_org = models.CharField(max_length=255, blank=True)
+    miner_organisation = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    partner_organisation = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    buyer_organisation = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
     buyer_spec = models.ForeignKey(BuyerSpec, on_delete=models.SET_NULL, null=True, blank=True, related_name="samples")
     status = models.CharField(max_length=20, choices=SampleStatus.choices, default=SampleStatus.REGISTERED, db_index=True)
 
@@ -179,6 +193,28 @@ class Certificate(TimeStampedModel):
         return self.reference
 
 
+class QualityApplicationDocument(TimeStampedModel):
+    application = models.ForeignKey(QualityApplication, on_delete=models.CASCADE, related_name="uploaded_documents")
+    document_id = models.CharField(max_length=80)
+    name = models.CharField(max_length=255, blank=True)
+    category = models.CharField(max_length=150, blank=True)
+    file = models.FileField(
+        upload_to="quality/application-documents/%Y/%m/",
+        validators=[FileExtensionValidator(UPLOAD_EXTENSIONS)],
+    )
+    uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["application", "document_id"], name="unique_quality_application_document")
+        ]
+
+    @property
+    def original_name(self):
+        return Path(self.file.name).name if self.file else ""
+
+
 class QualityNonConformity(TimeStampedModel):
     reference = models.CharField(max_length=50, unique=True, default=nc_reference, editable=False)
     title = models.CharField(max_length=255)
@@ -198,3 +234,18 @@ class QualityNonConformity(TimeStampedModel):
 
     def __str__(self):
         return self.reference
+
+
+class QualityNotification(TimeStampedModel):
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="quality_notifications")
+    title = models.CharField(max_length=200)
+    body = models.TextField(blank=True)
+    event = models.CharField(max_length=80, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    sample = models.ForeignKey(Sample, on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    application = models.ForeignKey(QualityApplication, on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    certificate = models.ForeignKey(Certificate, on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    non_conformity = models.ForeignKey(QualityNonConformity, on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["-created_at"]

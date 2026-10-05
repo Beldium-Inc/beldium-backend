@@ -3,6 +3,7 @@ import secrets
 import uuid
 
 from django.utils import timezone
+from rest_framework.exceptions import PermissionDenied
 
 from organisations.models import OrganisationMembership, OrganisationType
 
@@ -60,6 +61,17 @@ def derive_role(user):
     return None
 
 
+def user_organisation(user):
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    membership = (
+        OrganisationMembership.objects.filter(user=user, is_active=True)
+        .select_related("organisation")
+        .first()
+    )
+    return membership.organisation if membership else None
+
+
 def can_review(user):
     """Reviewers vet applications/samples: staff, or partner/regulator org members."""
     role = derive_role(user)
@@ -98,3 +110,89 @@ def audit_entry(user, action, detail=""):
 def gen_hash(*parts):
     seed = "|".join(str(p) for p in parts) + secrets.token_hex(8)
     return hashlib.sha256(seed.encode()).hexdigest()[:32]
+
+
+SAMPLE_TRANSITIONS = {
+    "registered": {"in_transit", "rejected"},
+    "in_transit": {"received", "rejected"},
+    "received": {"testing", "rejected"},
+    "testing": {"reviewed", "rejected"},
+    "reviewed": {"certified", "rejected"},
+    "certified": set(),
+    "rejected": set(),
+}
+
+
+def transition_sample(sample, new_status):
+    if new_status == sample.status:
+        return
+    allowed = SAMPLE_TRANSITIONS.get(sample.status, set())
+    if new_status not in allowed:
+        from common.exceptions import ConflictError
+        raise ConflictError(f"Sample cannot move from {sample.status} to {new_status}.")
+    sample.status = new_status
+
+
+def require_role(user, *roles):
+    role = derive_role(user)
+    if role not in roles:
+        raise PermissionDenied("You do not have permission to perform this action.")
+    return role
+
+
+def parse_number(value):
+    if value in {"", None}:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def limit_verdict(limit, measured):
+    value = parse_number(measured)
+    if value is None:
+        return "pending"
+    minimum = parse_number(limit.get("min"))
+    maximum = parse_number(limit.get("max"))
+    if minimum is not None and value < minimum:
+        return "fail"
+    if maximum is not None and value > maximum:
+        return "fail"
+    return "pass"
+
+
+def result_rows_from_spec(spec, methods):
+    limits = list(getattr(spec, "limits", None) or [])
+    if limits:
+        rows = []
+        for limit in limits:
+            method = limit.get("method") or (methods[0] if methods else "")
+            rows.append({
+                "id": new_id(),
+                "analyte": limit.get("analyte", ""),
+                "method": method,
+                "value": "",
+                "unit": limit.get("unit", ""),
+                "spec": limit.get("spec") or limit.get("label") or _limit_label(limit),
+                "limit": limit,
+                "verdict": "pending",
+                "uncertainty": limit.get("uncertainty", ""),
+            })
+        return rows
+    return [
+        {
+            "id": new_id(), "analyte": method, "method": method, "value": "",
+            "unit": "", "spec": "", "limit": {}, "verdict": "pending", "uncertainty": "",
+        }
+        for method in methods
+    ]
+
+
+def _limit_label(limit):
+    parts = []
+    if limit.get("min") not in {"", None}:
+        parts.append(f">= {limit['min']}")
+    if limit.get("max") not in {"", None}:
+        parts.append(f"<= {limit['max']}")
+    return " and ".join(parts)

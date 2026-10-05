@@ -1,13 +1,17 @@
 from django.db import transaction
+from django.db.models import F, Q
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
 from common.exceptions import ConflictError, ResourceNotFoundError
+from common.files import serve_stored_file
 from quality import models as m
 from quality import serializers as s
 from quality import services
@@ -35,6 +39,35 @@ def _find(items, item_id):
         if str(item.get("id")) == str(item_id):
             return item
     return None
+
+
+def _notify_users(recipients, title, body, event, **links):
+    users = {user.pk: user for user in recipients if user and getattr(user, "is_active", False)}
+    m.QualityNotification.objects.bulk_create([
+        m.QualityNotification(recipient=user, title=title, body=body, event=event, **links)
+        for user in users.values()
+    ])
+
+
+def _organisation_users(org):
+    if not org:
+        return []
+    from organisations.models import OrganisationMembership
+    return [membership.user for membership in OrganisationMembership.objects.filter(organisation=org, is_active=True).select_related("user")]
+
+
+def _operators():
+    from accounts.models import User
+    return User.objects.filter(is_staff=True, is_active=True)
+
+
+class CertificateVerificationThrottle(SimpleRateThrottle):
+    scope = "quality_certificate_verify"
+    rate = "10/minute"
+
+    def get_cache_key(self, request, view):
+        ident = self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
 
 
 class SummaryView(APIView):
@@ -85,8 +118,21 @@ class QualityApplicationViewSet(
             return s.QualityApplicationCreateSerializer
         return s.QualityApplicationSerializer
 
+    def get_queryset(self):
+        qs = self.queryset
+        if self.request.method not in {"GET", "HEAD", "OPTIONS"}:
+            return qs
+        role = services.derive_role(self.request.user)
+        org = services.user_organisation(self.request.user)
+        if role in {"operator", "regulator"}:
+            return qs
+        if role == "partner" and org:
+            return qs.filter(organisation=org)
+        return qs.none()
+
     def perform_create(self, serializer):
-        org = None
+        role = services.require_role(self.request.user, "partner", "operator")
+        org = services.user_organisation(self.request.user) if role == "partner" else None
         request_org_id = self.request.data.get("organisation_id")
         if request_org_id:
             from organisations.models import Organisation
@@ -104,6 +150,7 @@ class QualityApplicationViewSet(
 
     @action(detail=True, methods=["patch"], url_path=r"documents/(?P<doc_id>[^/.]+)")
     def document_status(self, request, pk=None, doc_id=None):
+        services.require_role(request.user, "operator", "regulator")
         app = self.get_object()
         serializer = s.SetDocumentStatusSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -117,8 +164,42 @@ class QualityApplicationViewSet(
         app.save(update_fields=["documents", "audit"])
         return Response(s.PartnerDocumentSerializer(doc).data)
 
+    @action(detail=True, methods=["post"], url_path=r"documents/(?P<doc_id>[^/.]+)/upload", parser_classes=[MultiPartParser, FormParser])
+    def upload_document(self, request, pk=None, doc_id=None):
+        app = self.get_object()
+        services.require_role(request.user, "partner", "operator")
+        doc = _find(app.documents, doc_id)
+        if doc is None:
+            raise ResourceNotFoundError("Document not found on this application.")
+        serializer = s.QualityApplicationDocumentSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        uploaded, _ = m.QualityApplicationDocument.objects.update_or_create(
+            application=app,
+            document_id=doc_id,
+            defaults={
+                "name": serializer.validated_data.get("name") or doc.get("name", ""),
+                "category": serializer.validated_data.get("category") or doc.get("category", ""),
+                "file": serializer.validated_data["file"],
+                "uploaded_by": request.user,
+            },
+        )
+        doc["file_id"] = str(uploaded.id)
+        doc["status"] = m.DocStatus.PENDING
+        app.audit = [*app.audit, services.audit_entry(request.user, "document_uploaded", doc.get("name", "Document uploaded"))]
+        app.save(update_fields=["documents", "audit", "updated_at"])
+        return Response(s.QualityApplicationDocumentSerializer(uploaded, context={"request": request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"], url_path=r"documents/(?P<doc_id>[^/.]+)/download", url_name="document-download")
+    def download_document(self, request, pk=None, doc_id=None):
+        app = self.get_object()
+        document = app.uploaded_documents.filter(document_id=doc_id).first()
+        if not document or not document.file:
+            raise ResourceNotFoundError("No file has been uploaded for this document.")
+        return serve_stored_file(document.file, document.original_name or document.name or "quality-document")
+
     @action(detail=True, methods=["post"], url_path=r"risk-flags/(?P<flag_id>[^/.]+)/resolve")
     def resolve_risk_flag(self, request, pk=None, flag_id=None):
+        services.require_role(request.user, "operator", "regulator")
         app = self.get_object()
         flag = _find(app.risk_flags, flag_id)
         if flag is None:
@@ -146,6 +227,7 @@ class QualityApplicationViewSet(
             app.decision_note = note
         app.audit = [*app.audit, services.audit_entry(request.user, "decision", f"Status set to {app.status}. {note}".strip())]
         app.save(update_fields=["status", "decision_note", "audit", "updated_at"])
+        _notify_users(_organisation_users(app.organisation), "Quality application decision", f"{app.reference} was {app.status}.", "application_decision", application=app)
         return Response(s.QualityApplicationSerializer(app).data)
 
     @action(detail=True, methods=["post"])
@@ -166,7 +248,7 @@ class SampleViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
     mixins.UpdateModelMixin, AtomicViewSet
 ):
-    queryset = m.Sample.objects.all().select_related("buyer_spec")
+    queryset = m.Sample.objects.all().select_related("buyer_spec", "miner_organisation", "partner_organisation", "buyer_organisation", "registered_by")
     filterset_fields = ["status", "buyer_spec"]
     search_fields = ["reference", "material", "lot", "mine_site"]
     http_method_names = ["get", "post", "patch", "head", "options"]
@@ -178,10 +260,29 @@ class SampleViewSet(
             return s.SampleStatusSerializer
         return s.SampleSerializer
 
+    def get_queryset(self):
+        qs = self.queryset
+        if self.request.method not in {"GET", "HEAD", "OPTIONS"}:
+            return qs
+        role = services.derive_role(self.request.user)
+        org = services.user_organisation(self.request.user)
+        if role in {"operator", "regulator"}:
+            return qs
+        if role == "miner" and org:
+            return qs.filter(Q(miner_organisation=org) | Q(registered_by__organisation_memberships__organisation=org, registered_by__organisation_memberships__is_active=True)).distinct()
+        if role == "partner" and org:
+            return qs.filter(partner_organisation=org)
+        if role == "buyer" and org:
+            return qs.filter(Q(buyer_organisation=org) | Q(buyer_spec__buyer_organisation=org))
+        return qs.none()
+
     def create(self, request, *args, **kwargs):
+        services.require_role(request.user, "miner", "operator")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        miner_org = services.user_organisation(request.user)
+        buyer_org = data.get("buyer_spec").buyer_organisation if data.get("buyer_spec") else None
         sample = m.Sample.objects.create(
             material=data["material"],
             lot=data.get("lot", ""),
@@ -189,6 +290,10 @@ class SampleViewSet(
             origin=data.get("origin", ""),
             mass_kg=data.get("mass_kg", 0),
             buyer_spec=data.get("buyer_spec"),
+            miner_organisation=miner_org,
+            miner_org=getattr(miner_org, "name", ""),
+            buyer_organisation=buyer_org,
+            buyer_org=getattr(buyer_org, "name", ""),
             registered_by=request.user,
             audit=[services.audit_entry(request.user, "registered", "Sample registered")],
         )
@@ -200,13 +305,15 @@ class SampleViewSet(
         serializer.is_valid(raise_exception=True)
         new_status = serializer.validated_data.get("status")
         if new_status:
-            sample.status = new_status
+            services.require_role(request.user, "operator", "partner")
+            services.transition_sample(sample, new_status)
             sample.audit = [*sample.audit, services.audit_entry(request.user, "status_changed", f"Status set to {new_status}")]
             sample.save(update_fields=["status", "audit", "updated_at"])
         return Response(s.SampleSerializer(sample).data)
 
     @action(detail=True, methods=["post"])
     def custody(self, request, pk=None):
+        services.require_role(request.user, "miner", "partner", "operator")
         sample = self.get_object()
         serializer = s.CustodyEventInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -222,13 +329,16 @@ class SampleViewSet(
         }
         sample.custody = [*sample.custody, event]
         if sample.status == m.SampleStatus.REGISTERED:
-            sample.status = m.SampleStatus.IN_TRANSIT
+            services.transition_sample(sample, m.SampleStatus.IN_TRANSIT)
+        elif sample.status == m.SampleStatus.IN_TRANSIT and services.derive_role(request.user) in {"partner", "operator"}:
+            services.transition_sample(sample, m.SampleStatus.RECEIVED)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "custody", data["action"])]
         sample.save(update_fields=["custody", "status", "audit", "updated_at"])
         return Response(s.SampleSerializer(sample).data)
 
     @action(detail=True, methods=["post"], url_path="test-request")
     def test_request(self, request, pk=None):
+        services.require_role(request.user, "partner", "operator")
         sample = self.get_object()
         serializer = s.TestRequestInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -241,33 +351,42 @@ class SampleViewSet(
             "turnaround": data.get("turnaround", ""),
             "status": "submitted",
         }
-        sample.results = [
-            {
-                "id": services.new_id(), "analyte": method, "method": method, "value": "",
-                "unit": "", "spec": "", "verdict": m.ResultVerdict.PENDING, "uncertainty": "",
-            }
-            for method in data["methods"]
-        ]
-        sample.status = m.SampleStatus.TESTING
+        sample.results = services.result_rows_from_spec(sample.buyer_spec, data["methods"])
+        if sample.status == m.SampleStatus.IN_TRANSIT:
+            services.transition_sample(sample, m.SampleStatus.RECEIVED)
+        services.transition_sample(sample, m.SampleStatus.TESTING)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "test_requested", ", ".join(data["methods"]))]
-        sample.save(update_fields=["test_request", "results", "status", "audit", "updated_at"])
+        if services.derive_role(request.user) == "partner":
+            org = services.user_organisation(request.user)
+            sample.partner_organisation = org
+            sample.partner_org = getattr(org, "name", "")
+            update_fields = ["test_request", "results", "status", "audit", "partner_organisation", "partner_org", "updated_at"]
+        else:
+            update_fields = ["test_request", "results", "status", "audit", "updated_at"]
+        sample.save(update_fields=update_fields)
+        _notify_users(_organisation_users(sample.partner_organisation), "Sample assigned", f"{sample.reference} is assigned for testing.", "sample_assigned", sample=sample)
         return Response(s.SampleSerializer(sample).data)
 
     @action(detail=True, methods=["patch"], url_path=r"results/(?P<result_id>[^/.]+)")
     def result(self, request, pk=None, result_id=None):
+        services.require_role(request.user, "partner", "operator")
         sample = self.get_object()
         serializer = s.ResultVerdictInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         item = _find(sample.results, result_id)
         if item is None:
             raise ResourceNotFoundError("Result not found on this sample.")
-        item["verdict"] = serializer.validated_data["verdict"]
+        for field in ("unit", "spec", "uncertainty"):
+            if field in serializer.validated_data:
+                item[field] = serializer.validated_data[field]
         if "value" in serializer.validated_data:
             item["value"] = serializer.validated_data["value"]
+        item["verdict"] = services.limit_verdict(item.get("limit", {}), item.get("value"))
         sample.audit = [*sample.audit, services.audit_entry(
             request.user, "result_updated", f"{item.get('analyte', 'Result')} -> {item['verdict']}",
         )]
         sample.save(update_fields=["results", "audit", "updated_at"])
+        _notify_users([sample.registered_by, *_operators()], "Test result updated", f"{item.get('analyte', 'Result')} is {item['verdict']}.", "test_verdict", sample=sample)
         return Response(s.TestResultSerializer(item).data)
 
     @action(detail=True, methods=["post"])
@@ -285,7 +404,7 @@ class SampleViewSet(
             "verdict": data["verdict"],
             "note": data.get("note", ""),
         }
-        sample.status = m.SampleStatus.REVIEWED if data["verdict"] != m.ResultVerdict.FAIL else m.SampleStatus.REJECTED
+        services.transition_sample(sample, m.SampleStatus.REVIEWED if data["verdict"] != m.ResultVerdict.FAIL else m.SampleStatus.REJECTED)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "reviewed", f"Verdict: {data['verdict']}")]
         sample.save(update_fields=["quality_review", "status", "audit", "updated_at"])
         return Response(s.SampleSerializer(sample).data)
@@ -301,11 +420,13 @@ class SampleViewSet(
         cert = m.Certificate.objects.create(
             sample=sample,
             issued_by=services.actor_label(request.user),
+            valid_until=timezone.now() + timezone.timedelta(days=365),
             verification_hash=services.gen_hash(sample.reference, "certificate"),
         )
-        sample.status = m.SampleStatus.CERTIFIED
+        services.transition_sample(sample, m.SampleStatus.CERTIFIED)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "certified", cert.reference)]
         sample.save(update_fields=["status", "audit", "updated_at"])
+        _notify_users([sample.registered_by, *_organisation_users(sample.buyer_organisation)], "Certificate issued", f"{cert.reference} was issued for {sample.reference}.", "certificate_issued", sample=sample, certificate=cert)
         return Response(s.CertificateSerializer(cert).data, status=status.HTTP_201_CREATED)
 
 
@@ -315,6 +436,20 @@ class CertificateViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Atomi
     search_fields = ["reference", "sample__reference"]
     http_method_names = ["get", "post", "head", "options"]
     serializer_class = s.CertificateSerializer
+
+    def get_queryset(self):
+        qs = self.queryset
+        role = services.derive_role(self.request.user)
+        org = services.user_organisation(self.request.user)
+        if role in {"operator", "regulator"}:
+            return qs
+        if role == "miner" and org:
+            return qs.filter(sample__miner_organisation=org)
+        if role == "partner" and org:
+            return qs.filter(sample__partner_organisation=org)
+        if role == "buyer" and org:
+            return qs.filter(Q(sample__buyer_organisation=org) | Q(sample__buyer_spec__buyer_organisation=org))
+        return qs.none()
 
     @action(detail=True, methods=["post"])
     def revoke(self, request, pk=None):
@@ -326,14 +461,36 @@ class CertificateViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Atomi
             raise ConflictError("Certificate is already revoked.")
         cert.status = m.CertificateStatus.REVOKED
         cert.save(update_fields=["status", "updated_at"])
+        _notify_users([cert.sample.registered_by, *_organisation_users(cert.sample.buyer_organisation)], "Certificate revoked", f"{cert.reference} was revoked.", "certificate_revoked", sample=cert.sample, certificate=cert)
         return Response(s.CertificateSerializer(cert).data)
 
 
-class BuyerSpecViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicViewSet):
+class BuyerSpecViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, AtomicViewSet):
     queryset = m.BuyerSpec.objects.all()
     serializer_class = s.BuyerSpecSerializer
     search_fields = ["name", "buyer_org", "material"]
-    http_method_names = ["get", "head", "options"]
+    http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def get_queryset(self):
+        qs = self.queryset
+        role = services.derive_role(self.request.user)
+        org = services.user_organisation(self.request.user)
+        if role in {"operator", "regulator"}:
+            return qs
+        if role == "buyer" and org:
+            return qs.filter(buyer_organisation=org)
+        return qs
+
+    def perform_create(self, serializer):
+        role = services.require_role(self.request.user, "buyer", "operator")
+        org = serializer.validated_data.get("buyer_organisation")
+        if role == "buyer":
+            org = services.user_organisation(self.request.user)
+        serializer.save(buyer_organisation=org, buyer_org=getattr(org, "name", serializer.validated_data.get("buyer_org", "")))
+
+    def perform_update(self, serializer):
+        services.require_role(self.request.user, "buyer", "operator")
+        serializer.save()
 
 
 class NonConformityViewSet(
@@ -346,6 +503,7 @@ class NonConformityViewSet(
     http_method_names = ["get", "post", "head", "options"]
 
     def create(self, request, *args, **kwargs):
+        services.require_role(request.user, "operator", "regulator", "partner")
         serializer = s.RaiseNonConformitySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -357,10 +515,12 @@ class NonConformityViewSet(
             raised_by=services.actor_label(request.user),
             raised_by_user=request.user,
         )
+        _notify_users(_operators(), "Non-conformity raised", nc.title, "non_conformity_raised", non_conformity=nc)
         return Response(s.QualityNonConformitySerializer(nc).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def capa(self, request, pk=None):
+        services.require_role(request.user, "operator", "partner")
         nc = self.get_object()
         if nc.status == m.NCStatus.CLOSED:
             raise ConflictError("Cannot add a corrective action to a closed non-conformity.")
@@ -381,6 +541,7 @@ class NonConformityViewSet(
 
     @action(detail=True, methods=["post"], url_path=r"capa/(?P<action_id>[^/.]+)/advance")
     def advance_capa(self, request, pk=None, action_id=None):
+        services.require_role(request.user, "operator", "partner")
         nc = self.get_object()
         item = _find(nc.capa, action_id)
         if item is None:
@@ -395,6 +556,7 @@ class NonConformityViewSet(
 
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
+        services.require_role(request.user, "operator", "regulator")
         nc = self.get_object()
         if nc.status == m.NCStatus.CLOSED:
             raise ConflictError("Non-conformity is already closed.")
@@ -402,4 +564,34 @@ class NonConformityViewSet(
             raise ConflictError("All corrective actions must be complete before closing.")
         nc.status = m.NCStatus.CLOSED
         nc.save(update_fields=["status", "updated_at"])
+        _notify_users(_operators(), "Non-conformity closed", nc.title, "non_conformity_closed", non_conformity=nc)
         return Response(s.QualityNonConformitySerializer(nc).data)
+
+
+class CertificateVerificationView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [CertificateVerificationThrottle]
+
+    def get(self, request, verification_hash):
+        cert = m.Certificate.objects.select_related("sample").filter(verification_hash=verification_hash).first()
+        if not cert:
+            raise ResourceNotFoundError("Certificate not found.")
+        m.Certificate.objects.filter(pk=cert.pk).update(scans=F("scans") + 1)
+        cert.refresh_from_db()
+        return Response(s.CertificateVerificationSerializer(cert).data)
+
+
+class QualityNotificationViewSet(mixins.ListModelMixin, AtomicViewSet):
+    serializer_class = s.QualityNotificationSerializer
+    queryset = m.QualityNotification.objects.none()
+
+    def get_queryset(self):
+        return m.QualityNotification.objects.filter(recipient=self.request.user)
+
+    @action(detail=True, methods=["post"])
+    def read(self, request, pk=None):
+        notification = self.get_object()
+        if notification.read_at is None:
+            notification.read_at = timezone.now()
+            notification.save(update_fields=["read_at", "updated_at"])
+        return Response(s.QualityNotificationSerializer(notification).data)
