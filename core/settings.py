@@ -70,7 +70,7 @@ CORS_EXPOSE_HEADERS = ["Content-Disposition"]
 # See accounts/portal.py:portal_for_origin.
 COMPLIANCE_PORTAL_ORIGINS = config(
     "COMPLIANCE_PORTAL_ORIGINS",
-    default="https://compliance.beldium.com,http://localhost:8080,http://localhost:3000,http://localhost:5173",
+    default="https://compliance.beldium.com,https://qac.beldium.com,http://localhost:8080,http://localhost:3000,http://localhost:5173",
     cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
 )
 MINER_PORTAL_ORIGINS = config(
