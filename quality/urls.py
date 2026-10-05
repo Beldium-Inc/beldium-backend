@@ -9,8 +9,10 @@ router.register("samples", views.SampleViewSet, basename="quality-sample")
 router.register("certificates", views.CertificateViewSet, basename="quality-certificate")
 router.register("buyer-specs", views.BuyerSpecViewSet, basename="quality-buyer-spec")
 router.register("non-conformities", views.NonConformityViewSet, basename="quality-non-conformity")
+router.register("notifications", views.QualityNotificationViewSet, basename="quality-notification")
 
-urlpatterns = router.urls + [
+urlpatterns = [
     path("me/", views.SummaryView.as_view(), {"kind": "me"}, name="quality-me"),
     path("dashboard/", views.SummaryView.as_view(), {"kind": "dashboard"}, name="quality-dashboard"),
-]
+    path("certificates/verify/<str:verification_hash>/", views.CertificateVerificationView.as_view(), name="quality-certificate-verify"),
+] + router.urls

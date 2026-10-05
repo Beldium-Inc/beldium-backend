@@ -1,6 +1,29 @@
+from django.urls import reverse
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from quality import models as m
+
+MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+ALLOWED_CONTENT_TYPES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "image/jpeg",
+    "image/png",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/zip",
+}
+
+
+def validate_upload(value):
+    if value.size > MAX_UPLOAD_SIZE:
+        raise serializers.ValidationError("File too large; the maximum size is 10 MB.")
+    if getattr(value, "content_type", None) not in ALLOWED_CONTENT_TYPES:
+        raise serializers.ValidationError("Only PDF, Word, Excel, ZIP, JPEG, and PNG files are supported.")
+    return value
 
 
 class QualityApplicationSerializer(serializers.ModelSerializer):
@@ -68,6 +91,9 @@ class SetDocumentStatusSerializer(serializers.Serializer):
 
 class SampleSerializer(serializers.ModelSerializer):
     buyer_spec = serializers.PrimaryKeyRelatedField(queryset=m.BuyerSpec.objects.all(), allow_null=True, required=False)
+    miner_organisation = serializers.PrimaryKeyRelatedField(read_only=True)
+    partner_organisation = serializers.PrimaryKeyRelatedField(read_only=True)
+    buyer_organisation = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         ref_name = "QualitySample"
@@ -75,6 +101,7 @@ class SampleSerializer(serializers.ModelSerializer):
         fields = [
             "id", "reference", "material", "lot", "mine_site", "origin", "mass_kg",
             "registered_at", "miner_org", "partner_org", "buyer_org", "buyer_spec",
+            "miner_organisation", "partner_organisation", "buyer_organisation",
             "status", "custody", "test_request", "results", "quality_review", "audit",
             "created_at", "updated_at",
         ]
@@ -107,8 +134,10 @@ class TestRequestInputSerializer(serializers.Serializer):
 
 
 class ResultVerdictInputSerializer(serializers.Serializer):
-    verdict = serializers.ChoiceField(choices=m.ResultVerdict.choices)
     value = serializers.CharField(required=False, allow_blank=True)
+    unit = serializers.CharField(required=False, allow_blank=True)
+    spec = serializers.CharField(required=False, allow_blank=True)
+    uncertainty = serializers.CharField(required=False, allow_blank=True)
 
 
 class TestResultSerializer(serializers.Serializer):
@@ -132,7 +161,8 @@ class QualityReviewInputSerializer(serializers.Serializer):
 class BuyerSpecSerializer(serializers.ModelSerializer):
     class Meta:
         model = m.BuyerSpec
-        fields = ["id", "name", "buyer_org", "material", "limits"]
+        fields = ["id", "name", "buyer_org", "buyer_organisation", "material", "limits"]
+        read_only_fields = ["id"]
 
 
 # --- certificates --------------------------------------------------------------
@@ -148,6 +178,37 @@ class CertificateSerializer(serializers.ModelSerializer):
             "issued_by", "valid_until", "status", "verification_hash", "scans",
         ]
         read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans"]
+
+
+class CertificateVerificationSerializer(serializers.ModelSerializer):
+    sample_reference = serializers.CharField(source="sample.reference", read_only=True)
+    material = serializers.CharField(source="sample.material", read_only=True)
+
+    class Meta:
+        model = m.Certificate
+        fields = ["reference", "sample_reference", "material", "issued_at", "valid_until", "status", "scans"]
+
+
+class QualityApplicationDocumentSerializer(serializers.ModelSerializer):
+    original_name = serializers.CharField(read_only=True)
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.QualityApplicationDocument
+        fields = ["id", "application", "document_id", "name", "category", "file", "file_url", "original_name", "created_at"]
+        read_only_fields = ["id", "application", "file_url", "original_name", "created_at"]
+        extra_kwargs = {"file": {"write_only": True}}
+
+    def validate_file(self, value):
+        return validate_upload(value)
+
+    @extend_schema_field(OpenApiTypes.URI)
+    def get_file_url(self, obj):
+        if not obj.file:
+            return None
+        url = reverse("quality-application-document-download", args=[obj.application_id, obj.document_id])
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
 
 
 # --- non-conformities -------------------------------------------------------------
@@ -190,3 +251,10 @@ class QualityCapabilitiesSerializer(serializers.Serializer):
     can_review = serializers.BooleanField()
     can_decide = serializers.BooleanField()
     is_staff = serializers.BooleanField()
+
+
+class QualityNotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.QualityNotification
+        fields = ["id", "title", "body", "event", "read_at", "created_at", "sample", "application", "certificate", "non_conformity"]
+        read_only_fields = fields
