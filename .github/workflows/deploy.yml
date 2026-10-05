@@ -123,6 +123,30 @@ jobs:
             exit 1
           fi
 
+      # Idempotent reference data (quality buyer specs, uses update_or_create), so
+      # it is safe on every deploy. Failure warns but never blocks a release.
+      - name: Seed reference data (one-off task)
+        continue-on-error: true
+        env:
+          TASK_DEF: ${{ steps.taskdefs.outputs.web }}
+        run: |
+          task=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --launch-type FARGATE \
+            --task-definition "$TASK_DEF" \
+            --started-by "seed-${GITHUB_SHA::7}" \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ vars.TASK_SUBNETS }}],securityGroups=[${{ vars.TASK_SECURITY_GROUPS }}],assignPublicIp=${{ vars.TASK_ASSIGN_PUBLIC_IP || 'ENABLED' }}}" \
+            --overrides '{"containerOverrides":[{"name":"Main","command":["manage","seed_quality"]}]}' \
+            --query 'tasks[0].taskArn' --output text)
+          if [ -z "$task" ] || [ "$task" = "None" ]; then
+            echo "::warning::Seed task failed to start"; exit 1
+          fi
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].containers[?name==`Main`].exitCode | [0]' --output text)
+          echo "Seed exit code: $code"
+          [ "$code" = "0" ] || { echo "::warning::seed_quality exited $code (logs: /ecs/beldium-$DEPLOY_ENV)"; exit 1; }
+
       # On the very first deploy the services don't exist yet: they are
       # created by hand from the task definitions registered above (see
       # docs/aws-deployment.md, steps 13 and 14). Anything missing is skipped.
