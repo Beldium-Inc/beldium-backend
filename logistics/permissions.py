@@ -17,6 +17,10 @@ DESK_ROLES = {
     MembershipRole.COMPLIANCE_MANAGER,
 }
 
+# A partner's desk power is for the sector it was vetted in (see
+# organisations.access), so the checks here ask about logistics specifically.
+SECTOR = "logistics"
+
 
 def sees_register(user):
     """The compliance desk and the regulator read every logistics company.
@@ -26,11 +30,11 @@ def sees_register(user):
     that has just been vetted finds the applications waiting for it instead of
     an empty workspace that only a per-company grant could fill.
     """
-    return access.audience(user) in {access.OPERATOR, access.REGULATOR}
+    return access.audience(user, SECTOR) in {access.OPERATOR, access.REGULATOR}
 
 
 def is_desk(user):
-    return access.can_decide(user, DESK_ROLES)
+    return access.can_decide(user, DESK_ROLES, SECTOR)
 
 
 def company_ids(user):

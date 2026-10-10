@@ -18,8 +18,8 @@ from organisations.access import (
     OPERATOR,
     REGULATOR,
     can_decide as _can_decide,
-    is_operator,
-    is_regulator,
+    is_operator as _is_operator,
+    is_regulator as _is_regulator,
     memberships as _memberships,
     organisation_ids,
 )
@@ -51,15 +51,28 @@ APPLICANT_ROLES = {
 }
 
 
+# A partner's desk power is for the sector it was vetted in (see
+# organisations.access), so every check here asks about processing specifically.
+SECTOR = "processing"
+
+
 def audience(user):
     """``operator``, ``regulator``, ``processor``, or None. See organisations.access.audience."""
-    role = _audience(user)
+    role = _audience(user, SECTOR)
     return PROCESSOR if role == MEMBER else role
+
+
+def is_operator(user):
+    return _is_operator(user, SECTOR)
+
+
+def is_regulator(user):
+    return _is_regulator(user, SECTOR)
 
 
 def can_decide(user):
     """May take a review action: verify a section, raise a finding, decide."""
-    return _can_decide(user, DECISION_ROLES)
+    return _can_decide(user, DECISION_ROLES, SECTOR)
 
 
 def can_edit_application(user, application):

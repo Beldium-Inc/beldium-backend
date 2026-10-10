@@ -51,6 +51,15 @@ def _documents(application):
     ]
 
 
+_MIRROR_STATUS = {
+    ComplianceStatus.VERIFIED: m.ApplicationStatus.APPROVED,
+    ComplianceStatus.CONDITIONALLY_APPROVED: m.ApplicationStatus.APPROVED,
+    ComplianceStatus.REJECTED: m.ApplicationStatus.REJECTED,
+    ComplianceStatus.ACTION_REQUIRED: m.ApplicationStatus.INFO_REQUESTED,
+}
+_CLOSED = {m.ApplicationStatus.INFO_REQUESTED, m.ApplicationStatus.REJECTED, m.ApplicationStatus.APPROVED}
+
+
 def sync_partner_application(application, user):
     """Create or refresh the Q&C desk's record for a submitted application."""
     profile = application.quality_profile
@@ -113,16 +122,22 @@ def sync_partner_application(application, user):
     }
 
     mirror = m.QualityApplication.objects.filter(compliance_application=application).first()
+    decided = _MIRROR_STATUS.get(application.status)
     if mirror is None:
         mirror = m.QualityApplication(compliance_application=application, audit=[])
         note = ("submitted", "Application submitted")
-    elif application.status == ComplianceStatus.UNDER_REVIEW and mirror.status != m.ApplicationStatus.SUBMITTED:
+    elif decided and mirror.status != decided:
+        # Decided at Beldium's staff vetting desk rather than here.
+        mirror.status = decided
+        mirror.decision_note = application.review_notes
+        note = ("decision", f"Status set to {decided} at the staff vetting desk")
+    elif application.status == ComplianceStatus.UNDER_REVIEW and mirror.status in _CLOSED:
         # Back from the applicant after an information request or a rejection.
         mirror.status = m.ApplicationStatus.SUBMITTED
         mirror.submitted_at = application.submitted_at
         note = ("resubmitted", "Application resubmitted")
     else:
-        note = ("updated", "Applicant updated the application")
+        note = ("updated", "Application updated")
     for name, value in fields.items():
         setattr(mirror, name, value)
     mirror.audit = [*mirror.audit, services.audit_entry(user, *note)]
