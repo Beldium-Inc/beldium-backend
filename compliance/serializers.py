@@ -6,6 +6,9 @@ from drf_spectacular.utils import extend_schema_field
 
 from accounts.models import AccountAuditEvent
 from compliance.models import ApprovalCondition, ConditionEvidence, ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
+from compliance.quality_sections import (
+    QUALITY_REQUIRED_DOCUMENT_TYPES, QUALITY_REQUIRED_SECTIONS, is_quality_application,
+)
 from organisations.models import OrganisationType
 
 
@@ -249,13 +252,13 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
         model = ComplianceApplication
         fields = [
             "id", "reference", "organisation", "organisation_type", "status", "organisation_profile", "representative", "services",
-            "professional_capability", "inspection_capability", "conflict_declaration", "declaration",
+            "professional_capability", "inspection_capability", "conflict_declaration", "declaration", "quality_profile",
             "submitted_at", "reviewed_at", "review_notes", "conditional_requirements", "personnel",
             "documents", "conditions", "progress", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "reference", "status", "organisation_profile", "representative", "services", "professional_capability",
-            "inspection_capability", "conflict_declaration", "declaration", "submitted_at", "reviewed_at",
+            "inspection_capability", "conflict_declaration", "declaration", "quality_profile", "submitted_at", "reviewed_at",
             "review_notes", "conditional_requirements", "personnel", "documents", "conditions", "progress", "created_at", "updated_at",
         ]
 
@@ -444,16 +447,28 @@ def application_progress(application):
     if applicant is None:
         membership = application.organisation.memberships.filter(role="owner", is_active=True).select_related("user").first()
         applicant = membership.user if membership else None
-    required_types = {document_type for document_type, _ in REQUIRED_DOCUMENTS}
-    sections = {
-        "account": bool(applicant and applicant.is_active and applicant.email_verified_at),
-        "organisation": bool(application.organisation_profile and application.representative and application.services and application.professional_capability),
-        "documents": required_types.issubset(submitted_types) and not outstanding,
-        "personnel": application.personnel.exists(),
-        "inspection_capability": bool(application.inspection_capability),
-        "conflict_declaration": bool(application.conflict_declaration),
-        "declaration": bool(application.declaration.get("confirmed")),
-    }
+    account_ready = bool(applicant and applicant.is_active and applicant.email_verified_at)
+    if is_quality_application(application):
+        # A Q&C application is measured against its own sections and checklist.
+        profile = application.quality_profile
+        required_types = set(QUALITY_REQUIRED_DOCUMENT_TYPES)
+        sections = {
+            "account": account_ready,
+            **{key.replace("-", "_"): bool(profile.get(key)) for key in QUALITY_REQUIRED_SECTIONS},
+            "documents": required_types.issubset(submitted_types) and not outstanding,
+            "declaration": bool(profile.get("declaration", {}).get("signature")),
+        }
+    else:
+        required_types = {document_type for document_type, _ in REQUIRED_DOCUMENTS}
+        sections = {
+            "account": account_ready,
+            "organisation": bool(application.organisation_profile and application.representative and application.services and application.professional_capability),
+            "documents": required_types.issubset(submitted_types) and not outstanding,
+            "personnel": application.personnel.exists(),
+            "inspection_capability": bool(application.inspection_capability),
+            "conflict_declaration": bool(application.conflict_declaration),
+            "declaration": bool(application.declaration.get("confirmed")),
+        }
     # A document the desk has looked at and rejected is not the same as one that
     # has not arrived yet. "Still gathering it" is fine to submit alongside;
     # "I read it and it is wrong" has to be answered, or the applicant can hand

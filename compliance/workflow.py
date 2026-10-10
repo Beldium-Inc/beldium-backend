@@ -9,7 +9,12 @@ REVIEW_STATES = {S.UNDER_REVIEW, S.ACTION_REQUIRED, S.CONDITIONALLY_APPROVED}
 TRANSITIONS = {
     S.DRAFT: {S.UNDER_REVIEW},
     S.UNDER_REVIEW: {S.ACTION_REQUIRED, S.CONDITIONALLY_APPROVED, S.VERIFIED, S.REJECTED},
-    S.ACTION_REQUIRED: {S.UNDER_REVIEW, S.REJECTED},
+    # A requested or rejected document is replaced through the documents
+    # endpoint, which leaves the application here. Once the desk has verified
+    # the replacement it can approve directly, rather than wait on a resubmit
+    # the applicant has no reason to know is needed; decide() still demands
+    # full progress and every document verified.
+    S.ACTION_REQUIRED: {S.UNDER_REVIEW, S.CONDITIONALLY_APPROVED, S.VERIFIED, S.REJECTED},
     S.CONDITIONALLY_APPROVED: {S.ACTION_REQUIRED, S.VERIFIED, S.REJECTED},
     S.REJECTED: {S.UNDER_REVIEW},
     S.VERIFIED: set(),

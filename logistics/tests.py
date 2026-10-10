@@ -188,6 +188,78 @@ class LogisticsAudienceTests(LogisticsTestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class LogisticsDeskTests(LogisticsTestCase):
+    """A verified compliance partner works the register without a per-company grant."""
+
+    def make_desk_user(self, email, *, verified=True, role=MembershipRole.REVIEWER):
+        user = make_user(email)
+        desk = Organisation.objects.create(
+            name=f"Desk of {email}",
+            organisation_type=OrganisationType.COMPLIANCE_PARTNER,
+            verification_status="verified" if verified else "under_review",
+        )
+        OrganisationMembership.objects.create(organisation=desk, user=user, role=role)
+        return user
+
+    def test_verified_desk_sees_the_register_and_an_unverified_one_does_not(self):
+        self.client.force_authenticate(self.make_desk_user("desk@partner.test"))
+        response = self.client.get(reverse("logistics-company-list"))
+        self.assertEqual(response.data["count"], 1)
+        self.assertTrue(self.client.get(reverse("logistics-me")).data["companies"][0]["can_review"])
+
+        self.client.force_authenticate(self.make_desk_user("pending@partner.test", verified=False))
+        self.assertEqual(self.client.get(reverse("logistics-company-list")).data["count"], 0)
+
+    def test_desk_reviewer_claims_and_a_rival_cannot_take_it_over(self):
+        application = self.make_application(status="submitted")
+        first = self.make_desk_user("first@partner.test")
+        rival = self.make_desk_user("rival@partner.test")
+        claim = reverse("logistics-application-assign-reviewer", args=[application.id])
+        start = reverse("logistics-application-start-review", args=[application.id])
+
+        self.client.force_authenticate(first)
+        # Seeing the application is not the same as holding it.
+        self.assertEqual(self.client.post(start).status_code, 403)
+        response = self.client.post(claim, {"reviewer": str(first.id)}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["reviewer"], first.id)
+        self.assertEqual(self.client.post(start).status_code, 200)
+
+        self.client.force_authenticate(rival)
+        response = self.client.post(claim, {"reviewer": str(rival.id)}, format="json")
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "already_claimed")
+
+    def test_read_only_desk_member_and_company_insider_cannot_review(self):
+        application = self.make_application(status="submitted")
+        claim = reverse("logistics-application-assign-reviewer", args=[application.id])
+
+        analyst = self.make_desk_user("analyst@partner.test", role=MembershipRole.READ_ONLY)
+        self.client.force_authenticate(analyst)
+        self.assertEqual(self.client.post(claim, {"reviewer": str(analyst.id)}, format="json").status_code, 403)
+
+        # A desk reviewer who also belongs to the haulier is conflicted out.
+        insider = self.make_desk_user("insider@partner.test")
+        OrganisationMembership.objects.create(organisation=self.org, user=insider, role=MembershipRole.MEMBER)
+        self.client.force_authenticate(insider)
+        self.assertEqual(self.client.post(claim, {"reviewer": str(insider.id)}, format="json").status_code, 403)
+
+    def test_verified_replacement_returns_a_rejected_document_to_review(self):
+        application = self.make_application(status="awaiting_information", reviewer=self.reviewer)
+        self.add_document(application, Domain.INSURANCE, status="rejected", is_current=False)
+        replacement = self.add_document(application, Domain.INSURANCE, status="pending", version=2)
+
+        self.client.force_authenticate(self.reviewer)
+        response = self.client.post(
+            reverse("logistics-document-review", args=[replacement.id]),
+            {"status": "verified", "notes": "Replacement accepted."},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        application.refresh_from_db()
+        self.assertEqual(application.status, "under_review")
+
+
 @override_settings(MEDIA_ROOT=TemporaryDirectory().name)
 class LogisticsWorkflowTests(LogisticsTestCase):
     def test_application_creation_lays_down_nine_domains(self):
@@ -368,6 +440,8 @@ class LogisticsWorkflowTests(LogisticsTestCase):
         self.assertEqual(response.status_code, 409)
 
         verified = self.add_document(application, Domain.INSURANCE, document_type="insurance_policy")
+        # The corrected upload supersedes the rejected version.
+        LogisticsDocument.objects.filter(pk=rejected.pk).update(is_current=False)
         response = self.client.post(
             reverse("logistics-request-responses", args=[request_item.id]),
             {"message": "Corrected evidence attached.", "documents": [str(verified.id)]},
@@ -385,6 +459,9 @@ class LogisticsWorkflowTests(LogisticsTestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status"], "accepted")
+        # Nothing waits on the applicant any more, so the desk can decide.
+        application.refresh_from_db()
+        self.assertEqual(application.status, "under_review")
 
     def test_report_download_is_revoked_if_company_access_changes(self):
         report = LogisticsReport.objects.create(
@@ -973,3 +1050,56 @@ class LogisticsOperationsPortalTests(LogisticsTestCase):
         self.assertEqual(document.verification_status, "action_required")
         self.assertEqual(document.compliance_status, "under_review")
         document.full_clean()
+
+
+class LogisticsFileCheckTests(LogisticsTestCase):
+    """Uploads are read for advisory tags that only the reviewer receives."""
+
+    EDITED = (b"%PDF-1.4\n1 0 obj\n<< /Producer (Adobe Photoshop 25.0) /CreationDate (D:20240110090000Z) "
+              b"/ModDate (D:20240320101500Z) >>\nendobj\n2 0 obj\n<< /Type /Page /Font 3 0 R >>\nendobj\n%%EOF\n")
+
+    def upload(self, application, document_type, content, **extra):
+        return self.client.post(
+            reverse("logistics-application-documents", args=[application.id]),
+            {
+                "domain": Domain.INSURANCE,
+                "document_type": document_type,
+                "title": document_type.title(),
+                "file": SimpleUploadedFile(f"{document_type}.pdf", content, content_type="application/pdf"),
+                **extra,
+            },
+            format="multipart",
+        )
+
+    def codes(self, application, document_type):
+        document = LogisticsDocument.objects.get(application=application, document_type=document_type)
+        return [tag["code"] for tag in document.review_tags]
+
+    def test_tags_come_from_the_file_and_stay_with_the_reviewer(self):
+        application = self.make_application(reviewer=self.reviewer)
+        self.client.force_authenticate(self.owner)
+        response = self.upload(application, "policy", self.EDITED, issued_on="2024-02-01")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertNotIn("review_tags", response.data)
+        self.assertNotIn("file_metadata", response.data)
+        self.assertEqual(self.upload(application, "schedule", self.EDITED).status_code, 201)
+
+        self.assertEqual(self.codes(application, "policy"), ["editing_software", "predates_issue", "modified_later"])
+        self.assertIn("duplicate", self.codes(application, "schedule"))
+
+        listing = reverse("logistics-application-documents", args=[application.id])
+        for user in (self.owner, self.regulator):
+            self.client.force_authenticate(user)
+            self.assertTrue(all("review_tags" not in row for row in self.client.get(listing).data))
+        self.client.force_authenticate(self.reviewer)
+        rows = {row["document_type"]: row for row in self.client.get(listing).data}
+        self.assertEqual(rows["policy"]["review_tags"][0]["label"], "Made with editing software")
+        self.assertEqual(rows["policy"]["file_metadata"]["producer"], "Adobe Photoshop 25.0")
+
+    def test_a_file_that_cannot_be_read_is_still_accepted(self):
+        application = self.make_application()
+        self.client.force_authenticate(self.owner)
+        self.assertEqual(self.upload(application, "plain", b"%PDF-1.4").status_code, 201)
+        self.assertEqual(self.codes(application, "plain"), ["no_metadata"])
+        self.assertEqual(self.upload(application, "fake", b"<html>not a pdf</html>").status_code, 201)
+        self.assertEqual(self.codes(application, "fake"), ["type_mismatch"])

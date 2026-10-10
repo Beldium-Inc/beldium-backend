@@ -7,7 +7,7 @@ from drf_spectacular.utils import extend_schema_field
 from drf_spectacular.types import OpenApiTypes
 
 from logistics import models as m
-from logistics.permissions import can_see_driver_details
+from logistics.permissions import can_review, can_see_driver_details
 
 
 def strings(value):
@@ -208,6 +208,18 @@ class DocumentSerializer(serializers.ModelSerializer):
     def get_download_url(self, obj) -> str:
         return self.context['request'].build_absolute_uri(reverse('logistics-document-download', args=[obj.pk]))
 
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        # The file checks advise the reviewer; the company that uploaded the
+        # file, and a regulator reading the register, never receive them.
+        company = obj.application.company
+        allowed = self.context.setdefault('_file_checks', {})
+        if company.pk not in allowed:
+            allowed[company.pk] = can_review(self.context['request'].user, company)
+        if not allowed[company.pk]:
+            del data['file_metadata'], data['review_tags']
+        return data
+
     def get_validity(self, obj) -> str:
         return validity([obj.expires_on])
 
@@ -217,11 +229,18 @@ class ApplicationSerializer(OwnedSerializer):
     conditions = ConditionSerializer(many=True, read_only=True)
     progress = serializers.SerializerMethodField()
     risk = serializers.SerializerMethodField()
+    reviewer_name = serializers.SerializerMethodField()
 
     class Meta:
         model = m.LogisticsApplication
         fields = '__all__'
         read_only_fields = ['id', 'created_at', 'updated_at', 'created_by', 'reviewer', 'status', 'submitted_at', 'reviewed_at', 'rationale', 'policy_version', 'domain_weights']
+
+    def get_reviewer_name(self, obj) -> str:
+        reviewer = obj.reviewer
+        if reviewer is None:
+            return ''
+        return ' '.join(part for part in [reviewer.first_name, reviewer.last_name] if part) or reviewer.email
 
     def get_progress(self, obj) -> dict:
         from logistics.services import progress

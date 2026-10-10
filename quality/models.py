@@ -17,6 +17,10 @@ def application_reference():
     return f"BLD-QA-APP-{timezone.now().year}-{secrets.token_hex(4).upper()}"
 
 
+def professional_reference():
+    return f"BLD-QA-PRO-{timezone.now().year}-{secrets.token_hex(4).upper()}"
+
+
 def sample_reference():
     return f"BLD-QA-SMP-{timezone.now().year}-{secrets.token_hex(4).upper()}"
 
@@ -99,6 +103,12 @@ class QualityApplication(TimeStampedModel):
     organisation = models.ForeignKey(
         "organisations.Organisation", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="quality_applications",
+    )
+    # Set when this record mirrors an organisation's onboarding application
+    # (see quality/bridge.py); decisions taken here are carried back to it.
+    compliance_application = models.OneToOneField(
+        "compliance.ComplianceApplication", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="quality_application",
     )
     reference = models.CharField(max_length=50, unique=True, default=application_reference, editable=False)
     status = models.CharField(max_length=20, choices=ApplicationStatus.choices, default=ApplicationStatus.SUBMITTED, db_index=True)
@@ -249,3 +259,57 @@ class QualityNotification(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+
+
+class QualityProfessionalApplication(TimeStampedModel):
+    """An individual (officer, inspector) applying to work under a Q&C organisation.
+
+    Beldium reviews the person here; whether the organisation takes them on is
+    its own administrator's call, through the join request sent alongside.
+    """
+
+    applicant = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="quality_professional_applications")
+    organisation = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="quality_professional_applications",
+    )
+    reference = models.CharField(max_length=50, unique=True, default=professional_reference, editable=False)
+    role = models.CharField(max_length=40, default="officer_inspector")
+    status = models.CharField(max_length=20, choices=ApplicationStatus.choices, default=ApplicationStatus.SUBMITTED, db_index=True)
+
+    personal = models.JSONField(default=dict, blank=True)
+    qualifications = models.JSONField(default=list, blank=True)
+    certifications = models.JSONField(default=list, blank=True)
+    capability = models.JSONField(default=dict, blank=True)
+    experience = models.JSONField(default=dict, blank=True)
+    declaration = models.JSONField(default=dict, blank=True)
+    audit = models.JSONField(default=list, blank=True)
+    decision_note = models.TextField(blank=True)
+
+    submitted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return self.reference
+
+
+class QualityProfessionalDocument(TimeStampedModel):
+    application = models.ForeignKey(QualityProfessionalApplication, on_delete=models.CASCADE, related_name="documents")
+    document_type = models.CharField(max_length=80)
+    title = models.CharField(max_length=255)
+    file = models.FileField(
+        upload_to="quality/professional-documents/%Y/%m/",
+        validators=[FileExtensionValidator(UPLOAD_EXTENSIONS)],
+    )
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["application", "document_type"], name="unique_quality_professional_document")
+        ]
+
+    @property
+    def original_name(self):
+        return Path(self.file.name).name if self.file else ""

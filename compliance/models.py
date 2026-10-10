@@ -58,6 +58,9 @@ class ComplianceApplication(TimeStampedModel):
     inspection_capability = models.JSONField(default=dict, blank=True)
     conflict_declaration = models.JSONField(default=dict, blank=True)
     declaration = models.JSONField(default=dict, blank=True)
+    # Quality & Control applications answer a different set of sections; see
+    # compliance/quality_sections.py. Empty for every other sector.
+    quality_profile = models.JSONField(default=dict, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.ForeignKey(
