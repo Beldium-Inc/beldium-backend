@@ -99,6 +99,21 @@ class ReviewWorkflowTests(APITestCase):
         self.assertEqual(self.client.post(self.url('review-document', upload.data['id']), {'status': 'verified'}).status_code, 200)
         self.assertEqual(self.client.post(self.url('decide'), {'status': 'verified'}).status_code, 200)
 
+    def test_requested_document_can_be_verified_without_a_resubmission(self):
+        requested = self.client.post(self.url('request-document'), {'document_type': 'insurance', 'title': 'Insurance', 'due_date': self.deadline})
+        self.assertEqual(requested.status_code, 201, requested.data)
+        self.client.force_authenticate(self.owner)
+        # The applicant answers the request by uploading, and nothing else.
+        upload = self.client.post(self.url('documents'), {'document_type': 'insurance', 'file': self.upload()}, format='multipart')
+        self.assertEqual(upload.status_code, 200, upload.data)
+        self.client.force_authenticate(self.staff)
+        self.assertEqual(self.client.post(self.url('decide'), {'status': 'verified'}).data['error']['code'], 'documents_not_verified')
+        self.assertEqual(self.client.post(self.url('review-document', upload.data['id']), {'status': 'verified'}).status_code, 200)
+        decided = self.client.post(self.url('decide'), {'status': 'verified'})
+        self.assertEqual(decided.status_code, 200, decided.data)
+        self.org.refresh_from_db()
+        self.assertEqual(self.org.verification_status, 'verified')
+
     def test_rerequesting_a_document_preserves_the_old_file(self):
         doc = self.app.documents.first()
         old_name = doc.file.name

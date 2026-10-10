@@ -255,6 +255,9 @@ class LogisticsDocument(TimeStampedModel):
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='+')
     reviewed_at = models.DateTimeField(null=True, blank=True)
     review_notes = models.TextField(blank=True)
+    # Read off the file at upload (logistics.metadata) and shown to reviewers only.
+    file_metadata = models.JSONField(default=dict, blank=True)
+    review_tags = models.JSONField(default=list, blank=True)
 
     class Meta:
         constraints = [

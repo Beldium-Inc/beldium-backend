@@ -249,10 +249,10 @@ class DocumentRecordSerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentRecord
         fields = [
-            "id", "site", "name", "category", "expires_on", "status",
+            "id", "site", "name", "category", "expires_on", "status", "replaces",
             "file", "file_url", "original_name", "uploaded_by_name", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "status", "file_url", "original_name", "uploaded_by_name", "created_at", "updated_at"]
+        read_only_fields = ["id", "status", "replaces", "file_url", "original_name", "uploaded_by_name", "created_at", "updated_at"]
         extra_kwargs = {"file": {"write_only": True, "required": False}}
 
     def validate_file(self, value):
@@ -457,6 +457,7 @@ class PendingReviewSerializer(serializers.ModelSerializer):
 
 class InfoRequestSerializer(serializers.ModelSerializer):
     site_name = serializers.CharField(source="site.name", read_only=True)
+    document_name = serializers.CharField(source="document.name", read_only=True, default="")
     requested_by_name = serializers.SerializerMethodField()
     response_by_name = serializers.SerializerMethodField()
     response_documents = serializers.SerializerMethodField()
@@ -464,14 +465,22 @@ class InfoRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = InfoRequest
         fields = [
-            "id", "site", "site_name", "section", "subject", "details", "requested_by_name",
-            "due_by", "priority", "status", "response_message", "response_by_name", "response_at",
-            "response_attachments", "response_documents", "created_at", "updated_at",
-        ]
-        read_only_fields = [
-            "id", "site_name", "requested_by_name", "status", "response_message", "response_by_name",
+            "id", "site", "site_name", "section", "document", "document_name", "subject", "details",
+            "requested_by_name", "due_by", "priority", "status", "response_message", "response_by_name",
             "response_at", "response_attachments", "response_documents", "created_at", "updated_at",
         ]
+        read_only_fields = [
+            "id", "site_name", "document_name", "requested_by_name", "status", "response_message",
+            "response_by_name", "response_at", "response_attachments", "response_documents",
+            "created_at", "updated_at",
+        ]
+
+    def validate(self, attrs):
+        document = attrs.get("document")
+        site = attrs.get("site") or getattr(self.instance, "site", None)
+        if document and site and document.site.organisation_id != site.organisation_id:
+            raise serializers.ValidationError({"document": "That document belongs to another organisation."})
+        return attrs
 
     def get_requested_by_name(self, obj) -> str:
         return actor_name(obj.requested_by)
@@ -492,6 +501,18 @@ class InfoRequestSerializer(serializers.ModelSerializer):
             return []
         documents = DocumentRecord.objects.filter(id__in=[i for i in ids if i]).select_related("uploaded_by")
         return DocumentRecordSerializer(documents, many=True, context=self.context).data
+
+
+class DocumentReviewSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=["verified", "rejected"])
+    notes = serializers.CharField(max_length=2000, required=False, allow_blank=True, default="")
+
+
+class DocumentReplacementSerializer(serializers.Serializer):
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        return validate_upload(value)
 
 
 class InfoRequestResponseSerializer(serializers.Serializer):

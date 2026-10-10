@@ -6,7 +6,7 @@ from django.utils import timezone
 from accounts.audit import record_account_event
 from accounts.models import User
 from common.exceptions import ConflictError
-from logistics import models as m
+from logistics import metadata, models as m
 
 EDITABLE = {'draft', 'awaiting_information', 'rejected'}
 REVIEWABLE = {'under_review', 'awaiting_information', 'conditionally_approved'}
@@ -20,7 +20,9 @@ def notify(company, title, body):
     recipients = User.objects.filter(is_active=True).filter(
         Q(is_staff=True) |
         Q(organisation_memberships__organisation=company.organisation, organisation_memberships__is_active=True) |
-        Q(logisticsaccessgrant__company=company, logisticsaccessgrant__is_active=True)
+        Q(logisticsaccessgrant__company=company, logisticsaccessgrant__is_active=True) |
+        # The desk reviewer who claimed it holds no grant, but is the one waiting.
+        Q(logistics_reviews__company=company)
     ).distinct()
     m.Notification.objects.bulk_create([m.Notification(company=company, recipient=user, title=title, body=body) for user in recipients])
 
@@ -28,6 +30,24 @@ def notify(company, title, body):
 def assert_state(application, states):
     if application.status not in states:
         raise ConflictError(f'This action is unavailable while the application is {application.status}.', code='invalid_application_state')
+
+
+def resume_review(application):
+    """Hand the application back to the desk once nothing waits on the applicant.
+
+    A request or a rejected document parks the application on
+    ``awaiting_information``, and a decision is only recorded from
+    ``under_review``. Without this the reviewer accepts the replacement and
+    still cannot decide, because nothing else moves the status back.
+    """
+    if application.status != 'awaiting_information':
+        return
+    if application.requests.exclude(status='accepted').exists():
+        return
+    if application.documents.filter(is_current=True, status='rejected').exists():
+        return
+    application.status = 'under_review'
+    application.save(update_fields=['status', 'updated_at'])
 
 
 def initialise(application):
@@ -42,6 +62,15 @@ def initialise(application):
 
 def valid_documents(application):
     return application.documents.filter(is_current=True).exclude(status='rejected').filter(Q(expires_on__isnull=True) | Q(expires_on__gte=timezone.localdate()))
+
+
+def evidence_checks(application, data):
+    """Reviewer-only advice on an upload, read from the file before it is stored."""
+    found = metadata.inspect(data['file'])
+    duplicates = application.documents.filter(is_current=True, file_metadata__sha256=found['sha256']).exclude(
+        document_type=data['document_type']).values_list('title', flat=True)
+    return {'file_metadata': found,
+            'review_tags': metadata.advise(found, issued_on=data.get('issued_on'), duplicates=list(duplicates))}
 
 
 def progress(application):

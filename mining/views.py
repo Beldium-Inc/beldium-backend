@@ -72,6 +72,7 @@ from mining.serializers import (
     CorrectiveSubmissionSerializer,
     DashboardSerializer,
     DocumentRecordSerializer,
+    DocumentReplacementSerializer,
     EnvRecordSerializer,
     EquipmentSerializer,
     EvidenceSerializer,
@@ -948,15 +949,26 @@ class InfoRequestViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         serializer = InfoRequestResponseSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         attachments = list(info_request.response_attachments or [])
+        # A request raised against a filed document is answered by replacing
+        # that document: the new copy keeps its name, so it is reviewed where
+        # the original was and the original stops counting against the miner.
+        replaced = info_request.document
         for upload in serializer.validated_data["files"]:
-            document = DocumentRecord.objects.create(
-                site=info_request.site,
-                name=f"{info_request.subject} (response)",
-                category="Information request response",
-                file=upload,
-                uploaded_by=request.user,
-            )
+            if replaced is not None:
+                document = verification.file_replacement(replaced, upload, request.user)
+                replaced = document
+            else:
+                document = DocumentRecord.objects.create(
+                    site=info_request.site,
+                    name=f"{info_request.subject} (response)",
+                    category="Information request response",
+                    file=upload,
+                    uploaded_by=request.user,
+                )
             attachments.append({"document_id": str(document.id), "name": document.name, "original_name": upload.name})
+        if replaced is not None and replaced.pk != info_request.document_id:
+            info_request.document = replaced
+            info_request.save(update_fields=["document", "updated_at"])
         message = serializer.validated_data["message"].strip()
         if message or not info_request.response_message:
             info_request.response_message = message
@@ -1044,6 +1056,10 @@ class DocumentRecordViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
     queryset = DocumentRecord.objects.none()
     permission_classes = [IsMiningParticipant]
     parser_classes = [JSONParser, MultiPartParser, FormParser]
+    # A filed document is evidence the desk rules on, so it is never edited or
+    # deleted in place: that would let an unread file keep a verified status,
+    # or make a rejected one disappear. A new copy goes through `replace`.
+    http_method_names = ["get", "post", "head", "options"]
     filterset_fields = ["status", "site", "category"]
     search_fields = ["name", "category"]
     ordering_fields = ["expires_on", "name"]
@@ -1074,10 +1090,64 @@ class DocumentRecordViewSet(MiningViewSetMixin, viewsets.ModelViewSet):
         review_status = request.data.get("status")
         if review_status not in {"verified", "rejected"}:
             raise AppError("status must be verified or rejected.", code="invalid_status")
+        if document.status == DocumentRecord.Status.SUPERSEDED:
+            raise ConflictError("This document has been replaced; review the newer copy.", code="document_superseded")
+        notes = str(request.data.get("notes", "")).strip()[:2000]
         document.status = review_status
         document.save(update_fields=["status", "updated_at"])
-        self.record("document_reviewed", target=document.name, detail=f"Marked {document.get_status_display().lower()}.", document_id=str(document.id), site_id=str(document.site_id or ""))
+        requests = InfoRequest.objects.filter(document=document)
+        if review_status == "verified":
+            # The replacement was what the request asked for; nothing is left open.
+            requests.exclude(status=InfoRequest.Status.CLOSED).update(
+                status=InfoRequest.Status.CLOSED, updated_at=timezone.now()
+            )
+        else:
+            # Rejecting has to reach the miner as something they can act on:
+            # one open request per document, which their reply replaces it through.
+            reopened = requests.exclude(status=InfoRequest.Status.CLOSED)
+            for info_request in reopened:
+                info_request.status = InfoRequest.Status.OPEN
+                if notes:
+                    info_request.details = notes
+                info_request.save(update_fields=["status", "details", "updated_at"])
+            if not reopened:
+                InfoRequest.objects.create(
+                    site=document.site, document=document, requested_by=request.user,
+                    subject=f"Replace: {document.name}"[:255],
+                    details=notes or "This document was not accepted. Upload a corrected copy.",
+                )
+        self.record("document_reviewed", target=document.name, detail=f"Marked {document.get_status_display().lower()}." + (f" {notes}" if notes else ""), document_id=str(document.id), site_id=str(document.site_id or ""))
         return Response(DocumentRecordSerializer(document, context={"request": request}).data)
+
+    @extend_schema(request=DocumentReplacementSerializer, responses=DocumentRecordSerializer)
+    @action(detail=True, methods=["post"], url_path="replace", url_name="replace",
+            parser_classes=[MultiPartParser, FormParser])
+    def replace(self, request, pk=None):
+        """The miner files a new copy of a document, most often a rejected one."""
+        document = self.get_object()
+        if is_operator(request.user) or not owns_site(request.user, document.site):
+            raise PermissionDenied("Only the organisation that filed this document can replace it.")
+        if document.status == DocumentRecord.Status.SUPERSEDED:
+            raise ConflictError("This document has already been replaced.", code="document_superseded")
+        serializer = DocumentReplacementSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        upload = serializer.validated_data["file"]
+        replacement = verification.file_replacement(document, upload, request.user)
+        # An open request for this document is answered by the new copy.
+        for info_request in InfoRequest.objects.filter(document=document).exclude(status=InfoRequest.Status.CLOSED):
+            info_request.document = replacement
+            info_request.status = InfoRequest.Status.RESPONDED
+            info_request.response_by = request.user
+            info_request.response_at = timezone.now()
+            info_request.response_attachments = [
+                *(info_request.response_attachments or []),
+                {"document_id": str(replacement.id), "name": replacement.name, "original_name": upload.name},
+            ]
+            info_request.save(update_fields=[
+                "document", "status", "response_by", "response_at", "response_attachments", "updated_at",
+            ])
+        self.record("document_replaced", target=document.name, document_id=str(replacement.id), site_id=str(document.site_id or ""))
+        return Response(DocumentRecordSerializer(replacement, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(responses={200: OpenApiTypes.BINARY})
     @action(detail=True, methods=["get"], url_path="download", url_name="download")

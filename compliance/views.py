@@ -29,6 +29,10 @@ from compliance.serializers import (
     ProfessionalCapabilitySectionSerializer, InspectionCapabilitySectionSerializer,
     ConflictDeclarationSectionSerializer, DeclarationSectionSerializer,
 )
+from compliance.quality_sections import (
+    QUALITY_DOCUMENTS, QUALITY_DOCUMENT_TITLES, QUALITY_ORGANISATION_TYPES, QUALITY_SECTIONS,
+    is_quality_application, quality_section_serializer,
+)
 from compliance.workflow import require_review, transition
 from common.exceptions import AppError, ConflictError
 from common.files import serve_stored_file
@@ -202,6 +206,67 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     def declaration_section(self, request, pk=None):
         return self._save_section(request, self.get_object(), DeclarationSectionSerializer, "declaration")
 
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
+    @action(
+        detail=True, methods=["patch"],
+        url_path=r"sections/quality-(?P<section>[a-z-]+)", url_name="quality-section",
+    )
+    def quality_section(self, request, pk=None, section=None):
+        """Save one Quality & Control section into `quality_profile`."""
+        if section not in QUALITY_SECTIONS:
+            raise AppError("Unknown Quality & Control section.", code="not_found", status_code=404)
+        application = self.get_object()
+        self._assert_editor(application)
+        self._assert_editable(application)
+        serializer = quality_section_serializer(section)(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data["data"]
+        application.quality_profile = {**application.quality_profile, section: data}
+        fields = ["quality_profile", "updated_at"]
+        if section == "organisation":
+            self._apply_quality_organisation(application, data)
+            fields.append("organisation_profile")
+        application.save(update_fields=fields)
+        self._record(application, "section_saved", section=f"quality {section}")
+        return Response(self.get_serializer(application).data)
+
+    def _apply_quality_organisation(self, application, data):
+        """Write the Q&C organisation details through to the Organisation record."""
+        organisation = application.organisation
+        registers_as = QUALITY_ORGANISATION_TYPES[data["organisation_type"]]
+        # Only the platform may change an organisation's type once it is set
+        # (see organisation_section); a later edit of the Q&C type keeps the
+        # platform type the organisation was registered with.
+        if not organisation.organisation_type or self.request.user.is_staff:
+            organisation.organisation_type = registers_as
+        organisation.name = data["legal_name"]
+        organisation.registration_number = data["registration_number"]
+        organisation.tax_identifier = data["tax_identifier"]
+        organisation.website = data.get("website", "")
+        organisation.address = data["registered_address"]
+        organisation.country = data["country"]
+        organisation.save(update_fields=[
+            "name", "organisation_type", "registration_number", "tax_identifier", "website",
+            "address", "country", "updated_at",
+        ])
+        # Everything that lists applications reads the name from here.
+        application.organisation_profile = {
+            **application.organisation_profile,
+            "name": data["legal_name"],
+            "organisation_type": organisation.organisation_type,
+            "registration_number": data["registration_number"],
+            "tax_identifier": data["tax_identifier"],
+            "website": data.get("website", ""),
+            "registered_address": data["registered_address"],
+            "country": data["country"],
+        }
+
+    def _sync_quality(self, application):
+        """Keep the Quality & Control desk's copy in step once it has the file."""
+        if is_quality_application(application) and application.status != ApplicationStatus.DRAFT:
+            from quality.bridge import sync_partner_application
+            sync_partner_application(application, self.request.user)
+
     @extend_schema(methods=["GET"], responses={status.HTTP_200_OK: PersonnelSerializer(many=True)})
     @extend_schema(methods=["POST"], request=PersonnelSerializer, responses={status.HTTP_201_CREATED: PersonnelSerializer})
     @action(detail=True, methods=["get", "post"], parser_classes=[JSONParser, MultiPartParser, FormParser])
@@ -261,7 +326,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if "file" not in request.FILES:
             raise AppError("A replacement file is required.", code="validation_error")
         document_type = request.data.get("document_type", "")
-        required = dict(REQUIRED_DOCUMENTS)
+        required = QUALITY_DOCUMENT_TITLES if is_quality_application(application) else dict(REQUIRED_DOCUMENTS)
         existing = application.documents.filter(document_type=document_type).first()
         if document_type not in required and not existing:
             raise AppError("This document type has not been requested.", code="unknown_document_type")
@@ -270,6 +335,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         title = required[document_type] if document_type in required else existing.title
         document = serializer.save(application=application, title=title, status=ComplianceDocument.Status.SUBMITTED, review_notes="", reviewed_at=None, reviewed_by=None)
         self._record(application, "document_uploaded", document_type=document.document_type, title=document.title)
+        self._sync_quality(application)
         return Response(ComplianceDocumentSerializer(document, context={"request": request}).data, status=status.HTTP_200_OK if existing else status.HTTP_201_CREATED)
 
     def _serve(self, stored_file, filename):
@@ -324,9 +390,13 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         application = self.get_object()
         existing = {item.document_type: item for item in application.documents.all()}
         requirements = []
-        for key, title in REQUIRED_DOCUMENTS:
+        if is_quality_application(application):
+            checklist = QUALITY_DOCUMENTS
+        else:
+            checklist = [(key, title, True) for key, title in REQUIRED_DOCUMENTS]
+        for key, title, required in checklist:
             document = existing.pop(key, None)
-            requirements.append({"document_type": key, "title": title, "required": True,
+            requirements.append({"document_type": key, "title": title, "required": required,
                                  "status": document.status if document else "not_submitted",
                                  "due_date": document.due_date if document else None})
         requirements.extend({"document_type": doc.document_type, "title": doc.title, "required": True,
@@ -365,6 +435,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
             organisation_id=str(application.organisation_id), application_id=str(application.id),
             percent=progress["percent"], outstanding=progress["outstanding_sections"],
         )
+        self._sync_quality(application)
         return Response(self.get_serializer(application).data)
 
     @extend_schema(request=ApplicationDecisionSerializer, responses=ComplianceApplicationSerializer)

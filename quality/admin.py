@@ -35,3 +35,10 @@ class QualityNonConformityAdmin(admin.ModelAdmin):
     list_display = ["reference", "title", "severity", "status", "raised_at"]
     list_filter = ["status", "severity"]
     search_fields = ["reference", "title", "against"]
+
+
+@admin.register(m.QualityProfessionalApplication)
+class QualityProfessionalApplicationAdmin(admin.ModelAdmin):
+    list_display = ("reference", "applicant", "organisation", "status", "submitted_at")
+    list_filter = ("status",)
+    search_fields = ("reference", "applicant__email")

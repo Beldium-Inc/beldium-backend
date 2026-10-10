@@ -258,3 +258,108 @@ class QualityNotificationSerializer(serializers.ModelSerializer):
         model = m.QualityNotification
         fields = ["id", "title", "body", "event", "read_at", "created_at", "sample", "application", "certificate", "non_conformity"]
         read_only_fields = fields
+
+
+# --- professional applications ------------------------------------------------
+
+# (document_type, title, required)
+PROFESSIONAL_DOCUMENTS = (
+    ("professional_qualifications", "Professional Qualifications", True),
+    ("inspection_credentials", "Inspection Credentials", True),
+    ("sampling_credentials", "Sampling Credentials", False),
+    ("professional_certifications", "Professional Certifications", False),
+    ("other_supporting_documents", "Other Supporting Documents", False),
+)
+
+
+class _JSONDateField(serializers.DateField):
+    """A date that ends up in a JSONField, so it is handed on as an ISO string."""
+
+    def to_internal_value(self, value):
+        return super().to_internal_value(value).isoformat()
+
+
+class ProfessionalPersonalSerializer(serializers.Serializer):
+    full_legal_name = serializers.CharField(max_length=200)
+    date_of_birth = _JSONDateField()
+    national_id = serializers.CharField(max_length=50)
+    job_title = serializers.CharField(max_length=150)
+    base_city = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+
+
+class ProfessionalQualificationSerializer(serializers.Serializer):
+    qualification = serializers.CharField(max_length=255)
+    institution = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    year = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
+
+
+class ProfessionalCertificationSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    certificate_number = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    expiry = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
+
+
+class ProfessionalCapabilitySerializer(serializers.Serializer):
+    capabilities = serializers.ListField(child=serializers.CharField(max_length=150), allow_empty=False)
+    minerals = serializers.ListField(child=serializers.CharField(max_length=150), allow_empty=False)
+
+
+class ProfessionalExperienceSerializer(serializers.Serializer):
+    years_experience = serializers.IntegerField(min_value=0, max_value=80)
+    previous_employer = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
+    summary = serializers.CharField()
+
+
+class ProfessionalDeclarationSerializer(serializers.Serializer):
+    information_true = serializers.BooleanField()
+    consent_to_verification = serializers.BooleanField()
+    understands_verification = serializers.BooleanField()
+    signature = serializers.CharField(max_length=200)
+
+    def validate(self, attrs):
+        confirmations = ["information_true", "consent_to_verification", "understands_verification"]
+        rejected = [field for field in confirmations if not attrs[field]]
+        if rejected:
+            raise serializers.ValidationError({field: ["This declaration must be accepted."] for field in rejected})
+        return attrs
+
+
+class ProfessionalApplicationInputSerializer(serializers.Serializer):
+    organisation = serializers.UUIDField()
+    role = serializers.ChoiceField(choices=["officer_inspector"], default="officer_inspector")
+    personal = ProfessionalPersonalSerializer()
+    qualifications = ProfessionalQualificationSerializer(many=True, required=False, default=list)
+    certifications = ProfessionalCertificationSerializer(many=True, required=False, default=list)
+    capability = ProfessionalCapabilitySerializer()
+    experience = ProfessionalExperienceSerializer()
+    declaration = ProfessionalDeclarationSerializer()
+
+
+class QualityProfessionalDocumentSerializer(serializers.ModelSerializer):
+    original_name = serializers.CharField(read_only=True)
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.QualityProfessionalDocument
+        fields = ["id", "document_type", "title", "original_name", "file_url", "created_at"]
+
+    @extend_schema_field(OpenApiTypes.URI)
+    def get_file_url(self, obj):
+        url = reverse("quality-professional-application-document-download", args=[obj.application_id, obj.id])
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
+
+
+class QualityProfessionalApplicationSerializer(serializers.ModelSerializer):
+    documents = QualityProfessionalDocumentSerializer(many=True, read_only=True)
+    applicant_email = serializers.EmailField(source="applicant.email", read_only=True)
+    organisation_name = serializers.CharField(source="organisation.name", read_only=True, default="")
+
+    class Meta:
+        model = m.QualityProfessionalApplication
+        fields = [
+            "id", "reference", "status", "role", "applicant_email", "organisation", "organisation_name",
+            "personal", "qualifications", "certifications", "capability", "experience", "declaration",
+            "documents", "audit", "decision_note", "submitted_at", "created_at", "updated_at",
+        ]
+        read_only_fields = fields

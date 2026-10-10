@@ -268,10 +268,17 @@ class DocumentRecord(TimeStampedModel):
         VERIFIED = "verified", "Verified"
         REJECTED = "rejected", "Rejected"
         EXPIRED = "expired", "Expired"
+        # The miner filed a newer copy. Kept for the record, but it no longer
+        # counts for or against verification: the replacement is what is judged.
+        SUPERSEDED = "superseded", "Replaced"
 
     site = models.ForeignKey(MineSite, on_delete=models.CASCADE, related_name="documents")
     name = models.CharField(max_length=255)
     category = models.CharField(max_length=150, blank=True)
+    replaces = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True, related_name="replacements",
+        help_text="The earlier copy this one was filed to replace.",
+    )
     expires_on = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True)
     file = models.FileField(
@@ -618,6 +625,10 @@ class InfoRequest(TimeStampedModel):
 
     site = models.ForeignKey(MineSite, on_delete=models.CASCADE, related_name="info_requests")
     section = models.CharField(max_length=20, blank=True, help_text="A SectionKey, or blank for 'general'.")
+    document = models.ForeignKey(
+        "DocumentRecord", on_delete=models.SET_NULL, null=True, blank=True, related_name="info_requests",
+        help_text="The filed document this request asks the miner to replace, if any.",
+    )
     subject = models.CharField(max_length=255)
     details = models.TextField(blank=True)
     requested_by = models.ForeignKey(

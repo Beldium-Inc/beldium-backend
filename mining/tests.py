@@ -619,6 +619,122 @@ class ApplicationDecisionTests(MiningTestCase):
         self.site.refresh_from_db()
         self.assertEqual(self.site.status, SiteStatus.OPERATIONAL)
 
+    def _pdf(self, name="cac-corrected.pdf"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+
+        return SimpleUploadedFile(name, b"%PDF-1.4 corrected", content_type="application/pdf")
+
+    def review_url(self, document_id):
+        return reverse("mining-document-review", args=[document_id])
+
+    def test_rejected_document_stops_blocking_once_its_replacement_is_verified(self):
+        from mining.models import DocumentRecord, InfoRequest
+
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        response = self.client.post(self.review_url(self.document.id), {"status": "rejected", "notes": "Scan is unreadable."})
+        self.assertEqual(response.status_code, 200, response.data)
+        # The rejection reaches the miner as a request tied to that document.
+        info_request = InfoRequest.objects.get(document=self.document)
+        self.assertEqual(info_request.status, InfoRequest.Status.OPEN)
+        self.assertEqual(info_request.details, "Scan is unreadable.")
+        self.assertEqual(self.client.post(self.verify_org_url()).status_code, 409)
+
+        self.client.force_authenticate(self.miner)
+        response = self.client.post(
+            reverse("mining-info-request-respond", args=[info_request.id]),
+            {"message": "Clean scan attached", "files": [self._pdf()]}, format="multipart",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, DocumentRecord.Status.SUPERSEDED)
+        replacement = DocumentRecord.objects.get(replaces=self.document)
+        # Same name, so it is still an organisation paper and reviewed as one.
+        self.assertEqual(replacement.name, self.document.name)
+        self.assertEqual(replacement.status, DocumentRecord.Status.PENDING)
+
+        self.client.force_authenticate(self.operator)
+        # A pending replacement still holds the organisation back...
+        self.assertEqual(self.client.post(self.verify_org_url()).status_code, 409)
+        # ...the retired original cannot be reviewed again...
+        self.assertEqual(self.client.post(self.review_url(self.document.id), {"status": "verified"}).status_code, 409)
+        # ...and accepting the replacement is all it takes.
+        self.assertEqual(self.client.post(self.review_url(replacement.id), {"status": "verified"}).status_code, 200)
+        info_request.refresh_from_db()
+        self.assertEqual(info_request.status, InfoRequest.Status.CLOSED)
+        response = self.client.post(self.verify_org_url())
+        self.assertEqual(response.status_code, 200, response.data)
+        self.miner_org.refresh_from_db()
+        self.assertEqual(self.miner_org.verification_status, "verified")
+
+    def test_rejecting_a_replacement_reopens_the_same_request(self):
+        from mining.models import DocumentRecord, InfoRequest
+
+        self.client.post(reverse("mining-application-claim", args=[self.application.id]))
+        self.client.post(self.review_url(self.document.id), {"status": "rejected"})
+        info_request = InfoRequest.objects.get(document=self.document)
+        self.client.force_authenticate(self.miner)
+        self.client.post(
+            reverse("mining-info-request-respond", args=[info_request.id]), {"files": [self._pdf()]}, format="multipart",
+        )
+        replacement = DocumentRecord.objects.get(replaces=self.document)
+
+        self.client.force_authenticate(self.operator)
+        self.client.post(self.review_url(replacement.id), {"status": "rejected", "notes": "Wrong company."})
+        self.assertEqual(InfoRequest.objects.count(), 1)
+        info_request.refresh_from_db()
+        self.assertEqual(info_request.status, InfoRequest.Status.OPEN)
+        self.assertEqual(info_request.document_id, replacement.id)
+        self.assertEqual(info_request.details, "Wrong company.")
+
+    def test_miner_replaces_a_rejected_document_directly(self):
+        from mining.models import DocumentRecord, InfoRequest
+
+        self.document.status = "rejected"
+        self.document.save()
+        info_request = InfoRequest.objects.create(site=self.site, document=self.document, subject="Replace it")
+        replace_url = reverse("mining-document-replace", args=[self.document.id])
+
+        # The desk reviews documents; it does not file them.
+        self.assertEqual(self.client.post(replace_url, {"file": self._pdf()}, format="multipart").status_code, 403)
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.post(replace_url, {"file": self._pdf()}, format="multipart").status_code, 404)
+
+        self.client.force_authenticate(self.miner)
+        response = self.client.post(replace_url, {"file": self._pdf()}, format="multipart")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["replaces"], self.document.id)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.status, DocumentRecord.Status.SUPERSEDED)
+        info_request.refresh_from_db()
+        self.assertEqual(info_request.status, InfoRequest.Status.RESPONDED)
+        # Replacing twice would leave two live copies of one paper.
+        self.assertEqual(self.client.post(replace_url, {"file": self._pdf()}, format="multipart").status_code, 409)
+
+    def test_filed_document_cannot_be_edited_or_deleted_around_the_review(self):
+        from mining.models import DocumentRecord
+
+        self.document.status = "verified"
+        self.document.save()
+        old_file = self.document.file.name
+        detail = reverse("mining-document-detail", args=[self.document.id])
+
+        # Swapping the file on a verified document would leave an unread file
+        # counting as verified; deleting a rejected one would lift its block.
+        for user in (self.miner, self.operator):
+            self.client.force_authenticate(user)
+            self.assertEqual(self.client.patch(detail, {"file": self._pdf()}, format="multipart").status_code, 405)
+            self.assertEqual(self.client.patch(detail, {"name": "Tax clearance certificate"}, format="json").status_code, 405)
+            self.assertEqual(self.client.put(detail, {"site": str(self.site.id), "name": "x"}, format="json").status_code, 405)
+            self.assertEqual(self.client.delete(detail).status_code, 405)
+
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.file.name, old_file)
+        self.assertEqual(self.document.name, "Certificate of incorporation")
+        self.assertEqual(self.document.status, DocumentRecord.Status.VERIFIED)
+        # Reading and filing are untouched.
+        self.client.force_authenticate(self.miner)
+        self.assertEqual(self.client.get(detail).status_code, 200)
+
     def test_new_application_reaches_the_desk_bell_and_inbox(self):
         from django.core import mail
         from organisations.models import Organisation

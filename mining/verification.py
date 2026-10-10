@@ -20,10 +20,33 @@ def is_organisation_document(document):
 
 
 def filed_documents(organisation):
+    """The documents verification is judged on.
+
+    A copy the miner has since replaced is left out: once the desk rejects a
+    document and accepts its replacement, the rejected original must not go on
+    holding the organisation back.
+    """
     return [
         d
-        for d in DocumentRecord.objects.filter(site__organisation=organisation).exclude(file="")
+        for d in DocumentRecord.objects.filter(site__organisation=organisation)
+        .exclude(file="")
+        .exclude(status=DocumentRecord.Status.SUPERSEDED)
     ]
+
+
+def file_replacement(document, upload, user):
+    """File ``upload`` as the new copy of ``document`` and retire the old one.
+
+    The replacement keeps the original's name and category, so it is reviewed
+    in the same stage (organisation or site) and under the same heading.
+    """
+    replacement = DocumentRecord.objects.create(
+        site=document.site, name=document.name, category=document.category,
+        file=upload, uploaded_by=user, replaces=document,
+    )
+    document.status = DocumentRecord.Status.SUPERSEDED
+    document.save(update_fields=["status", "updated_at"])
+    return replacement
 
 
 def split_documents(organisation):

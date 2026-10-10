@@ -21,7 +21,7 @@ from accounts.models import AccountAuditEvent
 from organisations.models import OrganisationMembership
 from common.exceptions import ConflictError
 from logistics import models as m, serializers as s, services
-from logistics.permissions import company_ids, can_review, can_edit, assert_editor, assert_reviewer, can_see_driver_details, EDIT_ROLES
+from logistics.permissions import company_ids, can_review, can_edit, assert_editor, assert_reviewer, is_desk, EDIT_ROLES
 
 
 class AtomicViewSet(viewsets.GenericViewSet):
@@ -133,7 +133,7 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
     filterset_fields = ['company', 'status', 'reviewer']
 
     def get_queryset(self):
-        return m.LogisticsApplication.objects.filter(company_id__in=company_ids(self.request.user)).select_related('company__organisation', 'created_by').prefetch_related('sections', 'conditions')
+        return m.LogisticsApplication.objects.filter(company_id__in=company_ids(self.request.user)).select_related('company__organisation', 'created_by', 'reviewer').prefetch_related('sections', 'conditions')
 
     def perform_create(self, serializer):
         company = serializer.validated_data['company']
@@ -169,7 +169,11 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
         payload.is_valid(raise_exception=True)
         reviewer = payload.validated_data['reviewer']
         if not can_review(reviewer, application.company):
-            raise PermissionDenied('The selected user has no review grant for this company.')
+            raise PermissionDenied('The selected user has no review authority for this company.')
+        # The whole desk can see this application, so a claim has to hold:
+        # only the current reviewer hands it on, and only staff take it away.
+        if not request.user.is_staff and application.reviewer_id and application.reviewer_id != request.user.pk:
+            raise ConflictError('This application has already been claimed by another reviewer.', code='already_claimed')
         application.reviewer = reviewer
         application.save(update_fields=['reviewer', 'updated_at'])
         services.audit(request, application.company, 'reviewer_assigned', reviewer_id=str(reviewer.pk))
@@ -250,6 +254,7 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
             previous.save(update_fields=['is_current'])
         document = payload.save(application=application, uploaded_by=request.user,
                                 original_name=Path(data['file'].name).name,
+                                **services.evidence_checks(application, data),
                                 version=previous.version + 1 if previous else 1)
         application.sections.filter(key=document.domain).update(status='pending', score=0, reviewed_at=None, reviewed_by=None)
         if application.status == 'approved':
@@ -335,10 +340,16 @@ def add_condition(application, data, request):
 
 
 def visible_documents(user, queryset):
-    if user.is_staff:
+    if user.is_staff or is_desk(user):
         return queryset
-    private_ids = [company.pk for company in m.LogisticsCompany.objects.filter(pk__in=company_ids(user)) if can_see_driver_details(user, company)]
-    return queryset.filter(Q(application__company_id__in=private_ids) | (~Q(domain='driver') & Q(driver__isnull=True)))
+    # Driver evidence stays with the company's own administrators and its
+    # reviewers; a regulator reads the register without it.
+    private = m.LogisticsCompany.objects.filter(
+        Q(access_grants__user=user, access_grants__role='reviewer', access_grants__is_active=True) |
+        Q(organisation__memberships__user=user, organisation__memberships__is_active=True,
+          organisation__memberships__role__in=EDIT_ROLES)
+    ).values('pk')
+    return queryset.filter(Q(application__company_id__in=private) | (~Q(domain='driver') & Q(driver__isnull=True)))
 
 
 ACTIVE_MOVEMENT_STATUSES = {'assigned', 'loading', 'in_transit', 'delayed'}
@@ -453,6 +464,8 @@ class DocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicVi
             if application.status != 'conditionally_approved':
                 application.status = 'awaiting_information'
                 application.save(update_fields=['status', 'updated_at'])
+        else:
+            services.resume_review(application)
         services.audit(request, application.company, 'document_reviewed', document_id=str(document.pk), verdict=document.status)
         return Response(self.get_serializer(document).data)
 
@@ -524,6 +537,8 @@ class RequestViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicVie
         item.status = 'accepted' if payload.validated_data['accepted'] else 'open'
         item.review_notes = payload.validated_data['notes']
         item.save(update_fields=['status', 'review_notes', 'updated_at'])
+        if item.status == 'accepted':
+            services.resume_review(application)
         services.audit(request, application.company, 'request_response_reviewed', request_id=str(item.pk), verdict=item.status)
         return Response(self.get_serializer(item).data)
 
@@ -565,6 +580,7 @@ class ConditionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicV
         document = payload.save(application=application, condition=condition, uploaded_by=request.user,
                                 service_scope=condition.service_scope,
                                 original_name=Path(data['file'].name).name,
+                                **services.evidence_checks(application, data),
                                 version=previous.version + 1 if previous else 1)
         application.sections.filter(key=document.domain).update(status='pending', score=0, reviewed_at=None, reviewed_by=None)
         services.audit(request, application.company, 'condition_evidence_uploaded', condition_id=str(condition.pk), document_id=str(document.pk), version=document.version)
