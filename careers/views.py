@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from careers import tasks
-from careers.models import REQUIRED_PARTNER_DOCUMENTS, PartnerApplication, PartnerDocument
+from careers.models import PARTNER_DOCUMENT_REQUIREMENTS, PartnerApplication, PartnerDocument
 from careers.serializers import (
     ApplicationSerializer,
     PartnerApplicationCreateSerializer,
@@ -82,7 +82,10 @@ class PartnerApplicationCreateView(PublicCareersView):
         return Response(
             {
                 "application_id": application.application_id,
+                "sector": application.sector,
                 "status": application.status,
+                "required_documents": list(PARTNER_DOCUMENT_REQUIREMENTS[application.sector]["required"]),
+                "optional_documents": list(PARTNER_DOCUMENT_REQUIREMENTS[application.sector]["optional"]),
                 "upload_token": signing.dumps(application.application_id, salt=UPLOAD_TOKEN_SALT),
             },
             status=status.HTTP_201_CREATED,
@@ -119,7 +122,7 @@ class PartnerDocumentUploadView(PartnerApplicationDraftView):
     @transaction.atomic
     def post(self, request, application_id):
         application = self.get_draft(request, application_id)
-        serializer = PartnerDocumentUploadSerializer(data=request.data)
+        serializer = PartnerDocumentUploadSerializer(data=request.data, context={"application": application})
         serializer.is_valid(raise_exception=True)
         key = serializer.validated_data["key"]
         # A retried upload replaces the earlier attempt rather than stacking up.
@@ -135,7 +138,8 @@ class PartnerApplicationSubmitView(PartnerApplicationDraftView):
     def post(self, request, application_id):
         application = self.get_draft(request, application_id)
         uploaded = set(application.documents.values_list("key", flat=True))
-        missing = [key for key in REQUIRED_PARTNER_DOCUMENTS if key not in uploaded]
+        required_documents = PARTNER_DOCUMENT_REQUIREMENTS[application.sector]["required"]
+        missing = [key for key in required_documents if key not in uploaded]
         if missing:
             raise AppError(
                 "Upload every required document before submitting.",

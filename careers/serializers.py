@@ -6,6 +6,8 @@ from rest_framework import serializers
 from careers.models import (
     PARTNER_AGREEMENT_KEYS,
     PARTNER_DOCUMENT_KEYS,
+    PARTNER_DOCUMENT_REQUIREMENTS,
+    PARTNER_SECTOR_CHOICES,
     Application,
     PartnerApplication,
 )
@@ -99,6 +101,7 @@ class AgreementSerializer(serializers.Serializer):
 
 
 class PartnerApplicationCreateSerializer(serializers.Serializer):
+    sector = serializers.ChoiceField(choices=PARTNER_SECTOR_CHOICES, default="logistics")
     company = CompanySerializer()
     agreements = AgreementSerializer(many=True)
 
@@ -111,6 +114,7 @@ class PartnerApplicationCreateSerializer(serializers.Serializer):
         # The signing time is ours, not the browser's clock.
         signed_at = timezone.now().isoformat()
         return PartnerApplication.objects.create(
+            sector=validated_data["sector"],
             company=dict(validated_data["company"]),
             agreements=[{**item, "signedAt": signed_at} for item in validated_data["agreements"]],
         )
@@ -120,11 +124,29 @@ class PartnerDocumentUploadSerializer(serializers.Serializer):
     key = serializers.ChoiceField(choices=PARTNER_DOCUMENT_KEYS)
     file = serializers.FileField()
 
+    def validate_key(self, key):
+        application = self.context.get("application")
+        if application:
+            requirement = PARTNER_DOCUMENT_REQUIREMENTS[application.sector]
+            allowed = {*requirement["required"], *requirement["optional"]}
+            if key not in allowed:
+                raise serializers.ValidationError("This document is not accepted for the selected sector.")
+        return key
+
     def validate_file(self, file):
         return validate_upload(file, extensions=PARTNER_DOCUMENT_EXTENSIONS, max_mb=PARTNER_DOCUMENT_MAX_MB)
 
 
 class PartnerApplicationStatusSerializer(serializers.ModelSerializer):
+    required_documents = serializers.SerializerMethodField()
+    optional_documents = serializers.SerializerMethodField()
+
     class Meta:
         model = PartnerApplication
-        fields = ["application_id", "status"]
+        fields = ["application_id", "sector", "status", "required_documents", "optional_documents"]
+
+    def get_required_documents(self, application):
+        return list(PARTNER_DOCUMENT_REQUIREMENTS[application.sector]["required"])
+
+    def get_optional_documents(self, application):
+        return list(PARTNER_DOCUMENT_REQUIREMENTS[application.sector]["optional"])
