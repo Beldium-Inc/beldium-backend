@@ -31,11 +31,11 @@ class PartnerDocumentInline(admin.TabularInline):
 
 @admin.register(models.PartnerApplication)
 class PartnerApplicationAdmin(SubmissionAdmin):
-    list_display = ["application_id", "company_name", "status", "submitted_at"]
-    list_filter = ["status"]
+    list_display = ["application_id", "sector", "company_name", "status", "submitted_at"]
+    list_filter = ["sector", "status"]
     search_fields = ["application_id", "company"]
     # Status is the one thing staff change: applicants see it on the tracker.
-    readonly_fields = ["application_id", "company", "agreements", "submitted_at", "created_at"]
+    readonly_fields = ["application_id", "sector", "company", "agreements", "submitted_at", "created_at"]
     inlines = [PartnerDocumentInline]
 
     @admin.display(description="Company")

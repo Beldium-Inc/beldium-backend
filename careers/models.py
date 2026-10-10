@@ -10,12 +10,124 @@ from common.models import TimeStampedModel
 REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 PATHWAY_CODES = {"internship": "INT", "volunteer": "VOL", "partnership": "PAR"}
 
-REQUIRED_PARTNER_DOCUMENTS = ("cacCertificate", "tinCertificate", "representativeId", "bankConfirmation")
-OPTIONAL_PARTNER_DOCUMENTS = (
-    "companyProfile", "goodsInTransitInsurance", "vehicleInsurance", "roadWorthiness", "fleetList",
-    "driversLicence", "hseDocument", "isoCertifications", "priorExperience", "clientReferences",
+PARTNER_SECTOR_CODES = {"logistics": "LOG", "warehousing": "WHS"}
+PARTNER_SECTOR_CHOICES = tuple((key, key.replace("_", " ").title()) for key in PARTNER_SECTOR_CODES)
+
+LOGISTICS_REQUIRED_PARTNER_DOCUMENTS = (
+    "cacCertificate",
+    "tinCertificate",
+    "companyProfile",
+    "registeredBusinessAddress",
+    "representativeId",
 )
-PARTNER_DOCUMENT_KEYS = REQUIRED_PARTNER_DOCUMENTS + OPTIONAL_PARTNER_DOCUMENTS
+LOGISTICS_OPTIONAL_PARTNER_DOCUMENTS = (
+    "authorisationLetter",
+    "taxClearanceCertificate",
+    "transportOperatingPermit",
+    "frscRtsssCertification",
+    "fleetRegister",
+    "fleetSafetyPolicy",
+    "safetyManagerDetails",
+    "driverTrainingRecords",
+    "fleetInspectionRecords",
+    "vehicleMaintenanceRecords",
+    "speedLimiterEvidence",
+    "vehicleRegistrationCertificate",
+    "vehicleOwnershipEvidence",
+    "roadWorthiness",
+    "vehicleInsurance",
+    "vehicleInspectionReport",
+    "commercialVehiclePermit",
+    "gpsTelematicsEvidence",
+    "vehiclePhotographsCapacityEvidence",
+    "trailerDocuments",
+    "driversLicence",
+    "driverIdentification",
+    "driverPhotograph",
+    "driverEngagementEvidence",
+    "heavyVehicleTrainingCertificate",
+    "safetyTrainingRecords",
+    "medicalFitnessEvidence",
+    "driverCompetencyAssessment",
+    "goodsInTransitInsurance",
+    "carrierLiabilityInsurance",
+    "publicLiabilityInsurance",
+    "employeeCompensationInsurance",
+    "shipmentCargoInsurance",
+    "hsePolicy",
+    "transportSafetyPolicy",
+    "journeyManagementProcedure",
+    "emergencyResponseProcedure",
+    "incidentReportingProcedure",
+    "vehicleMaintenanceProcedure",
+    "driverManagementProcedure",
+    "cargoLoadingSecuringProcedure",
+    "mineralHandlingProcedure",
+    "securityCargoProtectionProcedure",
+    "sampleHandlingProcedure",
+    "chainOfCustodyProcedure",
+    "correctiveActionRecords",
+    "mineralSourceDeclaration",
+    "miningLicenceSourceAuthorisation",
+    "mineralBatchIdentification",
+    "transportOrderWaybill",
+    "materialDispatchNote",
+    "loadingWeighbridgeTicket",
+    "qualityCertificateAssayReport",
+    "commercialInvoiceTransferRecord",
+    "mineralMovementAuthorisation",
+    "deliveryNote",
+    "proofOfDelivery",
+    "receivingWeighbridgeRecord",
+    "chainOfCustodyRecord",
+    # Legacy key accepted for existing frontend builds and staff email labels.
+    "bankConfirmation",
+)
+
+WAREHOUSING_REQUIRED_PARTNER_DOCUMENTS = (
+    "cacCertificate",
+    "tinCertificate",
+    "companyProfile",
+    "registeredBusinessAddress",
+    "representativeId",
+)
+WAREHOUSING_OPTIONAL_PARTNER_DOCUMENTS = (
+    "authorisationLetter",
+    "taxClearanceCertificate",
+    "warehouseOperatingPermit",
+    "facilityLeaseOrOwnership",
+    "facilityLayoutPlan",
+    "storageCapacityEvidence",
+    "fireSafetyCertificate",
+    "environmentalPermit",
+    "hsePolicy",
+    "securityProcedure",
+    "inventoryManagementProcedure",
+    "weighbridgeCalibrationCertificate",
+    "insuranceCertificate",
+    "publicLiabilityInsurance",
+    "employeeCompensationInsurance",
+    "priorExperience",
+    "clientReferences",
+    "bankConfirmation",
+)
+
+PARTNER_DOCUMENT_REQUIREMENTS = {
+    "logistics": {
+        "required": LOGISTICS_REQUIRED_PARTNER_DOCUMENTS,
+        "optional": LOGISTICS_OPTIONAL_PARTNER_DOCUMENTS,
+    },
+    "warehousing": {
+        "required": WAREHOUSING_REQUIRED_PARTNER_DOCUMENTS,
+        "optional": WAREHOUSING_OPTIONAL_PARTNER_DOCUMENTS,
+    },
+}
+REQUIRED_PARTNER_DOCUMENTS = LOGISTICS_REQUIRED_PARTNER_DOCUMENTS
+PARTNER_DOCUMENT_KEYS = tuple(dict.fromkeys(
+    key
+    for requirement in PARTNER_DOCUMENT_REQUIREMENTS.values()
+    for key in (*requirement["required"], *requirement["optional"])
+))
 PARTNER_AGREEMENT_KEYS = ("partnerAgreement", "codeOfConduct", "dataPrivacyAgreement", "serviceLevelAgreement")
 
 
@@ -95,6 +207,7 @@ class PartnerApplication(TimeStampedModel):
         DASHBOARD_ACTIVE = "dashboard_active", "Dashboard active"
 
     application_id = models.CharField(max_length=20, unique=True, editable=False)
+    sector = models.CharField(max_length=30, choices=PARTNER_SECTOR_CHOICES, default="logistics", db_index=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT, db_index=True)
     company = models.JSONField()
     agreements = models.JSONField(default=list)
@@ -108,7 +221,7 @@ class PartnerApplication(TimeStampedModel):
 
     def save(self, *args, **kwargs):
         if not self.application_id:
-            self.application_id = random_reference("BLD-LOG")
+            self.application_id = random_reference(f"BLD-{PARTNER_SECTOR_CODES[self.sector]}")
         super().save(*args, **kwargs)
 
 

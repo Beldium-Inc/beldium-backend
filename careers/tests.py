@@ -116,20 +116,23 @@ class ApplicationTests(CareersTestCase):
 
 
 class PartnerApplicationTests(CareersTestCase):
-    def create(self):
+    def create(self, sector=None):
+        payload = {
+            "company": {
+                "companyName": "Haulage Ltd",
+                "rcNumber": "RC123456",
+                "companyEmail": "ops@haulage.test",
+                "phoneNumber": "08031234567",
+                "businessAddress": "1 Depot Road, Kaduna",
+                "contactPerson": "Musa Bello",
+            },
+            "agreements": [{"key": key, "signedName": "Musa Bello"} for key in PARTNER_AGREEMENT_KEYS],
+        }
+        if sector:
+            payload["sector"] = sector
         response = self.client.post(
             reverse("careers-partner-create"),
-            {
-                "company": {
-                    "companyName": "Haulage Ltd",
-                    "rcNumber": "RC123456",
-                    "companyEmail": "ops@haulage.test",
-                    "phoneNumber": "08031234567",
-                    "businessAddress": "1 Depot Road, Kaduna",
-                    "contactPerson": "Musa Bello",
-                },
-                "agreements": [{"key": key, "signedName": "Musa Bello"} for key in PARTNER_AGREEMENT_KEYS],
-            },
+            payload,
             format="json",
         )
         self.assertEqual(response.status_code, 201, response.data)
@@ -155,7 +158,10 @@ class PartnerApplicationTests(CareersTestCase):
     def test_full_submission(self):
         created = self.create()
         self.assertRegex(created["application_id"], r"^BLD-LOG-[A-Z2-9]{6}$")
+        self.assertEqual(created["sector"], "logistics")
         self.assertEqual(created["status"], "draft")
+        self.assertEqual(created["required_documents"], list(REQUIRED_PARTNER_DOCUMENTS))
+        self.assertIn("fleetRegister", created["optional_documents"])
         # A draft is invisible to the tracker and to staff until it is submitted.
         self.assertEqual(self.status(created).status_code, 404)
         self.assertEqual(mail.outbox, [])
@@ -163,23 +169,44 @@ class PartnerApplicationTests(CareersTestCase):
         for key in REQUIRED_PARTNER_DOCUMENTS:
             self.assertEqual(self.upload(created, key).status_code, 201)
         image = SimpleUploadedFile("fleet.png", PNG, content_type="image/png")
-        self.assertEqual(self.upload(created, "fleetList", image).status_code, 201)
+        self.assertEqual(self.upload(created, "fleetRegister", image).status_code, 201)
 
         with self.captureOnCommitCallbacks(execute=True):
             response = self.submit(created)
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data, {"application_id": created["application_id"], "status": "submitted"})
-        self.assertEqual(self.status(created).data["status"], "submitted")
+        self.assertEqual(response.data["application_id"], created["application_id"])
+        self.assertEqual(response.data["sector"], "logistics")
+        self.assertEqual(response.data["status"], "submitted")
+        tracked = self.status(created).data
+        self.assertEqual(tracked["status"], "submitted")
+        self.assertEqual(tracked["required_documents"], list(REQUIRED_PARTNER_DOCUMENTS))
 
         application = PartnerApplication.objects.get()
         self.assertIsNotNone(application.submitted_at)
-        self.assertEqual(application.documents.count(), 5)
+        self.assertEqual(application.documents.count(), 6)
         self.assertTrue(all(item["signedAt"] for item in application.agreements))
 
         [message] = mail.outbox
         html = message.alternatives[0][0]
         self.assertIn("Haulage Ltd", html)
+        self.assertIn("Logistics", html)
         self.assertIn("Cac Certificate", html)
+
+    def test_warehousing_submission_uses_its_sector_checklist(self):
+        created = self.create("warehousing")
+        self.assertRegex(created["application_id"], r"^BLD-WHS-[A-Z2-9]{6}$")
+        self.assertEqual(created["sector"], "warehousing")
+        self.assertIn("warehouseOperatingPermit", created["optional_documents"])
+        self.assertNotIn("fleetRegister", created["optional_documents"])
+
+        self.assertEqual(self.upload(created, "fleetRegister").status_code, 400)
+        for key in created["required_documents"]:
+            self.assertEqual(self.upload(created, key).status_code, 201)
+        self.assertEqual(self.upload(created, "warehouseOperatingPermit").status_code, 201)
+
+        response = self.submit(created)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["sector"], "warehousing")
 
     def test_submit_needs_every_required_document(self):
         created = self.create()
@@ -227,5 +254,5 @@ class PartnerApplicationTests(CareersTestCase):
         for key in REQUIRED_PARTNER_DOCUMENTS:
             self.upload(created, key)
         self.assertEqual(self.submit(created).status_code, 200)
-        self.assertEqual(self.upload(created, "fleetList").status_code, 400)
+        self.assertEqual(self.upload(created, "fleetRegister").status_code, 400)
         self.assertEqual(self.submit(created).status_code, 400)

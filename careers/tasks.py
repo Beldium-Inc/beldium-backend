@@ -52,13 +52,14 @@ def _application_email(application):
 
 
 def _partner_application_email(application):
-    rows = [(label, application.company.get(key, "")) for key, label in COMPANY_LABELS.items()]
+    rows = [("Sector", application.get_sector_display())]
+    rows.extend((label, application.company.get(key, "")) for key, label in COMPANY_LABELS.items())
     rows.append((
         "Agreements signed",
         "; ".join(f"{item['key']} ({item['signedName']}, {item['signedAt']})" for item in application.agreements),
     ))
     documents = [(humanize(document.key), _filename(document.file)) for document in application.documents.all()]
-    return f"New logistics partner application: {application.application_id}", rows, documents
+    return f"New {application.get_sector_display().lower()} partner application: {application.application_id}", rows, documents
 
 
 @shared_task(name="careers.send_application_notification")
