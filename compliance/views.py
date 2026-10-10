@@ -470,6 +470,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         for condition in new_conditions:
             ApprovalCondition.objects.create(application=application, created_by=request.user, **condition)
         record_account_event(request, "compliance.application_decided", application_id=str(application.id), organisation_id=str(application.organisation_id), status=target)
+        self._sync_quality(application)
         return Response(self.get_serializer(application).data)
 
     @extend_schema(request=RequestedDocumentSerializer, responses=RequestedDocumentSerializer)
@@ -486,6 +487,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if application.status != ApplicationStatus.ACTION_REQUIRED:
             transition(application, ApplicationStatus.ACTION_REQUIRED)
         record_account_event(request, "compliance.document_requested", application_id=str(application.id), organisation_id=str(application.organisation_id), document_id=str(document.id))
+        self._sync_quality(application)
         return Response(RequestedDocumentSerializer(document).data, status=status.HTTP_201_CREATED)
 
     @extend_schema(request=DocumentReviewSerializer, responses=ComplianceDocumentSerializer, parameters=[OpenApiParameter("document_id", OpenApiTypes.UUID, OpenApiParameter.PATH)])
@@ -506,6 +508,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if document.status == "rejected" and application.status != ApplicationStatus.ACTION_REQUIRED:
             transition(application, ApplicationStatus.ACTION_REQUIRED)
         record_account_event(request, "compliance.document_reviewed", application_id=str(application.id), organisation_id=str(application.organisation_id), document_id=str(document.id), status=document.status)
+        self._sync_quality(application)
         return Response(ComplianceDocumentSerializer(document, context={"request": request}).data)
 
     @extend_schema(methods=["GET"], responses=ApprovalConditionSerializer(many=True))

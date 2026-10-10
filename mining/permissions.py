@@ -14,8 +14,8 @@ from organisations.access import (
     REGULATOR,
     audience as _audience,
     can_decide as _can_decide,
-    is_operator,
-    is_regulator,
+    is_operator as _is_operator,
+    is_regulator as _is_regulator,
     memberships,
     organisation_ids,
 )
@@ -42,14 +42,27 @@ APPLICANT_ROLES = {
 }
 
 
+# A partner's desk power is for the sector it was vetted in (see
+# organisations.access), so every check here asks about mining specifically.
+SECTOR = "mining"
+
+
 def audience(user):
     """``operator``, ``regulator``, ``miner``, or None."""
-    role = _audience(user)
+    role = _audience(user, SECTOR)
     return MINER if role == MEMBER else role
 
 
+def is_operator(user):
+    return _is_operator(user, SECTOR)
+
+
+def is_regulator(user):
+    return _is_regulator(user, SECTOR)
+
+
 def can_decide(user):
-    return _can_decide(user, DECISION_ROLES)
+    return _can_decide(user, DECISION_ROLES, SECTOR)
 
 
 def owns_site(user, site):

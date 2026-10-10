@@ -13,6 +13,8 @@ A caller's audience comes from their organisation memberships, never from a
 request parameter: the frontend may store a chosen role in the browser, and
 that choice must not be able to grant anything.
 """
+from django.core.exceptions import ObjectDoesNotExist
+
 from organisations.models import OrganisationMembership, OrganisationType
 
 OPERATOR = "operator"
@@ -39,12 +41,13 @@ def memberships(user):
             _CACHE_ATTR,
             list(
                 OrganisationMembership.objects.filter(user=user, is_active=True)
-                .select_related("organisation")
+                .select_related("organisation__compliance_application")
                 .only(
                     "role",
                     "organisation__id",
                     "organisation__organisation_type",
                     "organisation__verification_status",
+                    "organisation__compliance_application__sector",
                 )
             ),
         )
@@ -58,8 +61,39 @@ def organisation_ids(user):
     return [m.organisation_id for m in memberships(user)]
 
 
-def audience(user):
+def registered_sector(organisation):
+    """The sector a partner organisation applied to work in, or "".
+
+    Blank for an organisation with no onboarding application and for one that
+    applied before the sector was recorded; the vetting desk files those.
+    """
+    try:
+        return organisation.compliance_application.sector
+    except ObjectDoesNotExist:
+        return ""
+
+
+def _counts_in(membership, sector):
+    """Does this membership give its holder standing in ``sector``?
+
+    Desk and oversight power is granted for the sector the organisation was
+    vetted in, not for every dashboard: a Quality & Control partner is not a
+    logistics reviewer. An organisation with no sector on record predates the
+    rule and keeps the access it had.
+    """
+    organisation = membership.organisation
+    if organisation.organisation_type not in PRIVILEGED_TYPES:
+        return True
+    if organisation.verification_status != "verified":
+        return False
+    return sector is None or registered_sector(organisation) in {"", sector}
+
+
+def audience(user, sector=None):
     """``operator``, ``regulator``, ``member``, or None.
+
+    Pass the vertical's ``sector`` to ask about that dashboard specifically;
+    without it the answer is whether the caller holds the audience anywhere.
 
     Staff are operators. An operator membership outranks a regulator one so a
     person seconded to the desk keeps their review powers.
@@ -73,12 +107,7 @@ def audience(user):
         return None
     if user.is_staff or user.is_superuser:
         return OPERATOR
-    types = {
-        m.organisation.organisation_type
-        for m in memberships(user)
-        if m.organisation.organisation_type not in PRIVILEGED_TYPES
-        or m.organisation.verification_status == "verified"
-    }
+    types = {m.organisation.organisation_type for m in memberships(user) if _counts_in(m, sector)}
     if OrganisationType.COMPLIANCE_PARTNER in types or OrganisationType.INSPECTION_BODY in types:
         return OPERATOR
     if OrganisationType.REGULATOR in types:
@@ -88,18 +117,18 @@ def audience(user):
     return None
 
 
-def is_operator(user):
-    return audience(user) == OPERATOR
+def is_operator(user, sector=None):
+    return audience(user, sector) == OPERATOR
 
 
-def is_regulator(user):
-    return audience(user) == REGULATOR
+def is_regulator(user, sector=None):
+    return audience(user, sector) == REGULATOR
 
 
-def can_decide(user, decision_roles):
+def can_decide(user, decision_roles, sector=None):
     """May take a review action, given this vertical's set of desk roles."""
-    if not is_operator(user):
+    if not is_operator(user, sector):
         return False
     if user.is_staff or user.is_superuser:
         return True
-    return any(m.role in decision_roles for m in memberships(user))
+    return any(m.role in decision_roles for m in memberships(user) if _counts_in(m, sector))

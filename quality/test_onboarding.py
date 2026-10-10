@@ -62,7 +62,7 @@ class QualityOrganisationOnboardingTests(MediaTestCase):
         self.staff = User.objects.create_user("operator@beldium.test", is_staff=True)
         self.org = Organisation.objects.create(name="Draft Lab", organisation_type="laboratory")
         OrganisationMembership.objects.create(organisation=self.org, user=self.owner, role="owner")
-        self.app = ComplianceApplication.objects.create(organisation=self.org, created_by=self.owner)
+        self.app = ComplianceApplication.objects.create(organisation=self.org, created_by=self.owner, sector="quality")
         self.client.force_authenticate(self.owner)
 
     def url(self, action, *args):
@@ -141,6 +141,24 @@ class QualityOrganisationOnboardingTests(MediaTestCase):
         self.assertEqual(self.app.status, "verified")
         self.assertEqual(self.org.verification_status, "verified")
 
+    def test_staff_vetting_desk_lists_and_decides_a_laboratory_application(self):
+        self.fill()
+        self.client.post(self.url("submit"))
+        self.client.force_authenticate(self.staff)
+        listed = self.client.get(
+            reverse("compliance-application-list"),
+            {"organisation__organisation_type__in": "compliance_partner,inspection_body,laboratory,regulator"},
+        ).data["results"]
+        self.assertEqual([row["sector"] for row in listed if row["id"] == str(self.app.id)], ["quality"])
+
+        for document in self.app.documents.all():
+            self.client.post(self.url("review-document", document.id), {"status": "verified"}, format="json")
+        decided = self.client.post(self.url("decide"), {"status": "verified"}, format="json")
+        self.assertEqual(decided.status_code, 200, decided.data)
+        mirror = QualityApplication.objects.get(compliance_application=self.app)
+        self.assertEqual(mirror.status, "approved")
+        self.assertTrue(all(doc["status"] == "verified" for doc in mirror.documents))
+
     def test_information_request_and_resubmission_round_trip(self):
         self.fill()
         self.client.post(self.url("submit"))
@@ -214,3 +232,48 @@ class QualityProfessionalApplicationTests(MediaTestCase):
         missing = self.client.post(self.url, self.payload(professional_qualifications=pdf()), format="multipart")
         self.assertEqual(missing.status_code, 400)
         self.assertEqual(QualityProfessionalApplication.objects.count(), 0)
+
+
+class SectorIsolationTests(APITestCase):
+    """A partner's desk access is for the sector it registered in, and no other."""
+
+    def partner(self, email, sector, org_type="compliance_partner"):
+        user = User.objects.create_user(email, email_verified_at=timezone.now())
+        org = Organisation.objects.create(name=email, organisation_type=org_type, verification_status="verified")
+        OrganisationMembership.objects.create(organisation=org, user=user, role="owner")
+        if sector is not None:
+            ComplianceApplication.objects.create(organisation=org, created_by=user, sector=sector, status="verified")
+        return user
+
+    def seats(self, user):
+        from logistics import permissions as logistics
+        from mining import permissions as mining
+        from processing import permissions as processing
+        from quality import services as quality
+        return {
+            "mining": mining.audience(user), "processing": processing.audience(user),
+            "logistics": logistics.sees_register(user), "quality": quality.derive_role(user),
+        }
+
+    def test_quality_partner_has_no_seat_in_other_sectors(self):
+        self.assertEqual(
+            self.seats(self.partner("qc@partner.test", "quality")),
+            {"mining": None, "processing": None, "logistics": False, "quality": "partner"},
+        )
+
+    def test_logistics_partner_has_no_seat_in_quality_or_mining(self):
+        self.assertEqual(
+            self.seats(self.partner("haul@partner.test", "logistics")),
+            {"mining": None, "processing": None, "logistics": True, "quality": None},
+        )
+
+    def test_partner_without_a_recorded_sector_keeps_its_access(self):
+        for sector in ("", None):
+            seats = self.seats(self.partner(f"legacy{sector}@partner.test", sector))
+            self.assertEqual(seats, {"mining": "operator", "processing": "operator", "logistics": True, "quality": "partner"})
+
+    def test_other_sectors_refuse_a_quality_partner_over_the_api(self):
+        self.client.force_authenticate(self.partner("qc2@partner.test", "quality"))
+        self.assertEqual(self.client.get(reverse("quality-me")).data["role"], "partner")
+        mining = self.client.get("/api/v1/mining/applications/")
+        self.assertIn(mining.status_code, (403, 404), mining.status_code)
