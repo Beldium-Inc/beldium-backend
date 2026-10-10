@@ -114,6 +114,26 @@ class ReviewWorkflowTests(APITestCase):
         self.org.refresh_from_db()
         self.assertEqual(self.org.verification_status, 'verified')
 
+    def test_sector_is_recorded_at_creation_and_only_staff_refile_it(self):
+        org = Organisation.objects.create(name='Haulage Desk', organisation_type='compliance_partner')
+        OrganisationMembership.objects.create(organisation=org, user=self.owner, role='owner')
+        self.client.force_authenticate(self.owner)
+        created = self.client.post(reverse('compliance-application-list'), {'organisation': str(org.id), 'sector': 'logistics'}, format='json')
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data['sector'], 'logistics')
+        detail = reverse('compliance-application-detail', args=[created.data['id']])
+        self.assertEqual(self.client.patch(detail, {'sector': 'mining'}, format='json').status_code, 400)
+        self.assertEqual(self.client.post(reverse('compliance-application-list'), {'organisation': str(org.id), 'sector': 'space'}, format='json').status_code, 400)
+
+        self.client.force_authenticate(self.staff)
+        # The vetting desk reads one sector's queue at a time...
+        listed = self.client.get(reverse('compliance-application-list'), {'sector': 'logistics'})
+        self.assertEqual([row['id'] for row in listed.data['results']], [created.data['id']])
+        # ...and files an application that predates the field.
+        legacy = self.client.patch(self.url('detail'), {'sector': 'mining'}, format='json')
+        self.assertEqual(legacy.status_code, 200, legacy.data)
+        self.assertEqual(legacy.data['sector'], 'mining')
+
     def test_rerequesting_a_document_preserves_the_old_file(self):
         doc = self.app.documents.first()
         old_name = doc.file.name

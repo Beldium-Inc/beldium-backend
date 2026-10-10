@@ -251,7 +251,7 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ComplianceApplication
         fields = [
-            "id", "reference", "organisation", "organisation_type", "status", "organisation_profile", "representative", "services",
+            "id", "reference", "organisation", "organisation_type", "sector", "status", "organisation_profile", "representative", "services",
             "professional_capability", "inspection_capability", "conflict_declaration", "declaration", "quality_profile",
             "submitted_at", "reviewed_at", "review_notes", "conditional_requirements", "personnel",
             "documents", "conditions", "progress", "created_at", "updated_at",
@@ -269,6 +269,13 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
         if not organisation.memberships.filter(user=request.user, is_active=True).exists() and not request.user.is_staff:
             raise serializers.ValidationError("You are not an active member of this organisation.")
         return organisation
+
+    def validate_sector(self, sector):
+        # Chosen once, at creation. Afterwards only Beldium staff re-file an
+        # application under another sector (or under one, if it predates this).
+        if self.instance and sector != self.instance.sector and not self.context["request"].user.is_staff:
+            raise serializers.ValidationError("An application's sector cannot be changed.")
+        return sector
 
     @extend_schema_field(OpenApiTypes.OBJECT)
     def get_progress(self, obj) -> dict:

@@ -542,6 +542,32 @@ class RequestViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicVie
         services.audit(request, application.company, 'request_response_reviewed', request_id=str(item.pk), verdict=item.status)
         return Response(self.get_serializer(item).data)
 
+    @extend_schema(request=s.RequestWithdrawalSerializer, responses=s.InformationRequestSerializer)
+    @action(detail=True, methods=['post'])
+    def withdraw(self, request, pk=None):
+        """The reviewer no longer needs what was asked for.
+
+        A request is otherwise only closed by accepting a response that carries
+        verified evidence, so one satisfied another way (the document arrived
+        through the normal upload, or the question was answered in writing)
+        would hold the application on awaiting_information for good.
+        """
+        item = self.get_object()
+        application = m.LogisticsApplication.objects.select_for_update().get(pk=item.application_id)
+        assert_reviewer(request.user, application)
+        services.assert_state(application, services.REVIEWABLE)
+        if item.status == 'accepted':
+            raise ConflictError('This request is already closed.')
+        payload = s.RequestWithdrawalSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        item.status = 'accepted'
+        item.review_notes = 'Withdrawn by the reviewer: ' + payload.validated_data['notes']
+        item.save(update_fields=['status', 'review_notes', 'updated_at'])
+        services.resume_review(application)
+        services.notify(application.company, 'Information request closed', item.reason)
+        services.audit(request, application.company, 'request_withdrawn', request_id=str(item.pk))
+        return Response(self.get_serializer(item).data)
+
 
 class ConditionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicViewSet):
     queryset = m.ApprovalCondition.objects.none()

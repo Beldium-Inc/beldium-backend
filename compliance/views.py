@@ -55,6 +55,7 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         # lets the staff vetting desk ask for partner applications server-side
         # instead of filtering one page of every vertical's applications.
         "organisation__organisation_type": ["exact", "in"],
+        "sector": ["exact", "in"],
     }
     ordering_fields = ["created_at", "submitted_at"]
     # Newest first, so a just-created application is on page one rather than

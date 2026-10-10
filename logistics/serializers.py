@@ -310,6 +310,10 @@ class ResponseReviewSerializer(serializers.Serializer):
     notes = serializers.CharField()
 
 
+class RequestWithdrawalSerializer(serializers.Serializer):
+    notes = serializers.CharField(max_length=2000)
+
+
 class RestrictionSerializer(OwnedSerializer):
     class Meta:
         model = m.ScopeRestriction

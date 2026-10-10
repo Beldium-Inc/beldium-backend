@@ -244,6 +244,26 @@ class LogisticsDeskTests(LogisticsTestCase):
         self.client.force_authenticate(insider)
         self.assertEqual(self.client.post(claim, {"reviewer": str(insider.id)}, format="json").status_code, 403)
 
+    def test_reviewer_withdraws_a_request_and_the_application_returns_to_review(self):
+        application = self.make_application(status="awaiting_information", reviewer=self.reviewer)
+        item = InformationRequest.objects.create(
+            application=application, reason="Missing insurance evidence", message="Upload it.",
+            items=[], due_date=timezone.localdate() + timedelta(days=7), raised_by=self.reviewer,
+        )
+        url = reverse("logistics-request-withdraw", args=[item.id])
+
+        self.client.force_authenticate(self.owner)
+        self.assertEqual(self.client.post(url, {"notes": "Not needed."}, format="json").status_code, 403)
+
+        self.client.force_authenticate(self.reviewer)
+        self.assertEqual(self.client.post(url, {}, format="json").status_code, 400)
+        response = self.client.post(url, {"notes": "Arrived through the document upload."}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["status"], "accepted")
+        application.refresh_from_db()
+        self.assertEqual(application.status, "under_review")
+        self.assertEqual(self.client.post(url, {"notes": "Again."}, format="json").status_code, 409)
+
     def test_verified_replacement_returns_a_rejected_document_to_review(self):
         application = self.make_application(status="awaiting_information", reviewer=self.reviewer)
         self.add_document(application, Domain.INSURANCE, status="rejected", is_current=False)
