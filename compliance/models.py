@@ -42,6 +42,17 @@ REQUIRED_DOCUMENTS = (
 )
 
 
+class Sector(models.TextChoices):
+    """The compliance dashboards a partner can apply to work in."""
+    MINING = "mining", "Mining"
+    PROCESSING = "processing", "Processing"
+    EXPORT = "export", "Export"
+    QUALITY = "quality", "Quality & Control"
+    WAREHOUSING = "warehousing", "Warehousing"
+    LOGISTICS = "logistics", "Logistics"
+    MARKETPLACE = "marketplace", "Marketplace"
+
+
 class ComplianceApplication(TimeStampedModel):
     # A UUID is unusable over the phone or in an email subject; this is the
     # reference an applicant and a reviewer actually quote to each other.
@@ -51,6 +62,10 @@ class ComplianceApplication(TimeStampedModel):
         "organisations.Organisation", on_delete=models.CASCADE, related_name="compliance_application"
     )
     status = models.CharField(max_length=30, choices=ApplicationStatus.choices, default=ApplicationStatus.DRAFT, db_index=True)
+    # Which sector the partner applied to work in, chosen at the start of
+    # onboarding. Beldium's vetting desk sorts its queue by it. Blank on
+    # applications filed before it was recorded.
+    sector = models.CharField(max_length=20, choices=Sector.choices, blank=True, db_index=True)
     organisation_profile = models.JSONField(default=dict, blank=True)
     representative = models.JSONField(default=dict, blank=True)
     services = models.JSONField(default=dict, blank=True)
