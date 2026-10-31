@@ -124,6 +124,16 @@ class LogisticsCompany(TimeStampedModel):
     employees = models.PositiveIntegerField(default=0)
     annual_tonnage = models.DecimalField(max_digits=15, decimal_places=2, default=0, validators=[MinValueValidator(0)])
     services = models.JSONField(default=list)
+    # Onboarding profile as the applicant declared it. Identity such as CAC,
+    # tax number, address, state and website lives on the organisation.
+    local_government_area = models.CharField(max_length=100, blank=True)
+    year_established = models.PositiveSmallIntegerField(null=True, blank=True)
+    logistics_type = models.CharField(max_length=120, blank=True)
+    business_description = models.TextField(blank=True)
+    # Keys are fixed by logistics.serializers.REPRESENTATIVE_KEYS and friends.
+    representative = models.JSONField(default=dict, blank=True)
+    responsible_officers = models.JSONField(default=dict, blank=True)
+    operating_profile = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ['organisation__name']
@@ -154,18 +164,28 @@ class OperatingLocation(TimeStampedModel):
 
 class Vehicle(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='vehicles')
+    # The applicant's own reference for the vehicle, as shown on the application.
+    vehicle_reference = models.CharField(max_length=60, blank=True)
     registration = models.CharField(max_length=40, unique=True)
-    vin = models.CharField(max_length=40, unique=True)
+    # VIN is optional on the application, so blank VINs store as NULL and do not collide.
+    vin = models.CharField(max_length=40, unique=True, null=True, blank=True)
     vehicle_type = models.CharField(max_length=100)
     make = models.CharField(max_length=100)
     model = models.CharField(max_length=100)
     year = models.PositiveSmallIntegerField(validators=[MinValueValidator(1900)])
     capacity = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(0)])
-    capacity_unit = models.CharField(max_length=20, choices=[('tonnes', 'Tonnes'), ('litres', 'Litres'), ('seats', 'Seats')])
+    capacity_unit = models.CharField(max_length=20, choices=[('tonnes', 'Tonnes'), ('kg', 'Kilograms'), ('m3', 'Cubic metres'), ('litres', 'Litres'), ('seats', 'Seats')])
     ownership = models.CharField(max_length=20, choices=[('owned', 'Owned'), ('leased', 'Leased'), ('contracted', 'Contracted')])
     insurer = models.CharField(max_length=200, blank=True)
-    insurance_expiry = models.DateField()
-    roadworthiness_expiry = models.DateField()
+    # Declared dates may be left blank on the application and are then checked by Beldium review.
+    insurance_expiry = models.DateField(null=True, blank=True)
+    roadworthiness_expiry = models.DateField(null=True, blank=True)
+    insurance_declared = models.BooleanField(default=False)
+    roadworthiness_declared = models.BooleanField(default=False)
+    safety_equipment_declared = models.BooleanField(default=False)
+    operating_status = models.CharField(max_length=40, blank=True)
+    maintenance_status = models.CharField(max_length=40, blank=True)
+    tracking_capability = models.CharField(max_length=40, blank=True)
     gps_status = models.CharField(max_length=20, choices=[('unknown', 'Unknown'), ('active', 'Active'), ('intermittent', 'Intermittent'), ('inactive', 'Inactive')], default='unknown')
     location = models.CharField(max_length=255, blank=True)
     is_active = models.BooleanField(default=True)
@@ -177,14 +197,23 @@ class Vehicle(TimeStampedModel):
 class Driver(TimeStampedModel):
     company = models.ForeignKey(LogisticsCompany, on_delete=models.CASCADE, related_name='drivers')
     full_name = models.CharField(max_length=200)
+    driver_reference = models.CharField(max_length=60, blank=True)
+    phone = models.CharField(max_length=30, blank=True)
+    employment_relationship = models.CharField(max_length=40, blank=True)
     licence_number = models.CharField(max_length=100, unique=True)
     licence_class = models.CharField(max_length=100)
     licence_expiry = models.DateField()
     national_id = models.CharField(max_length=100, blank=True)
     years_experience = models.PositiveSmallIntegerField(default=0)
+    mineral_haulage_experience = models.CharField(max_length=200, blank=True)
+    operating_base = models.CharField(max_length=200, blank=True)
+    availability = models.CharField(max_length=40, blank=True)
+    emergency_contact = models.CharField(max_length=200, blank=True)
+    safety_training_declared = models.BooleanField(default=False)
     assigned_vehicle = models.ForeignKey(Vehicle, on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_drivers')
     training = models.JSONField(default=list)
-    medical_expiry = models.DateField()
+    # Medical evidence is not collected on the onboarding form, so the date may be blank.
+    medical_expiry = models.DateField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:

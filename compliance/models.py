@@ -76,6 +76,8 @@ class ComplianceApplication(TimeStampedModel):
     # Quality & Control applications answer a different set of sections; see
     # compliance/quality_sections.py. Empty for every other sector.
     quality_profile = models.JSONField(default=dict, blank=True)
+    # Logistics applications answer their own sections; see compliance/logistics_sections.py.
+    logistics_profile = models.JSONField(default=dict, blank=True)
     submitted_at = models.DateTimeField(null=True, blank=True)
     reviewed_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.ForeignKey(

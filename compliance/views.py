@@ -34,6 +34,7 @@ from compliance.quality_sections import (
     QUALITY_DOCUMENTS, QUALITY_DOCUMENT_TITLES, QUALITY_ORGANISATION_TYPES, QUALITY_SECTIONS,
     is_quality_application, quality_section_serializer,
 )
+from compliance.logistics_sections import LOGISTICS_SECTIONS, logistics_section_serializer
 from compliance.workflow import require_review, transition
 from common.exceptions import AppError, ConflictError
 from common.files import serve_stored_file
@@ -207,6 +208,23 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["patch"], url_path="sections/declaration", url_name="declaration-section")
     def declaration_section(self, request, pk=None):
         return self._save_section(request, self.get_object(), DeclarationSectionSerializer, "declaration")
+
+    @extend_schema(request=OpenApiTypes.OBJECT, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
+    @action(detail=True, methods=["patch"], url_path=r"sections/logistics-(?P<section>[a-z-]+)", url_name="logistics-section")
+    def logistics_section(self, request, pk=None, section=None):
+        """Save one Logistics section into `logistics_profile`."""
+        if section not in LOGISTICS_SECTIONS:
+            raise AppError("Unknown Logistics section.", code="not_found", status_code=404)
+        application = self.get_object()
+        self._assert_editor(application)
+        self._assert_editable(application)
+        serializer = logistics_section_serializer(section)(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data["data"]
+        application.logistics_profile = {**application.logistics_profile, section: data}
+        application.save(update_fields=["logistics_profile", "updated_at"])
+        self._record(application, "section_saved", section=f"logistics_{section}")
+        return Response(self.get_serializer(application).data)
 
     @extend_schema(request=OpenApiTypes.OBJECT, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
     @action(
