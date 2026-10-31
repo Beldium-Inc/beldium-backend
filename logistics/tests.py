@@ -1266,3 +1266,52 @@ class LogisticsOnboardingProfileTests(LogisticsTestCase):
         response = self.client.post(url, {'vehicle': str(vehicle.id), 'driver': str(driver.id)}, format='json')
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data['error']['code'], 'driver_medical_undeclared')
+
+    def test_company_can_start_without_services_but_cannot_submit(self):
+        org = make_org('Sahel Starter Haulage')
+        OrganisationMembership.objects.create(organisation=org, user=self.owner, role=MembershipRole.OWNER)
+        self.client.force_authenticate(self.owner)
+        created = self.client.post(reverse('logistics-company-list'), {
+            'organisation': org.id, 'contact_name': 'Ada Bello', 'contact_email': 'ada@sahel.example', 'contact_phone': '+2348000000001',
+        }, format='json')
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data['services'], [])
+        application = self.client.post(reverse('logistics-application-list'), {'company': created.data['id']}, format='json')
+        self.assertEqual(application.status_code, 201, application.data)
+        self.assertFalse(application.data['progress']['checks']['company'])
+
+    def test_mineral_section_follows_services_while_the_application_is_a_draft(self):
+        self.company.services = ['general freight']
+        self.company.save(update_fields=['services'])
+        application = self.make_application()
+        mineral = application.sections.get(key='mineral')
+        self.assertFalse(mineral.applicable)
+        self.client.force_authenticate(self.owner)
+        url = reverse('logistics-company-detail', args=[self.company.id])
+        response = self.client.patch(url, {'services': ['Bulk mineral haulage']}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        mineral.refresh_from_db()
+        self.assertTrue(mineral.applicable)
+
+        LogisticsApplication.objects.filter(pk=application.pk).update(status='under_review')
+        mineral.applicable = False
+        mineral.save(update_fields=['applicable'])
+        services.sync_mineral_section(self.company)
+        mineral.refresh_from_db()
+        self.assertFalse(mineral.applicable)
+
+    def test_blank_declared_dates_are_not_reported_as_current(self):
+        self.client.force_authenticate(self.owner)
+        blank = self.make_vehicle(registration='LAG-BLANK-1', vin=None, insurance_expiry=None)
+        expired = self.make_vehicle(
+            registration='LAG-BLANK-2', vin=None, roadworthiness_expiry=None,
+            insurance_expiry=timezone.localdate() - timedelta(days=1),
+        )
+        current = self.make_vehicle(registration='LAG-BLANK-3', vin='VIN-BLANK-3')
+        driver = self.make_driver(licence_number='LIC-BLANK-1', medical_expiry=None)
+
+        status = lambda name, pk: self.client.get(reverse(name, args=[pk])).data['credential_status']
+        self.assertEqual(status('logistics-vehicle-detail', blank.id), 'undeclared')
+        self.assertEqual(status('logistics-vehicle-detail', expired.id), 'expired')
+        self.assertEqual(status('logistics-vehicle-detail', current.id), 'current')
+        self.assertEqual(status('logistics-driver-detail', driver.id), 'undeclared')
