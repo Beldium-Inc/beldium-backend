@@ -65,6 +65,12 @@ def declared_profile(keys, booleans=()):
     return validate
 
 
+def asset_validity(dates):
+    """A vehicle or driver date left blank cannot be shown to be current."""
+    status = validity(dates)
+    return 'undeclared' if status != 'expired' and None in dates else status
+
+
 def validate_file(value):
     allowed = {
         '.pdf': {'application/pdf'}, '.doc': {'application/msword'},
@@ -95,21 +101,25 @@ class CompanySerializer(serializers.ModelSerializer):
     address = serializers.CharField(source='organisation.address', read_only=True)
     state = serializers.CharField(source='organisation.state', read_only=True)
     website = serializers.CharField(source='organisation.website', read_only=True)
-    services = serializers.ListField(child=serializers.CharField(max_length=100), allow_empty=False)
+    # A company is created on the first onboarding step, before its services are
+    # chosen. Submission stays blocked until it has some (see services.progress).
+    services = serializers.ListField(child=serializers.CharField(max_length=100), required=False)
+    business_email = serializers.CharField(source='organisation.email', read_only=True)
+    business_phone = serializers.CharField(source='organisation.phone_number', read_only=True)
     representative = serializers.JSONField(required=False)
     responsible_officers = serializers.JSONField(required=False)
     operating_profile = serializers.JSONField(required=False)
 
     class Meta:
         model = m.LogisticsCompany
-        fields = ['id', 'organisation', 'reference', 'name', 'registration_number', 'tax_identifier', 'address', 'state', 'website',
+        fields = ['id', 'organisation', 'reference', 'name', 'registration_number', 'tax_identifier', 'business_email', 'business_phone', 'address', 'state', 'website',
                   'contact_name', 'contact_email', 'contact_phone', 'incorporated_on', 'employees', 'annual_tonnage', 'services',
                   'local_government_area', 'year_established', 'logistics_type', 'business_description',
                   'representative', 'responsible_officers', 'operating_profile', 'created_at', 'updated_at']
         read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
 
     def validate_services(self, value):
-        return strings(value)
+        return strings(value) if value else []
 
     def validate_year_established(self, value):
         if value is not None and not 1900 <= value <= timezone.localdate().year:
@@ -147,7 +157,7 @@ class VehicleSerializer(OwnedSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_credential_status(self, obj) -> str:
-        return validity([obj.insurance_expiry, obj.roadworthiness_expiry])
+        return asset_validity([obj.insurance_expiry, obj.roadworthiness_expiry])
 
     def validate_year(self, value):
         if value > timezone.localdate().year + 1:
@@ -176,7 +186,7 @@ class DriverSerializer(OwnedSerializer):
         return attrs
 
     def get_credential_status(self, obj) -> str:
-        return validity([obj.licence_expiry, obj.medical_expiry])
+        return asset_validity([obj.licence_expiry, obj.medical_expiry])
 
     def to_representation(self, obj):
         result = super().to_representation(obj)

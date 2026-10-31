@@ -51,8 +51,19 @@ def resume_review(application):
     application.save(update_fields=['status', 'updated_at'])
 
 
+def is_mineral_company(company):
+    return any('mineral' in service.lower() for service in company.services)
+
+
+def sync_mineral_section(company):
+    """Keep the mineral domain in step with the declared services while the applicant can still edit."""
+    application = m.LogisticsApplication.objects.filter(company=company, status__in=EDITABLE).first()
+    if application:
+        application.sections.filter(key=m.Domain.MINERAL).update(applicable=is_mineral_company(company))
+
+
 def initialise(application):
-    mineral = any('mineral' in service.lower() for service in application.company.services)
+    mineral = is_mineral_company(application.company)
     m.DomainReview.objects.bulk_create([
         m.DomainReview(application=application, key=key, applicable=key != 'mineral' or mineral)
         for key in m.Domain.values

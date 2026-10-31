@@ -72,6 +72,7 @@ class CompanyViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.Cr
     def perform_update(self, serializer):
         editable_company(self.request.user, serializer.instance)
         company = serializer.save()
+        services.sync_mineral_section(company)
         services.audit(self.request, company, 'company_updated')
 
 
