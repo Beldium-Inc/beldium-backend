@@ -33,6 +33,38 @@ def validity(dates):
     return 'expiring' if any(day <= 30 for day in days) else 'current'
 
 
+# The onboarding profile is stored as JSON, so its keys are fixed here. Anything
+# else the client sends is refused rather than silently kept.
+REPRESENTATIVE_KEYS = ('name', 'title', 'email', 'phone', 'relationship', 'signatory', 'authority')
+OFFICER_KEYS = ('fleet_manager', 'operations_manager', 'transport_safety_manager', 'compliance_officer', 'maintenance_manager', 'dispatch_coordinator')
+OPERATING_PROFILE_KEYS = (
+    'primary_service', 'secondary_services', 'mineral_experience', 'minerals_transported', 'operating_states',
+    'transport_corridors', 'fleet_ownership_model', 'service_coverage', 'operating_schedule', 'dispatch_capability',
+    'monthly_capacity', 'typical_shipment', 'maximum_load', 'cargo_characteristics',
+)
+
+
+def declared_profile(keys, booleans=()):
+    def validate(value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError('Supply an object of declared values.')
+        unknown = set(value) - set(keys)
+        if unknown:
+            raise serializers.ValidationError(f'Unknown fields: {", ".join(sorted(unknown))}.')
+        cleaned = {}
+        for key, item in value.items():
+            if key in booleans:
+                if not isinstance(item, bool):
+                    raise serializers.ValidationError({key: 'Use true or false.'})
+                cleaned[key] = item
+                continue
+            if not isinstance(item, str) or len(item) > 500:
+                raise serializers.ValidationError({key: 'Use text of at most 500 characters.'})
+            cleaned[key] = item.strip()
+        return cleaned
+    return validate
+
+
 def validate_file(value):
     allowed = {
         '.pdf': {'application/pdf'}, '.doc': {'application/msword'},
@@ -59,15 +91,39 @@ class OwnedSerializer(serializers.ModelSerializer):
 class CompanySerializer(serializers.ModelSerializer):
     name = serializers.CharField(source='organisation.name', read_only=True)
     registration_number = serializers.CharField(source='organisation.registration_number', read_only=True)
+    tax_identifier = serializers.CharField(source='organisation.tax_identifier', read_only=True)
+    address = serializers.CharField(source='organisation.address', read_only=True)
+    state = serializers.CharField(source='organisation.state', read_only=True)
+    website = serializers.CharField(source='organisation.website', read_only=True)
     services = serializers.ListField(child=serializers.CharField(max_length=100), allow_empty=False)
+    representative = serializers.JSONField(required=False)
+    responsible_officers = serializers.JSONField(required=False)
+    operating_profile = serializers.JSONField(required=False)
 
     class Meta:
         model = m.LogisticsCompany
-        fields = ['id', 'organisation', 'reference', 'name', 'registration_number', 'contact_name', 'contact_email', 'contact_phone', 'incorporated_on', 'employees', 'annual_tonnage', 'services', 'created_at', 'updated_at']
+        fields = ['id', 'organisation', 'reference', 'name', 'registration_number', 'tax_identifier', 'address', 'state', 'website',
+                  'contact_name', 'contact_email', 'contact_phone', 'incorporated_on', 'employees', 'annual_tonnage', 'services',
+                  'local_government_area', 'year_established', 'logistics_type', 'business_description',
+                  'representative', 'responsible_officers', 'operating_profile', 'created_at', 'updated_at']
         read_only_fields = ['id', 'reference', 'created_at', 'updated_at']
 
     def validate_services(self, value):
         return strings(value)
+
+    def validate_year_established(self, value):
+        if value is not None and not 1900 <= value <= timezone.localdate().year:
+            raise serializers.ValidationError('Enter a year between 1900 and this year.')
+        return value
+
+    def validate_representative(self, value):
+        return declared_profile(REPRESENTATIVE_KEYS, booleans=('authority',))(value)
+
+    def validate_responsible_officers(self, value):
+        return declared_profile(OFFICER_KEYS)(value)
+
+    def validate_operating_profile(self, value):
+        return declared_profile(OPERATING_PROFILE_KEYS)(value)
 
     def validate_organisation(self, value):
         if self.instance and value.pk != self.instance.organisation_id:
@@ -98,6 +154,10 @@ class VehicleSerializer(OwnedSerializer):
             raise serializers.ValidationError('Vehicle year cannot be more than one year ahead.')
         return value
 
+    def validate_vin(self, value):
+        # A blank VIN is stored as NULL so that several undeclared vehicles do not clash on the unique index.
+        return value.strip() or None
+
 
 class DriverSerializer(OwnedSerializer):
     credential_status = serializers.SerializerMethodField()
@@ -121,7 +181,7 @@ class DriverSerializer(OwnedSerializer):
     def to_representation(self, obj):
         result = super().to_representation(obj)
         if not can_see_driver_details(self.context['request'].user, obj.company):
-            for field in ['national_id', 'medical_expiry', 'licence_number']:
+            for field in ['national_id', 'medical_expiry', 'licence_number', 'phone', 'emergency_contact']:
                 result.pop(field, None)
         return result
 

@@ -162,6 +162,9 @@ def monitor_expiries():
             for obj in model.objects.filter(company=company, is_active=True):
                 for field in fields:
                     expiry = getattr(obj, field)
+                    # Declared dates may be left blank on the application; there is nothing to monitor then.
+                    if expiry is None:
+                        continue
                     if (expiry - today).days <= 30:
                         kind = 'expired' if expiry < today else 'expiring'
                         _, new = credential_event(company, f'{model.__name__}:{obj.pk}:{field}:{expiry}:{kind}', kind,

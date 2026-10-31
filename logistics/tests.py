@@ -1127,3 +1127,142 @@ class LogisticsFileCheckTests(LogisticsTestCase):
         self.assertEqual(self.codes(application, "plain"), ["no_metadata"])
         self.assertEqual(self.upload(application, "fake", b"<html>not a pdf</html>").status_code, 201)
         self.assertEqual(self.codes(application, "fake"), ["type_mismatch"])
+
+
+class LogisticsOnboardingProfileTests(LogisticsTestCase):
+    """The declarations an applicant makes on onboarding are stored and checked, not dropped."""
+
+    def profile_payload(self):
+        return {
+            'local_government_area': 'Ilesa East',
+            'year_established': 2011,
+            'logistics_type': 'Mineral Haulage Company',
+            'business_description': 'Bulk haulage of processed ore.',
+            'representative': {'name': 'Ada Bello', 'title': 'Director', 'authority': True},
+            'responsible_officers': {'fleet_manager': 'Musa Lawal', 'dispatch_coordinator': 'Ife Ojo'},
+            'operating_profile': {'primary_service': 'Bulk mineral haulage', 'operating_states': 'Osun, Kwara', 'monthly_capacity': '1200 tonnes'},
+        }
+
+    def test_company_profile_round_trips_onboarding_declarations(self):
+        self.org.tax_identifier = 'TIN-99887766'
+        self.org.state = 'Osun'
+        self.org.save(update_fields=['tax_identifier', 'state'])
+        self.client.force_authenticate(self.owner)
+
+        response = self.client.patch(reverse('logistics-company-detail', args=[self.company.id]), self.profile_payload(), format='json')
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['representative']['name'], 'Ada Bello')
+        self.assertIs(response.data['representative']['authority'], True)
+        self.assertEqual(response.data['responsible_officers']['fleet_manager'], 'Musa Lawal')
+        self.assertEqual(response.data['operating_profile']['operating_states'], 'Osun, Kwara')
+        self.assertEqual(response.data['year_established'], 2011)
+        # Identity is read from the organisation, so the applicant cannot overwrite it here.
+        self.assertEqual(response.data['tax_identifier'], 'TIN-99887766')
+        self.assertEqual(response.data['state'], 'Osun')
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.logistics_type, 'Mineral Haulage Company')
+
+    def test_profile_refuses_unknown_keys_bad_types_and_out_of_range_years(self):
+        self.client.force_authenticate(self.owner)
+        url = reverse('logistics-company-detail', args=[self.company.id])
+        cases = [
+            {'representative': {'name': 'Ada', 'favourite_colour': 'blue'}},
+            {'responsible_officers': {'chief_pilot': 'Ada'}},
+            {'operating_profile': {'primary_service': 'x' * 501}},
+            {'representative': {'authority': 'yes'}},
+            {'year_established': 1800},
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                response = self.client.patch(url, payload, format='json')
+                self.assertEqual(response.status_code, 400, response.data)
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.representative, {})
+
+    def test_profile_is_not_editable_by_reviewers_regulators_or_outsiders(self):
+        url = reverse('logistics-company-detail', args=[self.company.id])
+        for user, expected in [(self.reviewer, 403), (self.regulator, 403), (self.outsider, 404)]:
+            with self.subTest(user=user.email):
+                self.client.force_authenticate(user)
+                response = self.client.patch(url, {'business_description': 'Changed by someone else'}, format='json')
+                self.assertEqual(response.status_code, expected)
+        self.company.refresh_from_db()
+        self.assertEqual(self.company.business_description, '')
+
+    def test_several_undeclared_vehicles_and_blank_dates_are_accepted(self):
+        self.client.force_authenticate(self.owner)
+        base = {
+            'company': self.company.id, 'vehicle_type': 'Flatbed truck', 'make': 'MAN', 'model': 'TGS', 'year': 2019,
+            'capacity': '30', 'capacity_unit': 'kg', 'ownership': 'owned', 'vin': '',
+        }
+        for number in range(2):
+            response = self.client.post(reverse('logistics-vehicle-list'), {**base, 'registration': f'LAG-00{number}-QQ'}, format='json')
+            self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(Vehicle.objects.filter(company=self.company, vin__isnull=True).count(), 2)
+
+    def test_vehicle_and_driver_onboarding_fields_are_stored_and_returned(self):
+        self.client.force_authenticate(self.owner)
+        vehicle = self.client.post(reverse('logistics-vehicle-list'), {
+            'company': self.company.id, 'vehicle_reference': 'VEH-001', 'registration': 'LAG-777-AB', 'vehicle_type': 'Tipper truck',
+            'make': 'Howo', 'model': 'A7', 'year': 2020, 'capacity': '25', 'capacity_unit': 'tonnes', 'ownership': 'leased',
+            'operating_status': 'Available', 'location': 'Ilesa depot', 'maintenance_status': 'Current',
+            'tracking_capability': 'Available', 'insurance_declared': True, 'roadworthiness_declared': False,
+            'safety_equipment_declared': True,
+        }, format='json')
+        self.assertEqual(vehicle.status_code, 201, vehicle.data)
+        self.assertEqual(vehicle.data['vehicle_reference'], 'VEH-001')
+        self.assertIsNone(vehicle.data['insurance_expiry'])
+        self.assertTrue(vehicle.data['safety_equipment_declared'])
+
+        driver = self.client.post(reverse('logistics-driver-list'), {
+            'company': self.company.id, 'driver_reference': 'DRV-001', 'full_name': 'Musa Lawal', 'phone': '08000000001',
+            'employment_relationship': 'Employee', 'licence_number': 'LIC-4455', 'licence_class': 'Class E',
+            'licence_expiry': (timezone.localdate() + timedelta(days=200)).isoformat(), 'years_experience': 6,
+            'mineral_haulage_experience': '4 years', 'operating_base': 'Ilesa', 'availability': 'Available',
+            'emergency_contact': 'Ife Ojo 08000000002', 'safety_training_declared': True,
+        }, format='json')
+        self.assertEqual(driver.status_code, 201, driver.data)
+        self.assertEqual(driver.data['driver_reference'], 'DRV-001')
+        self.assertIsNone(driver.data['medical_expiry'])
+        self.assertEqual(driver.data['emergency_contact'], 'Ife Ojo 08000000002')
+        self.assertTrue(driver.data['safety_training_declared'])
+
+        # Regulators read the register, but a driver's contact details stay with the company and its reviewers.
+        self.client.force_authenticate(self.regulator)
+        listed = self.client.get(reverse('logistics-driver-list'), {'company': self.company.id})
+        self.assertEqual(listed.status_code, 200)
+        row = listed.data['results'][0]
+        self.assertNotIn('phone', row)
+        self.assertNotIn('emergency_contact', row)
+
+    def test_monitor_skips_blank_declared_dates_without_failing(self):
+        application = self.make_application(status='submitted')
+        self.make_vehicle(insurance_expiry=None, roadworthiness_expiry=None, vin=None)
+        self.make_driver(medical_expiry=None)
+
+        result = services.monitor_expiries()
+
+        self.assertEqual(result['new_events'], 0)
+        self.assertEqual(application.status, 'submitted')
+
+    def test_assignment_refuses_assets_whose_declared_dates_are_blank(self):
+        movement = Movement.objects.create(
+            company=self.company, reference='MOV-ONB-1', movement_type='bulk', mineral='Barite',
+            origin='Mine A', destination='Plant B', status='scheduled', pickup_at=timezone.now(),
+        )
+        vehicle = self.make_vehicle(registration='LAG-ONB-1', vin=None, insurance_expiry=None)
+        driver = self.make_driver(licence_number='LIC-ONB-1', medical_expiry=None)
+        self.client.force_authenticate(self.owner)
+        url = reverse('logistics-movement-assign', args=[movement.id])
+
+        response = self.client.post(url, {'vehicle': str(vehicle.id)}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['error']['code'], 'vehicle_insurance_undeclared')
+
+        vehicle.insurance_expiry = timezone.localdate() + timedelta(days=90)
+        vehicle.roadworthiness_expiry = timezone.localdate() + timedelta(days=90)
+        vehicle.save(update_fields=['insurance_expiry', 'roadworthiness_expiry'])
+        response = self.client.post(url, {'vehicle': str(vehicle.id), 'driver': str(driver.id)}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['error']['code'], 'driver_medical_undeclared')

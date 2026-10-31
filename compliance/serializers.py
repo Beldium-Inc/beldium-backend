@@ -253,13 +253,13 @@ class ComplianceApplicationSerializer(serializers.ModelSerializer):
         model = ComplianceApplication
         fields = [
             "id", "reference", "organisation", "organisation_type", "sector", "status", "organisation_profile", "representative", "services",
-            "professional_capability", "inspection_capability", "conflict_declaration", "declaration", "quality_profile",
+            "professional_capability", "inspection_capability", "conflict_declaration", "declaration", "quality_profile", "logistics_profile",
             "submitted_at", "reviewed_at", "review_notes", "conditional_requirements", "personnel",
             "documents", "conditions", "progress", "created_at", "updated_at",
         ]
         read_only_fields = [
             "id", "reference", "status", "organisation_profile", "representative", "services", "professional_capability",
-            "inspection_capability", "conflict_declaration", "declaration", "quality_profile", "submitted_at", "reviewed_at",
+            "inspection_capability", "conflict_declaration", "declaration", "quality_profile", "logistics_profile", "submitted_at", "reviewed_at",
             "review_notes", "conditional_requirements", "personnel", "documents", "conditions", "progress", "created_at", "updated_at",
         ]
 
@@ -468,18 +468,31 @@ def application_progress(application):
         }
     else:
         if is_logistics_application(application):
+            # A logistics applicant is measured against its own sections and checklist.
+            profile = application.logistics_profile
             required_types = set(LOGISTICS_REQUIRED_DOCUMENT_TYPES)
+            sections = {
+                "account": account_ready,
+                "organisation": bool(application.organisation_profile and application.representative and profile.get("organisation")),
+                "services": bool(profile.get("services")),
+                "capability": bool(profile.get("capability")),
+                "operations": bool(profile.get("operations")),
+                "conflict": bool(profile.get("conflict")),
+                "documents": required_types.issubset(submitted_types) and not outstanding,
+                "personnel": application.personnel.exists(),
+                "declaration": bool(application.declaration.get("confirmed")),
+            }
         else:
             required_types = {document_type for document_type, _ in REQUIRED_DOCUMENTS}
-        sections = {
-            "account": account_ready,
-            "organisation": bool(application.organisation_profile and application.representative and application.services and application.professional_capability),
-            "documents": required_types.issubset(submitted_types) and not outstanding,
-            "personnel": application.personnel.exists(),
-            "inspection_capability": bool(application.inspection_capability),
-            "conflict_declaration": bool(application.conflict_declaration),
-            "declaration": bool(application.declaration.get("confirmed")),
-        }
+            sections = {
+                "account": account_ready,
+                "organisation": bool(application.organisation_profile and application.representative and application.services and application.professional_capability),
+                "documents": required_types.issubset(submitted_types) and not outstanding,
+                "personnel": application.personnel.exists(),
+                "inspection_capability": bool(application.inspection_capability),
+                "conflict_declaration": bool(application.conflict_declaration),
+                "declaration": bool(application.declaration.get("confirmed")),
+            }
     # A document the desk has looked at and rejected is not the same as one that
     # has not arrived yet. "Still gathering it" is fine to submit alongside;
     # "I read it and it is wrong" has to be answered, or the applicant can hand

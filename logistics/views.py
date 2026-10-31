@@ -376,6 +376,11 @@ def assert_assignable_vehicle(vehicle, movement):
     today = timezone.localdate()
     if not vehicle.is_active:
         raise ConflictError('Choose an active vehicle.', code='vehicle_inactive')
+    # A blank date was declared without one, so it cannot be shown to be current.
+    if vehicle.insurance_expiry is None:
+        raise ConflictError('Vehicle insurance validity has not been declared.', code='vehicle_insurance_undeclared')
+    if vehicle.roadworthiness_expiry is None:
+        raise ConflictError('Vehicle roadworthiness validity has not been declared.', code='vehicle_roadworthiness_undeclared')
     if vehicle.insurance_expiry < today:
         raise ConflictError('Vehicle insurance has expired.', code='vehicle_insurance_expired')
     if vehicle.roadworthiness_expiry < today:
@@ -390,6 +395,8 @@ def assert_assignable_driver(driver, movement):
         raise ConflictError('Choose an active driver.', code='driver_inactive')
     if driver.licence_expiry < today:
         raise ConflictError('Driver licence has expired.', code='driver_licence_expired')
+    if driver.medical_expiry is None:
+        raise ConflictError('Driver medical clearance has not been recorded.', code='driver_medical_undeclared')
     if driver.medical_expiry < today:
         raise ConflictError('Driver medical clearance has expired.', code='driver_medical_expired')
     if m.Movement.objects.filter(driver=driver, status__in=ACTIVE_MOVEMENT_STATUSES).exclude(pk=movement.pk).exists():
