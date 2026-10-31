@@ -5,6 +5,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 
 from accounts.models import AccountAuditEvent
+from compliance.logistics_documents import LOGISTICS_REQUIRED_DOCUMENT_TYPES, is_logistics_application
 from compliance.models import ApprovalCondition, ConditionEvidence, ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
 from compliance.quality_sections import (
     QUALITY_REQUIRED_DOCUMENT_TYPES, QUALITY_REQUIRED_SECTIONS, is_quality_application,
@@ -466,7 +467,10 @@ def application_progress(application):
             "declaration": bool(profile.get("declaration", {}).get("signature")),
         }
     else:
-        required_types = {document_type for document_type, _ in REQUIRED_DOCUMENTS}
+        if is_logistics_application(application):
+            required_types = set(LOGISTICS_REQUIRED_DOCUMENT_TYPES)
+        else:
+            required_types = {document_type for document_type, _ in REQUIRED_DOCUMENTS}
         sections = {
             "account": account_ready,
             "organisation": bool(application.organisation_profile and application.representative and application.services and application.professional_capability),

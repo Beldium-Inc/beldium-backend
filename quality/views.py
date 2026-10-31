@@ -293,7 +293,7 @@ class QualityProfessionalApplicationViewSet(
             raise ValidationError({"organisation": ["Select a registered organisation."]})
 
         files = {}
-        for document_type, title, required in s.PROFESSIONAL_DOCUMENTS:
+        for document_type, title, required in s.DOCUMENTS_BY_PROFESSIONAL_ROLE[data["role"]]:
             upload = request.FILES.get(document_type)
             if upload is None:
                 if required:

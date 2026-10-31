@@ -270,6 +270,16 @@ PROFESSIONAL_DOCUMENTS = (
     ("professional_certifications", "Professional Certifications", False),
     ("other_supporting_documents", "Other Supporting Documents", False),
 )
+LABORATORY_ANALYST_DOCUMENTS = (
+    ("professional_qualifications", "Professional Qualifications", True),
+    ("professional_certifications", "Professional Certifications", False),
+    ("testing_method_evidence", "Testing Method Evidence", False),
+    ("other_supporting_documents", "Other Supporting Documents", False),
+)
+DOCUMENTS_BY_PROFESSIONAL_ROLE = {
+    "officer_inspector": PROFESSIONAL_DOCUMENTS,
+    "laboratory_analyst": LABORATORY_ANALYST_DOCUMENTS,
+}
 
 
 class _JSONDateField(serializers.DateField):
@@ -326,7 +336,7 @@ class ProfessionalDeclarationSerializer(serializers.Serializer):
 
 class ProfessionalApplicationInputSerializer(serializers.Serializer):
     organisation = serializers.UUIDField()
-    role = serializers.ChoiceField(choices=["officer_inspector"], default="officer_inspector")
+    role = serializers.ChoiceField(choices=list(DOCUMENTS_BY_PROFESSIONAL_ROLE), default="officer_inspector")
     personal = ProfessionalPersonalSerializer()
     qualifications = ProfessionalQualificationSerializer(many=True, required=False, default=list)
     certifications = ProfessionalCertificationSerializer(many=True, required=False, default=list)
