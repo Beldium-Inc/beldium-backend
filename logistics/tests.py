@@ -10,6 +10,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
+from compliance.logistics_documents import LOGISTICS_DOCUMENT_DOMAINS, LOGISTICS_REQUIRED_DOCUMENT_TYPES
 from logistics import services
 from logistics.models import (
     ApprovalCondition,
@@ -145,6 +146,9 @@ class LogisticsTestCase(APITestCase):
         )
         for key in application.sections.filter(applicable=True).values_list("key", flat=True):
             self.add_document(application, key)
+        # Completion is measured against the checklist, not one file per domain.
+        for document_type in LOGISTICS_REQUIRED_DOCUMENT_TYPES:
+            self.add_document(application, LOGISTICS_DOCUMENT_DOMAINS[document_type], document_type=document_type)
         return application
 
 

@@ -6,6 +6,7 @@ from django.utils import timezone
 from accounts.audit import record_account_event
 from accounts.models import User
 from common.exceptions import ConflictError
+from compliance.logistics_documents import LOGISTICS_DOCUMENT_DOMAINS, LOGISTICS_REQUIRED_DOCUMENT_TYPES
 from logistics import metadata, models as m
 
 EDITABLE = {'draft', 'awaiting_information', 'rejected'}
@@ -76,20 +77,22 @@ def evidence_checks(application, data):
 def progress(application):
     sections = list(application.sections.all())
     required = [section for section in sections if section.applicable]
-    supplied = set(valid_documents(application).values_list('domain', flat=True))
+    supplied = set(valid_documents(application).values_list('document_type', flat=True))
     missing_data = [section.key for section in required if not section.data]
-    missing_evidence = [section.key for section in required if section.key not in supplied]
+    missing_types = LOGISTICS_REQUIRED_DOCUMENT_TYPES - supplied
+    missing_evidence = sorted({LOGISTICS_DOCUMENT_DOMAINS[key] for key in missing_types})
     checks = {
         'account': bool(application.created_by.is_active and application.created_by.email_verified_at),
         'company': bool(application.company.contact_email and application.company.services),
         'fleet': application.company.vehicles.filter(is_active=True).exists(),
         'drivers': application.company.drivers.filter(is_active=True).exists(),
         'sections': bool(required) and not missing_data,
-        'documents': bool(required) and not missing_evidence,
+        'documents': bool(required) and not missing_types,
         'requests': not application.requests.exclude(status='accepted').exists(),
     }
     return {'percent': round(sum(checks.values()) / len(checks) * 100), 'checks': checks,
             'missing_sections': missing_data, 'missing_document_domains': missing_evidence,
+            'missing_document_types': sorted(missing_types),
             'documents_submitted': application.documents.filter(is_current=True).count(),
             'domains_required': len(required)}
 

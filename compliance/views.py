@@ -15,6 +15,7 @@ from pathlib import Path
 
 from accounts.audit import record_account_event
 from accounts.models import AccountAuditEvent
+from compliance.logistics_documents import LOGISTICS_DOCUMENT_CONDITIONS, LOGISTICS_DOCUMENT_TITLES, LOGISTICS_DOCUMENTS, is_logistics_application
 from compliance.models import ApprovalCondition, MessageReadReceipt, ApplicationMessage, ApplicationStatus, ComplianceApplication, ComplianceDocument, Personnel, REQUIRED_DOCUMENTS
 from compliance.permissions import IsApplicationMember
 from compliance.serializers import (
@@ -323,11 +324,23 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if request.method == "GET":
             return Response(ComplianceDocumentSerializer(application.documents.all(), many=True, context={"request": request}).data)
         self._assert_editor(application)
-        self._assert_evidence_editable(application)
+        document_type = request.data.get("document_type", "")
+        # A verified Logistics account can still supply what the current
+        # checklist asks for. Its verified evidence stays locked.
+        if not (
+            is_logistics_application(application)
+            and document_type in LOGISTICS_DOCUMENT_TITLES
+            and not application.documents.filter(document_type=document_type, status=ComplianceDocument.Status.VERIFIED).exists()
+        ):
+            self._assert_evidence_editable(application)
         if "file" not in request.FILES:
             raise AppError("A replacement file is required.", code="validation_error")
-        document_type = request.data.get("document_type", "")
-        required = QUALITY_DOCUMENT_TITLES if is_quality_application(application) else dict(REQUIRED_DOCUMENTS)
+        if is_quality_application(application):
+            required = QUALITY_DOCUMENT_TITLES
+        elif is_logistics_application(application):
+            required = LOGISTICS_DOCUMENT_TITLES
+        else:
+            required = dict(REQUIRED_DOCUMENTS)
         existing = application.documents.filter(document_type=document_type).first()
         if document_type not in required and not existing:
             raise AppError("This document type has not been requested.", code="unknown_document_type")
@@ -393,14 +406,22 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         requirements = []
         if is_quality_application(application):
             checklist = QUALITY_DOCUMENTS
+        elif is_logistics_application(application):
+            checklist = [(key, title, required) for key, title, required, _ in LOGISTICS_DOCUMENTS]
+            # Files from the old checklist are kept for the reviewer but are no
+            # longer asked for, unless the desk still needs an answer on one.
+            old_types = dict(REQUIRED_DOCUMENTS)
+            existing = {key: doc for key, doc in existing.items()
+                        if key not in old_types or doc.status in {"requested", "rejected"}}
         else:
             checklist = [(key, title, True) for key, title in REQUIRED_DOCUMENTS]
         for key, title, required in checklist:
             document = existing.pop(key, None)
             requirements.append({"document_type": key, "title": title, "required": required,
+                                 "applies_when": LOGISTICS_DOCUMENT_CONDITIONS.get(key, ""),
                                  "status": document.status if document else "not_submitted",
                                  "due_date": document.due_date if document else None})
-        requirements.extend({"document_type": doc.document_type, "title": doc.title, "required": True,
+        requirements.extend({"document_type": doc.document_type, "title": doc.title, "required": True, "applies_when": "",
                              "status": doc.status, "due_date": doc.due_date} for doc in existing.values())
         return Response(requirements)
 

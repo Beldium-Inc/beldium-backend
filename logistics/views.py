@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from accounts.models import AccountAuditEvent
 from organisations.models import OrganisationMembership
 from common.exceptions import ConflictError
+from compliance.logistics_documents import LOGISTICS_DOCUMENT_TITLES, LOGISTICS_EVIDENCE_DOMAINS
 from logistics import models as m, serializers as s, services
 from logistics.permissions import company_ids, can_review, can_edit, assert_editor, assert_reviewer, is_desk, EDIT_ROLES
 
@@ -219,7 +220,8 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
             raise ConflictError('Mineral transport is required for the declared services.', code='required_domain')
         if data['status'] == 'passed' and data['applicable']:
             documents = application.documents.filter(domain=key, is_current=True)
-            if not section.data or not documents.exists() or documents.exclude(status='verified').exists() or documents.filter(expires_on__lt=timezone.localdate()).exists():
+            needs_evidence = key in LOGISTICS_EVIDENCE_DOMAINS and not documents.exists()
+            if not section.data or needs_evidence or documents.exclude(status='verified').exists() or documents.filter(expires_on__lt=timezone.localdate()).exists():
                 raise ConflictError('Verify current evidence and supply section data before sign-off.', code='domain_evidence_incomplete')
         section.status, section.score, section.applicable = data['status'], data['score'], data['applicable']
         section.review_notes = data['notes']
@@ -237,14 +239,18 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
             documents = visible_documents(request.user, application.documents.all())
             return Response(s.DocumentSerializer(documents, many=True, context=self.context()).data)
         assert_editor(request.user, application.company)
-        services.assert_state(application, services.EDITABLE | {'conditionally_approved', 'approved'})
         payload = s.DocumentUploadSerializer(data=request.data, context=self.context(application=application))
         payload.is_valid(raise_exception=True)
         data = payload.validated_data
         previous = application.documents.filter(document_type=data['document_type'], is_current=True).first()
-        if application.status == 'conditionally_approved' and not data.get('condition'):
+        # An account past the draft stage can still add what the current checklist
+        # asks for, without reopening its review or losing the verdicts it holds.
+        checklist_addition = not previous and data['document_type'] in LOGISTICS_DOCUMENT_TITLES
+        if not checklist_addition:
+            services.assert_state(application, services.EDITABLE | {'conditionally_approved', 'approved'})
+        if application.status == 'conditionally_approved' and not data.get('condition') and not checklist_addition:
             raise ConflictError('Submit condition evidence or request reopening before changing the application.', code='condition_required')
-        if application.status == 'approved' and not previous:
+        if application.status == 'approved' and not previous and not checklist_addition:
             raise ConflictError('Only renewal of existing credentials is allowed after approval.', code='renewal_required')
         if previous:
             for field in ['domain', 'service_scope', 'vehicle', 'driver', 'condition']:
@@ -256,10 +262,11 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
                                 original_name=Path(data['file'].name).name,
                                 **services.evidence_checks(application, data),
                                 version=previous.version + 1 if previous else 1)
-        application.sections.filter(key=document.domain).update(status='pending', score=0, reviewed_at=None, reviewed_by=None)
-        if application.status == 'approved':
-            application.status = 'awaiting_information'
-            application.save(update_fields=['status', 'updated_at'])
+        if not checklist_addition or application.status in services.EDITABLE:
+            application.sections.filter(key=document.domain).update(status='pending', score=0, reviewed_at=None, reviewed_by=None)
+            if application.status == 'approved':
+                application.status = 'awaiting_information'
+                application.save(update_fields=['status', 'updated_at'])
         services.audit(request, application.company, 'document_uploaded', document_id=str(document.pk), version=document.version)
         return Response(s.DocumentSerializer(document, context=self.context()).data, status=201)
 
