@@ -1,5 +1,10 @@
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.contrib.admin import helpers
 from django.contrib.auth.admin import UserAdmin as DjangoUserAdmin
+from django.template.response import TemplateResponse
+
+from accounts.audit import record_account_event
+from accounts.test_account_cleanup import plan_removal, remove_test_accounts
 
 from accounts.models import AccountAuditEvent, AccountRecoveryCode, EmailVerificationCode, PhoneVerificationCode, SocialIdentity, User
 
@@ -22,3 +27,38 @@ class UserAdmin(DjangoUserAdmin):
     )
     add_fieldsets = ((None, {"classes": ("wide",), "fields": ("email", "password1", "password2")}),)
     search_fields = ["email", "first_name", "last_name"]
+    actions = ["remove_test_accounts"]
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        if not request.user.is_superuser:
+            actions.pop("remove_test_accounts", None)
+        return actions
+
+    @admin.action(description="Remove selected test accounts with their logistics records")
+    def remove_test_accounts(self, request, queryset):
+        """The plain delete action refuses accounts that have logistics records.
+        This one clears those records first. It shows what will go and asks
+        for confirmation before deleting anything."""
+        if not request.user.is_superuser:
+            self.message_user(request, "Only superusers can remove test accounts.", messages.ERROR)
+            return None
+        users = list(queryset.order_by("email"))
+        if request.POST.get("confirm") != "yes":
+            return TemplateResponse(request, "admin/accounts/user/remove_test_accounts.html", {
+                **self.admin_site.each_context(request),
+                "title": "Remove test accounts",
+                "opts": self.model._meta,
+                "plans": plan_removal(users, acting_user=request.user),
+                "selected_ids": [str(u.pk) for u in users],
+                "action_checkbox_name": helpers.ACTION_CHECKBOX_NAME,
+            })
+        for result in remove_test_accounts(users, acting_user=request.user):
+            if result.deleted:
+                record_account_event(request, "account.test_account_removed", email=result.email)
+            self.message_user(
+                request,
+                f"Account {result.email}: {result.message}",
+                messages.SUCCESS if result.deleted else messages.WARNING,
+            )
+        return None
