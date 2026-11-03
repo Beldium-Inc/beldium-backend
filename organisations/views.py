@@ -370,20 +370,26 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
         return super().get_throttles()
 
     @extend_schema(request=JoinCodeLookupSerializer, responses=OpenApiTypes.OBJECT)
-    @action(detail=False, methods=["post"])
+    @action(detail=False, methods=["post"], permission_classes=[AllowAny])
     def lookup(self, request):
-        """Name the organisation a code belongs to, so the requester can confirm it before asking."""
+        """Name the organisation a code belongs to, so the requester can confirm it before asking.
+
+        Open before sign in, so someone choosing "Join an existing organisation"
+        can check their code before creating an account. It only ever returns
+        the name and type, and is rate limited by address when signed out.
+        """
         serializer = JoinCodeLookupSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         organisation = organisation_for_join_code(serializer.validated_data["join_code"])
         if organisation is None:
             raise ResourceNotFoundError(INVALID_JOIN_CODE_MESSAGE, code="join_code_invalid")
+        signed_in = request.user.is_authenticated
         return Response({
             "organisation": organisation.id,
             "organisation_name": organisation.name,
             "organisation_type": organisation.organisation_type,
-            "already_member": organisation.memberships.filter(user=request.user, is_active=True).exists(),
-            "pending_request": organisation.join_requests.filter(requester=request.user, status="pending").exists(),
+            "already_member": signed_in and organisation.memberships.filter(user=request.user, is_active=True).exists(),
+            "pending_request": signed_in and organisation.join_requests.filter(requester=request.user, status="pending").exists(),
         })
 
     @extend_schema(

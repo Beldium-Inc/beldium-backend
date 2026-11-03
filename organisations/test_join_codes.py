@@ -110,9 +110,27 @@ class JoinCodeTests(APITestCase):
         self.assertFalse(response.data["already_member"])
         self.assertFalse(response.data["pending_request"])
 
-    def test_lookup_requires_sign_in(self):
+    def test_lookup_works_before_sign_in_and_reveals_only_name_and_type(self):
         response = self.client.post(reverse("join-request-lookup"), {"join_code": self.organisation.join_code})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            set(response.data),
+            {"organisation", "organisation_name", "organisation_type", "already_member", "pending_request"},
+        )
+        self.assertEqual(response.data["organisation_name"], "Jos Assay Partners")
+        self.assertFalse(response.data["already_member"])
+
+    def test_lookup_before_sign_in_is_rate_limited(self):
+        statuses = {
+            self.client.post(reverse("join-request-lookup"), {"join_code": "WRONG123"}).status_code
+            for _ in range(35)
+        }
+        self.assertIn(status.HTTP_429_TOO_MANY_REQUESTS, statuses)
+
+    def test_sending_a_request_still_requires_sign_in(self):
+        response = self.client.post(reverse("join-request-list"), {"join_code": self.organisation.join_code})
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertFalse(JoinRequest.objects.exists())
 
     def test_lookup_hides_suspended_organisation(self):
         self.organisation.verification_status = "suspended"
