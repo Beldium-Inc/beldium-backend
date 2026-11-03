@@ -315,6 +315,8 @@ REST_FRAMEWORK = {
         "login_email": "20/1h",
         "token_refresh": "120/1h",
         "sensitive_action": "10/1h",
+        # Looking up or using an organisation join code.
+        "join_code": "30/1h",
         # The careers forms are public. A partner application is one create,
         # up to fourteen document uploads, then a submit.
         "careers_submit": "20/1h",

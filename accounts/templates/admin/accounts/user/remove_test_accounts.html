@@ -1,0 +1,35 @@
+{% extends "admin/base_site.html" %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a> &rsaquo;
+  <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a> &rsaquo;
+  <a href="{% url 'admin:accounts_user_changelist' %}">Users</a> &rsaquo; Remove test accounts
+</div>
+{% endblock %}
+{% block content %}
+<p>These accounts and everything listed under them will be deleted for good. Use this only for test accounts.</p>
+<ul>
+{% for plan in plans %}
+  <li>
+    <strong>{{ plan.user.email }}</strong>
+    {% if plan.refused_reason %}
+      : will be skipped. {{ plan.refused_reason }}
+    {% else %}
+      <ul>
+        <li>Logistics applications: {% if plan.applications %}{{ plan.applications|join:", " }}{% else %}none{% endif %}</li>
+        <li>Logistics documents: {{ plan.documents }}</li>
+        <li>Organisations only this selection belongs to: {% if plan.organisations %}{{ plan.organisations|join:", " }}{% else %}none{% endif %}</li>
+      </ul>
+    {% endif %}
+  </li>
+{% endfor %}
+</ul>
+<p>If something outside logistics still points to an account, that account is left untouched and the page tells you what is blocking it.</p>
+<form method="post">{% csrf_token %}
+  {% for id in selected_ids %}<input type="hidden" name="{{ action_checkbox_name }}" value="{{ id }}">{% endfor %}
+  <input type="hidden" name="action" value="remove_test_accounts">
+  <input type="hidden" name="confirm" value="yes">
+  <input type="submit" value="Yes, remove these accounts">
+  <a href="{% url 'admin:accounts_user_changelist' %}" class="button cancel-link">No, take me back</a>
+</form>
+{% endblock %}
