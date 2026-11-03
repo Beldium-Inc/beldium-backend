@@ -145,6 +145,71 @@ def send_organisation_invitation_email(email_address, organisation_name, inviter
     )
 
 
+def _frontend_link(path):
+    return f"{settings.FRONTEND_URL.rstrip('/')}{path}"
+
+
+@shared_task(
+    name="accounts.send_join_request_received_email",
+)
+def send_join_request_received_email(email_address, organisation_name, requester_name, requester_email, role):
+    """Tells an owner or administrator that someone asked to join."""
+    _send_template(
+        recipient=email_address,
+        subject=f"{requester_name} asked to join {organisation_name} on Beldium",
+        template="accounts/join_request_received.html",
+        context={
+            "organisation_name": organisation_name,
+            "requester_name": requester_name,
+            "requester_email": requester_email,
+            "role": role,
+            "review_url": _frontend_link("/onboarding/admin"),
+        },
+    )
+
+
+@shared_task(
+    name="accounts.send_join_request_submitted_email",
+)
+def send_join_request_submitted_email(email_address, first_name, organisation_name, role):
+    """Confirms to the requester that their request reached the organisation."""
+    _send_template(
+        recipient=email_address,
+        subject=f"Your request to join {organisation_name} was sent",
+        template="accounts/join_request_submitted.html",
+        context={
+            "first_name": first_name,
+            "organisation_name": organisation_name,
+            "role": role,
+            "status_url": _frontend_link("/onboarding/join"),
+        },
+    )
+
+
+@shared_task(
+    name="accounts.send_join_request_decided_email",
+)
+def send_join_request_decided_email(email_address, first_name, organisation_name, approved, role, notes):
+    """Tells the requester whether an administrator accepted or declined them."""
+    _send_template(
+        recipient=email_address,
+        subject=(
+            f"You now have access to {organisation_name} on Beldium"
+            if approved
+            else f"Your request to join {organisation_name} was declined"
+        ),
+        template="accounts/join_request_decided.html",
+        context={
+            "first_name": first_name,
+            "organisation_name": organisation_name,
+            "approved": approved,
+            "role": role,
+            "notes": notes,
+            "signin_url": _frontend_link("/signin"),
+        },
+    )
+
+
 TERMII_SEND_URL = "https://api.ng.termii.com/api/sms/send"
 
 

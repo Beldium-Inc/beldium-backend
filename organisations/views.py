@@ -6,20 +6,33 @@ from django.utils import timezone
 from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from django.conf import settings
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
+from rest_framework.throttling import UserRateThrottle
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 
 from accounts.models import AccountAuditEvent
 from accounts.services import enqueue_account_email
+from accounts.throttles import MultiUnitRateMixin
 from organisations.audit import record_event
 from organisations.dedupe import apply_dedupe, plan_dedupe
-from organisations.models import JoinRequest, MembershipRole, Organisation, OrganisationInvitation, OrganisationMembership
+from organisations.models import (
+    JoinRequest,
+    MembershipRole,
+    Organisation,
+    OrganisationInvitation,
+    OrganisationMembership,
+    generate_join_code,
+)
 from common.exceptions import ConflictError, ResourceNotFoundError
 from organisations.timeline import build_timeline
 from organisations.permissions import has_organisation_role
 from organisations.serializers import (
+    INVALID_JOIN_CODE_MESSAGE,
+    JoinCodeLookupSerializer,
+    organisation_for_join_code,
     JoinRequestDecisionSerializer,
     JoinRequestSerializer,
     InvitationAcceptanceSerializer,
@@ -33,6 +46,23 @@ from organisations.serializers import (
 
 
 ADMIN_ROLES = [MembershipRole.OWNER, MembershipRole.ADMIN]
+
+
+class JoinCodeThrottle(MultiUnitRateMixin, UserRateThrottle):
+    # A join code is short, so guessing has to be slow.
+    scope = "join_code"
+
+
+def join_link(code):
+    return f"{settings.FRONTEND_URL.rstrip('/')}/onboarding/join?code={code}"
+
+
+def join_code_payload(organisation):
+    return {"join_code": organisation.join_code, "join_url": join_link(organisation.join_code)}
+
+
+def display_name(user):
+    return user.full_name or user.email
 
 
 class OrganisationViewSet(viewsets.ModelViewSet):
@@ -124,6 +154,32 @@ class OrganisationViewSet(viewsets.ModelViewSet):
         invitation.save(update_fields=["revoked_at", "updated_at"])
         record_event(request, "membership.invitation_revoked", organisation=organisation, invitation_id=str(invitation.id))
         return Response({"message": "Invitation revoked."})
+
+    @extend_schema(responses=OpenApiTypes.OBJECT)
+    @action(detail=True, methods=["get"], url_path="join-code")
+    def join_code(self, request, pk=None):
+        """The code and link an administrator shares so colleagues can ask to join."""
+        organisation = self.get_object()
+        if not has_organisation_role(request.user, organisation.id, ADMIN_ROLES):
+            raise PermissionDenied("Only organisation administrators may view the join code.")
+        if not organisation.join_code:
+            organisation.save()
+        return Response(join_code_payload(organisation))
+
+    @extend_schema(request=None, responses=OpenApiTypes.OBJECT)
+    @action(detail=True, methods=["post"], url_path="join-code/rotate")
+    def rotate_join_code(self, request, pk=None):
+        """Replace the code. The old code and every link built from it stop working."""
+        organisation = self.get_object()
+        if not has_organisation_role(request.user, organisation.id, ADMIN_ROLES):
+            raise PermissionDenied("Only organisation administrators may change the join code.")
+        code = generate_join_code()
+        while Organisation.objects.filter(join_code=code).exists():
+            code = generate_join_code()
+        organisation.join_code = code
+        organisation.save(update_fields=["join_code", "updated_at"])
+        record_event(request, "membership.join_code_rotated", organisation=organisation)
+        return Response(join_code_payload(organisation))
 
     @action(detail=True, methods=["get"], url_path="join-requests")
     def join_requests(self, request, pk=None):
@@ -280,9 +336,55 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         organisation = serializer.validated_data["organisation"]
-        if OrganisationMembership.objects.filter(organisation=organisation, user=self.request.user, is_active=True).exists():
+        user = self.request.user
+        if OrganisationMembership.objects.filter(organisation=organisation, user=user, is_active=True).exists():
             raise PermissionDenied("You are already a member of this organisation.")
-        serializer.save(requester=self.request.user)
+        join_request = serializer.save(requester=user)
+        record_event(
+            self.request, "membership.join_request_created",
+            organisation=organisation, request_id=str(join_request.id),
+        )
+        role = join_request.get_requested_role_display()
+        admin_emails = list(
+            organisation.memberships.filter(is_active=True, role__in=ADMIN_ROLES)
+            .exclude(user=user)
+            .values_list("user__email", flat=True)
+        )
+
+        def notify():
+            for address in admin_emails:
+                enqueue_account_email(
+                    "send_join_request_received_email",
+                    address, organisation.name, display_name(user), user.email, role,
+                )
+            enqueue_account_email(
+                "send_join_request_submitted_email",
+                user.email, user.first_name, organisation.name, role,
+            )
+
+        transaction.on_commit(notify)
+
+    def get_throttles(self):
+        if self.action in {"create", "lookup"}:
+            return [JoinCodeThrottle()]
+        return super().get_throttles()
+
+    @extend_schema(request=JoinCodeLookupSerializer, responses=OpenApiTypes.OBJECT)
+    @action(detail=False, methods=["post"])
+    def lookup(self, request):
+        """Name the organisation a code belongs to, so the requester can confirm it before asking."""
+        serializer = JoinCodeLookupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        organisation = organisation_for_join_code(serializer.validated_data["join_code"])
+        if organisation is None:
+            raise ResourceNotFoundError(INVALID_JOIN_CODE_MESSAGE, code="join_code_invalid")
+        return Response({
+            "organisation": organisation.id,
+            "organisation_name": organisation.name,
+            "organisation_type": organisation.organisation_type,
+            "already_member": organisation.memberships.filter(user=request.user, is_active=True).exists(),
+            "pending_request": organisation.join_requests.filter(requester=request.user, status="pending").exists(),
+        })
 
     @extend_schema(
         request=JoinRequestDecisionSerializer,
@@ -292,7 +394,7 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def decide(self, request, pk=None):
         join_request = get_object_or_404(
-            JoinRequest.objects.select_for_update().select_related("organisation"), pk=pk
+            JoinRequest.objects.select_for_update().select_related("organisation", "requester"), pk=pk
         )
         if not has_organisation_role(request.user, join_request.organisation_id, ADMIN_ROLES):
             raise PermissionDenied("Only organisation administrators may decide join requests.")
@@ -323,6 +425,18 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
                 },
             )
         record_event(request, f"membership.join_request_{join_request.status}", organisation=join_request.organisation, request_id=str(join_request.id))
+        requester = join_request.requester
+        approved = join_request.status == "approved"
+        granted_role = MembershipRole(approved_role).label if approved else join_request.get_requested_role_display()
+        transaction.on_commit(lambda: enqueue_account_email(
+            "send_join_request_decided_email",
+            requester.email,
+            requester.first_name,
+            join_request.organisation.name,
+            approved,
+            granted_role,
+            join_request.decision_notes,
+        ))
         return Response(JoinRequestSerializer(join_request).data)
 
 

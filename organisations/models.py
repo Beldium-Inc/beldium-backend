@@ -12,6 +12,21 @@ def generate_beldium_id():
     return f"BLD-ORG-{timezone.now().year}-{secrets.token_hex(4).upper()}"
 
 
+# Letters and digits that cannot be misread for each other when a code is
+# read out or typed by hand (no 0/O, 1/I/L).
+JOIN_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+JOIN_CODE_LENGTH = 8
+
+
+def generate_join_code():
+    return "".join(secrets.choice(JOIN_CODE_ALPHABET) for _ in range(JOIN_CODE_LENGTH))
+
+
+def normalise_join_code(value):
+    """Accept the code the way people type it: any case, with spaces or a dash."""
+    return "".join(ch for ch in (value or "").upper() if ch.isalnum())
+
+
 class OrganisationType(models.TextChoices):
     MINING_COMPANY = "mining_company", "Mining company"
     LOGISTICS_COMPANY = "logistics_company", "Logistics company"
@@ -24,9 +39,16 @@ class OrganisationType(models.TextChoices):
 class Organisation(TimeStampedModel):
     beldium_id = models.CharField(max_length=32, unique=True, null=True, blank=True, editable=False)
 
+    # Shared by the organisation's administrators so colleagues can ask to
+    # join. Knowing the code only lets someone send a request; an owner or
+    # administrator still approves or declines it.
+    join_code = models.CharField(max_length=16, unique=True, null=True, blank=True, editable=False)
+
     def save(self, *args, **kwargs):
         if not self.beldium_id:
             self.beldium_id = generate_beldium_id()
+        if not self.join_code:
+            self.join_code = generate_join_code()
         return super().save(*args, **kwargs)
     name = models.CharField(max_length=255)
     organisation_type = models.CharField(max_length=30, choices=OrganisationType.choices, db_index=True)
