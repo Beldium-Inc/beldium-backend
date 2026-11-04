@@ -6,7 +6,8 @@ from the caller's memberships and never from the request, one of:
 ``desk``    the sector's Beldium desk: sees every document in the sector,
             files Beldium's own records or records for any organisation, and
             gives the second approval
-``member``  a partner organisation: sees and files only its own records
+``member``  an approved partner organisation: sees and files only its own
+            records
 None        no access to this sector's vault
 """
 from dataclasses import dataclass
@@ -36,8 +37,11 @@ def _quality(user):
     if role == "operator":
         return Standing(DESK)
     if role == "partner":
+        # Only once Beldium has approved the organisation's onboarding. The
+        # organisation type is chosen by the applicant at sign up, so an
+        # organisation still in draft or under review has no vault yet.
         organisation = services.user_organisation(user)
-        if organisation:
+        if organisation and organisation.verification_status == "verified":
             return Standing(MEMBER, organisation)
     return None
 

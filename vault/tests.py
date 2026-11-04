@@ -88,6 +88,16 @@ class VaultTests(APITestCase):
             self.client.force_authenticate(user)
             self.assertEqual(self.client.get(reverse("vault-sectors")).data["sectors"], [])
 
+    def test_partner_needs_an_approved_organisation(self):
+        document = self.upload(self.partner).data["id"]
+        for status_value in ["draft", "under_review", "rejected", "suspended"]:
+            Organisation.objects.filter(pk=self.lab.pk).update(verification_status=status_value)
+            self.client.force_authenticate(self.partner)
+            self.assertEqual(self.client.get(reverse("vault-sectors")).data["sectors"], [], status_value)
+            self.assertEqual(self.client.get(self.documents_url, {"sector": "quality"}).data["count"], 0)
+            self.assertEqual(self.client.get(self.detail_url(document)).status_code, 404)
+            self.assertEqual(self.upload(self.partner, file=pdf(b"new")).status_code, 403)
+
     def test_sector_without_a_vault_is_refused(self):
         self.client.force_authenticate(self.operator)
         response = self.client.get(self.documents_url, {"sector": "logistics"})
