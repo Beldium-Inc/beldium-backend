@@ -21,11 +21,32 @@ class OrganisationMembershipSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = OrganisationMembership
-        fields = ["id", "user", "role", "title", "employee_id", "is_active", "suspended_at", "permissions", "created_at"]
-        read_only_fields = ["id", "created_at"]
+        fields = [
+            "id", "user", "role", "title", "employee_id", "is_active", "suspended_at", "status",
+            "invited_by", "approved_by", "approved_at", "permissions", "created_at",
+        ]
+        read_only_fields = ["id", "status", "invited_by", "approved_by", "approved_at", "created_at"]
 
     def get_permissions(self, obj) -> list[str]:
         return permissions_for_role(obj.role)
+
+
+class TeamMemberSerializer(serializers.ModelSerializer):
+    """What a staff member sees of the team: names and roles only."""
+    user = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrganisationMembership
+        fields = ["id", "user", "role", "title", "is_active"]
+        read_only_fields = fields
+
+    def get_user(self, obj) -> dict:
+        return {
+            "id": str(obj.user_id),
+            "first_name": obj.user.first_name,
+            "last_name": obj.user.last_name,
+            "full_name": obj.user.full_name,
+        }
 
 
 class OrganisationSerializer(serializers.ModelSerializer):

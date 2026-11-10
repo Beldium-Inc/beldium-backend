@@ -42,6 +42,7 @@ def memberships(user):
             list(
                 OrganisationMembership.objects.filter(user=user, is_active=True)
                 .select_related("organisation__compliance_application")
+                .prefetch_related("organisation__sector_grants")
                 .only(
                     "role",
                     "organisation__id",
@@ -73,6 +74,53 @@ def registered_sector(organisation):
         return ""
 
 
+def granted_sectors(organisation):
+    """The sectors a regulator organisation was approved for, or None.
+
+    None means the organisation holds no grant rows at all: it predates
+    regulator access requests and keeps the rule it had (its registered
+    sector, or every sector when none is recorded). An organisation with
+    grant rows sees only the sectors whose grant is still active, so a
+    revoked grant leaves it seeing nothing rather than everything.
+    """
+    grants = list(organisation.sector_grants.all())
+    if not grants:
+        return None
+    return {grant.sector for grant in grants if grant.is_active}
+
+
+def sector_allowed(organisation, sector):
+    """Is a vetted privileged organisation allowed into ``sector``?
+
+    ``sector`` None asks whether it is allowed into any sector at all.
+    """
+    if organisation.organisation_type == OrganisationType.REGULATOR:
+        granted = granted_sectors(organisation)
+        if granted is not None:
+            return bool(granted) if sector is None else sector in granted
+    return sector is None or registered_sector(organisation) in {"", sector}
+
+
+def regulator_granted(user, sector):
+    """Does the caller belong to a verified regulator organisation with an
+    active grant for ``sector``? Used by the sectors whose register is
+    otherwise opened only by per-company grants (export, warehousing,
+    marketplace), so an approved regulator reads them without a grant row
+    per company, and an older regulator organisation gains nothing new."""
+    if not user.is_authenticated:
+        return False
+    for membership in memberships(user):
+        organisation = membership.organisation
+        if organisation.organisation_type != OrganisationType.REGULATOR:
+            continue
+        if organisation.verification_status != "verified":
+            continue
+        granted = granted_sectors(organisation)
+        if granted and sector in granted:
+            return True
+    return False
+
+
 def _counts_in(membership, sector):
     """Does this membership give its holder standing in ``sector``?
 
@@ -86,7 +134,7 @@ def _counts_in(membership, sector):
         return True
     if organisation.verification_status != "verified":
         return False
-    return sector is None or registered_sector(organisation) in {"", sector}
+    return sector_allowed(organisation, sector)
 
 
 def audience(user, sector=None):

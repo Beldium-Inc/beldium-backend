@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from common.exceptions import ConflictError
 from marketplace import models as m, serializers as s, services
 from marketplace.permissions import assert_editor, assert_reviewer, can_edit, can_review, seller_ids, EDIT_ROLES
+from organisations.rights import build_me
 from organisations.models import OrganisationMembership
 
 
@@ -429,7 +430,7 @@ class SummaryViewSet(AtomicViewSet):
     @action(detail=False, methods=["get"])
     def me(self, request):
         sellers = m.SellerProfile.objects.filter(pk__in=seller_ids(request.user)).select_related("organisation")
-        return Response({"is_staff": request.user.is_staff, "sellers": [
+        return Response({**build_me(request.user, "marketplace"), "is_staff": request.user.is_staff, "sellers": [
             {"id": seller.pk, "name": seller.display_name, "status": seller.status, "can_edit": can_edit(request.user, seller), "can_review": can_review(request.user, seller), "can_read": True}
             for seller in sellers
         ]})

@@ -21,6 +21,7 @@ from accounts.models import AccountAuditEvent
 from common.exceptions import ConflictError
 from warehousing import models as m, serializers as s, services
 from warehousing.permissions import EDIT_ROLES, assert_editor, assert_reviewer, can_edit, can_review, warehouse_ids
+from organisations.rights import build_me
 from organisations.models import OrganisationMembership
 
 
@@ -560,7 +561,7 @@ class SummaryViewSet(AtomicViewSet):
     @action(detail=False, methods=["get"])
     def me(self, request):
         warehouses = m.WarehouseOperator.objects.filter(pk__in=warehouse_ids(request.user)).select_related("organisation")
-        return Response({"is_staff": request.user.is_staff, "warehouses": [
+        return Response({**build_me(request.user, "warehousing"), "is_staff": request.user.is_staff, "warehouses": [
             {"id": warehouse.pk, "name": warehouse.organisation.name, "can_edit": can_edit(request.user, warehouse), "can_review": can_review(request.user, warehouse), "can_read": True}
             for warehouse in warehouses
         ]})

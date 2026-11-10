@@ -21,6 +21,7 @@ from accounts.models import AccountAuditEvent
 from common.exceptions import ConflictError
 from export import models as m, serializers as s, services
 from export.permissions import EDIT_ROLES, assert_editor, assert_reviewer, can_edit, can_review, exporter_ids
+from organisations.rights import build_me
 from organisations.models import OrganisationMembership
 
 
@@ -549,7 +550,7 @@ class SummaryViewSet(AtomicViewSet):
     @action(detail=False, methods=["get"])
     def me(self, request):
         exporters = m.Exporter.objects.filter(pk__in=exporter_ids(request.user)).select_related("organisation")
-        return Response({"is_staff": request.user.is_staff, "exporters": [
+        return Response({**build_me(request.user, "export"), "is_staff": request.user.is_staff, "exporters": [
             {"id": exporter.pk, "name": exporter.organisation.name, "can_edit": can_edit(request.user, exporter), "can_review": can_review(request.user, exporter), "can_read": True}
             for exporter in exporters
         ]})

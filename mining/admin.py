@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from mining.models import (
+    MiningAccessGrant,
     Application,
     CorrectiveSubmission,
     DocumentRecord,
@@ -125,3 +126,9 @@ class DocumentRecordAdmin(admin.ModelAdmin):
 
 
 admin.site.register([LicenceDoc, PendingReview, InfoRequest, ScoreFactor, Evidence, CorrectiveSubmission])
+
+
+@admin.register(MiningAccessGrant)
+class MiningAccessGrantAdmin(admin.ModelAdmin):
+    list_display = ["organisation", "user", "role", "is_active", "created_at"]
+    list_filter = ["role", "is_active"]

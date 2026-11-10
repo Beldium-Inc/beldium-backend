@@ -18,6 +18,7 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
 from accounts.models import AccountAuditEvent
+from organisations.rights import build_me
 from organisations.models import OrganisationMembership
 from common.exceptions import ConflictError
 from compliance.logistics_documents import LOGISTICS_DOCUMENT_TITLES, LOGISTICS_EVIDENCE_DOMAINS
@@ -998,7 +999,7 @@ class SummaryViewSet(AtomicViewSet):
     @action(detail=False, methods=['get'])
     def me(self, request):
         companies = m.LogisticsCompany.objects.filter(pk__in=company_ids(request.user))
-        return Response({'is_staff': request.user.is_staff, 'companies': [
+        return Response({**build_me(request.user, 'logistics'), 'is_staff': request.user.is_staff, 'companies': [
             {'id': company.pk, 'name': company.organisation.name, 'can_edit': can_edit(request.user, company),
              'can_review': can_review(request.user, company), 'can_read': True} for company in companies]})
 

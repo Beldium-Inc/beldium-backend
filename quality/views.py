@@ -16,6 +16,7 @@ import json
 
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
+from organisations.rights import build_me
 from organisations.models import Organisation
 from quality import bridge
 from quality import models as m
@@ -90,7 +91,7 @@ class SummaryView(APIView):
             "is_staff": bool(user.is_staff),
         }
         if kind == "me":
-            return Response(s.QualityCapabilitiesSerializer(capabilities).data)
+            return Response({**build_me(user, "quality"), **s.QualityCapabilitiesSerializer(capabilities).data})
 
         totals = {
             "applications": m.QualityApplication.objects.count(),

@@ -101,6 +101,29 @@ class MiningOrganisationProfile(TimeStampedModel):
         return f"Mining profile: {self.organisation.name}"
 
 
+class MiningAccessGrant(TimeStampedModel):
+    """Read access to one mining company for a person outside it.
+
+    Same pattern as logistics.LogisticsAccessGrant (backend plan section 3).
+    Approving a regulator access request for mining writes one ``regulator``
+    row per mining company that exists at the time; the regulator's reading
+    of the whole register is decided by organisations.access, which also
+    covers companies registered after the approval.
+    """
+
+    organisation = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.CASCADE, related_name="mining_access_grants"
+    )
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="mining_access_grants")
+    role = models.CharField(max_length=20, choices=[("reviewer", "Reviewer"), ("regulator", "Regulator")])
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["organisation", "user", "role"], name="unique_mining_access_grant")
+        ]
+
+
 class MineSite(TimeStampedModel):
     """A single mine site on the register."""
 

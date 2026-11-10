@@ -104,7 +104,16 @@ class IsMiningParticipant(BasePermission):
     message = "You do not have access to the mining compliance register."
 
     def has_permission(self, request, view):
-        return bool(request.user and request.user.is_authenticated and audience(request.user))
+        if not (request.user and request.user.is_authenticated):
+            return False
+        role = audience(request.user)
+        if not role:
+            return False
+        # A regulator reads and never writes (backend plan section 3), on
+        # every endpoint, whatever the endpoint itself checks.
+        if role == REGULATOR and request.method not in SAFE_METHODS:
+            return False
+        return True
 
 
 class IsMiningOperator(BasePermission):

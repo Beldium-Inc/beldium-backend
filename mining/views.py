@@ -18,6 +18,7 @@ from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -26,6 +27,7 @@ from rest_framework.views import APIView
 
 from accounts.audit import record_account_event
 from accounts.models import AccountAuditEvent
+from organisations.rights import build_me
 from organisations.models import Organisation
 from common.exceptions import AppError, ConflictError
 from common.files import serve_stored_file
@@ -1401,11 +1403,14 @@ class MiningDashboardView(APIView):
 class MiningCapabilityView(APIView):
     """What this caller may do in the mining compliance vertical."""
 
-    permission_classes = [IsMiningParticipant]
+    # Open to any signed in caller (BE-O6): a pending or suspended member
+    # needs to learn that from here too. Without an audience the capability
+    # fields are all false and build_me gives no rights.
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request):
-        return Response(capabilities(request.user))
+        return Response({**build_me(request.user, "mining"), **capabilities(request.user)})
 
 
 class MiningChecklistView(APIView):
