@@ -84,6 +84,12 @@ LOGISTICS_PORTAL_ORIGINS = config(
     cast=lambda value: [x.strip() for x in value.split(",") if x.strip()],
 )
 
+# Where the onboarding options send a mining or logistics company to
+# register (BE-O1). Their own portals take the company's sites, fleet and
+# drivers, so the options screen links out to them.
+MINER_PORTAL_URL = config("MINER_PORTAL_URL", default=MINER_PORTAL_ORIGINS[0] if MINER_PORTAL_ORIGINS else "")
+LOGISTICS_PORTAL_URL = config("LOGISTICS_PORTAL_URL", default=LOGISTICS_PORTAL_ORIGINS[0] if LOGISTICS_PORTAL_ORIGINS else "")
+
 if DEPLOYED:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     SECURE_SSL_REDIRECT = True
@@ -108,6 +114,7 @@ INSTALLED_APPS = [
     "common",
     "accounts",
     "organisations",
+    "onboarding",
     "compliance",
     "processing",
     "logistics",

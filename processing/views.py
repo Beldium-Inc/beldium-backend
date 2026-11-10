@@ -15,6 +15,7 @@ from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status, viewsets
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action
 from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -86,6 +87,7 @@ from processing.serializers import (
     ProcessingSectionReviewSerializer,
     TraceabilityRunSerializer,
 )
+from organisations.rights import build_me
 
 # Stages an applicant may still edit their own submission in. Once the desk has
 # taken a decision, corrections go through a new information request.
@@ -1191,8 +1193,11 @@ class ProcessingCapabilityView(APIView):
     than against a stored preference.
     """
 
-    permission_classes = [IsProcessingParticipant]
+    # Open to any signed in caller (BE-O6): a pending or suspended member
+    # needs to learn that from here too. Without an audience the capability
+    # fields are all false and build_me gives no rights.
+    permission_classes = [IsAuthenticated]
 
     @extend_schema(responses=OpenApiTypes.OBJECT)
     def get(self, request):
-        return Response(capabilities(request.user))
+        return Response({**build_me(request.user, "processing"), **capabilities(request.user)})

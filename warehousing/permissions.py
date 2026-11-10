@@ -1,6 +1,7 @@
 from django.db.models import Q
 from rest_framework.exceptions import PermissionDenied
 
+from organisations import access
 from warehousing.models import WarehousingAccessGrant, WarehouseOperator
 from organisations.models import OrganisationMembership
 
@@ -10,7 +11,9 @@ EDIT_ROLES = {"owner", "admin", "compliance_manager"}
 def warehouse_ids(user):
     if not user.is_authenticated or not user.is_active:
         return WarehouseOperator.objects.none().values_list("id", flat=True)
-    if user.is_staff:
+    # A regulator approved for this sector reads the whole register; it can
+    # still change nothing, since every write checks can_edit or can_review.
+    if user.is_staff or access.regulator_granted(user, "warehousing"):
         return WarehouseOperator.objects.values_list("id", flat=True)
     return WarehouseOperator.objects.filter(
         Q(organisation__memberships__user=user, organisation__memberships__is_active=True)

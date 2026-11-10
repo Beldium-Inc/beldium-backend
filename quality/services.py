@@ -5,7 +5,7 @@ import uuid
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
-from organisations.access import registered_sector
+from organisations.access import sector_allowed
 from organisations.models import OrganisationMembership, OrganisationType
 
 # --- role derivation ---------------------------------------------------------
@@ -53,7 +53,7 @@ def derive_role(user):
         role = _ORG_TYPE_TO_ROLE.get(membership.organisation.organisation_type)
         # A partner or regulator vetted for another sector has no seat here;
         # a miner, who registers no sector, is unaffected.
-        if role in {"partner", "regulator"} and registered_sector(membership.organisation) not in {"", "quality"}:
+        if role in {"partner", "regulator"} and not sector_allowed(membership.organisation, "quality"):
             role = None
         if role:
             return role

@@ -42,6 +42,7 @@ from organisations.serializers import (
     OrganisationInvitationSerializer,
     OrganisationMembershipSerializer,
     OrganisationSerializer,
+    TeamMemberSerializer,
 )
 
 
@@ -112,6 +113,10 @@ class OrganisationViewSet(viewsets.ModelViewSet):
     def members(self, request, pk=None):
         organisation = self.get_object()
         memberships = organisation.memberships.select_related("user")
+        # Section 2: staff see the team's names and roles only, never their
+        # email addresses or phone numbers.
+        if not has_organisation_role(request.user, organisation.id, ADMIN_ROLES):
+            return Response(TeamMemberSerializer(memberships.filter(is_active=True), many=True).data)
         return Response(OrganisationMembershipSerializer(memberships, many=True).data)
 
     @action(detail=True, methods=["get"], url_path="my-permissions")
@@ -196,6 +201,20 @@ class OrganisationViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("The organisation owner cannot be modified through member management.")
         return membership
 
+    @staticmethod
+    def _guard_last_admin(organisation, membership):
+        """Refuse a change that would leave the organisation with no active
+        owner or administrator. Call it with the change about to be made: the
+        member is about to stop being an active admin."""
+        if not (membership.is_active and membership.role in ADMIN_ROLES):
+            return
+        others = organisation.memberships.filter(is_active=True, role__in=ADMIN_ROLES).exclude(id=membership.id)
+        if not others.exists():
+            raise ConflictError(
+                "This is the organisation's last administrator. Make someone else an administrator first.",
+                code="last_admin",
+            )
+
     @extend_schema(parameters=[OpenApiParameter("membership_id", OpenApiTypes.UUID, OpenApiParameter.PATH)])
     @action(detail=True, methods=["patch"], url_path=r"members/(?P<membership_id>[^/.]+)")
     def update_member(self, request, pk=None, membership_id=None):
@@ -205,6 +224,9 @@ class OrganisationViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         if serializer.validated_data.get("role") == MembershipRole.OWNER:
             raise PermissionDenied("Ownership transfer requires a dedicated workflow.")
+        new_role = serializer.validated_data.get("role", membership.role)
+        if new_role not in ADMIN_ROLES:
+            self._guard_last_admin(organisation, membership)
         for field, value in serializer.validated_data.items():
             setattr(membership, field, value)
         membership.save()
@@ -216,6 +238,7 @@ class OrganisationViewSet(viewsets.ModelViewSet):
     def suspend_member(self, request, pk=None, membership_id=None):
         organisation = self.get_object()
         membership = self._managed_membership(request, organisation, membership_id)
+        self._guard_last_admin(organisation, membership)
         membership.is_active = False
         membership.suspended_at = timezone.now()
         membership.save(update_fields=["is_active", "suspended_at", "updated_at"])
@@ -240,6 +263,7 @@ class OrganisationViewSet(viewsets.ModelViewSet):
     def remove_member(self, request, pk=None, membership_id=None):
         organisation = self.get_object()
         membership = self._managed_membership(request, organisation, membership_id)
+        self._guard_last_admin(organisation, membership)
         user_id = str(membership.user_id)
         membership.delete()
         record_event(request, "membership.removed", organisation=organisation, user_id=user_id)
@@ -392,6 +416,32 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
             "pending_request": signed_in and organisation.join_requests.filter(requester=request.user, status="pending").exists(),
         })
 
+    @extend_schema(request=None, responses={status.HTTP_200_OK: JoinRequestSerializer})
+    @action(detail=True, methods=["post"])
+    @transaction.atomic
+    def cancel(self, request, pk=None):
+        """The requester withdraws a request that is still waiting (BE-O4).
+
+        get_queryset only holds the caller's own requests, so anyone else's
+        id answers 404 rather than confirming it exists.
+        """
+        join_request = get_object_or_404(
+            self.get_queryset().select_for_update(of=("self",)), pk=pk
+        )
+        if join_request.status != "pending":
+            raise ConflictError(
+                "Only a request that is still waiting can be withdrawn.",
+                code="join_request_not_pending",
+            )
+        join_request.status = "cancelled"
+        join_request.decided_at = timezone.now()
+        join_request.save(update_fields=["status", "decided_at", "updated_at"])
+        record_event(
+            request, "membership.join_request_cancelled",
+            organisation=join_request.organisation, request_id=str(join_request.id),
+        )
+        return Response(JoinRequestSerializer(join_request).data)
+
     @extend_schema(
         request=JoinRequestDecisionSerializer,
         responses={status.HTTP_200_OK: JoinRequestSerializer},
@@ -428,6 +478,9 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
                     "title": join_request.job_title,
                     "employee_id": join_request.employee_id,
                     "is_active": True,
+                    "suspended_at": None,
+                    "approved_by": request.user,
+                    "approved_at": join_request.decided_at,
                 },
             )
         record_event(request, f"membership.join_request_{join_request.status}", organisation=join_request.organisation, request_id=str(join_request.id))
@@ -468,7 +521,16 @@ class InvitationAcceptanceView(generics.GenericAPIView):
         OrganisationMembership.objects.update_or_create(
             organisation=invitation.organisation,
             user=request.user,
-            defaults={"role": invitation.role, "is_active": True},
+            # An invite needs no second approval (D8): the admin who sent it
+            # is the approval.
+            defaults={
+                "role": invitation.role,
+                "is_active": True,
+                "suspended_at": None,
+                "invited_by": invitation.invited_by,
+                "approved_by": invitation.invited_by,
+                "approved_at": timezone.now(),
+            },
         )
         invitation.accepted_at = timezone.now()
         invitation.save(update_fields=["accepted_at", "updated_at"])
