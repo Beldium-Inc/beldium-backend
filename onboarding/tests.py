@@ -11,7 +11,7 @@ from accounts.models import User
 from export.models import Exporter
 from logistics.models import LogisticsAccessGrant, LogisticsCompany
 from mining.models import MineSite, MiningAccessGrant
-from onboarding.models import OnboardingOption, ParticipantApplication, RegulatorAccessRequest
+from onboarding.models import OnboardingDashboard, OnboardingOption, ParticipantApplication, RegulatorAccessRequest
 from onboarding.participants import REQUIREMENTS
 from organisations import rights
 from organisations.models import (
@@ -61,6 +61,13 @@ class OptionsTests(OnboardingTestCase):
         response = self.client.get(self.url, {"sector": "processing"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["sector"], "processing")
+        self.assertEqual([d["key"] for d in response.data["dashboards"]], ["partner"])
+        partner = response.data["dashboards"][0]
+        self.assertEqual(partner["options"][0]["role"], "compliance-org")
+
+    def test_applicant_side_can_be_switched_back_on(self):
+        OnboardingDashboard.objects.filter(sector="processing", key="applicant").update(enabled=True)
+        response = self.client.get(self.url, {"sector": "processing"})
         self.assertEqual([d["key"] for d in response.data["dashboards"]], ["applicant", "partner"])
         applicant = response.data["dashboards"][0]
         self.assertEqual(applicant["label"], "Processing company")
@@ -83,7 +90,17 @@ class OptionsTests(OnboardingTestCase):
         self.assertEqual([d["key"] for d in quality], ["partner"])
         self.assertEqual(len(quality[0]["options"]), 6)
 
+    def test_every_sector_shows_only_the_compliance_partner_side(self):
+        # The compliance app's onboarding is for partners and regulators;
+        # each sector's own companies do not sign up here.
+        for sector in ["mining", "processing", "warehousing", "export", "marketplace", "logistics", "quality"]:
+            dashboards = self.client.get(self.url, {"sector": sector}).data["dashboards"]
+            self.assertEqual([d["key"] for d in dashboards], ["partner"], sector)
+
     def test_portal_links_come_from_settings(self):
+        # The mining applicant side is switched off, not deleted; switched
+        # back on it still links to the Miner Portal from settings.
+        OnboardingDashboard.objects.filter(key="applicant").update(enabled=True)
         mining = self.client.get(self.url, {"sector": "mining"}).data["dashboards"][0]["options"][0]
         self.assertEqual(mining["external_url"], "https://miners.example.test")
         self.assertEqual(mining["external_label"], "Continue on the Miner Portal")

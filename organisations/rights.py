@@ -109,6 +109,42 @@ def organisation_matches(organisation, sector):
     return "maybe"
 
 
+def organisation_sector(organisation):
+    """The one sector an organisation belongs to, or "" when it records none
+    (an older partner, or a regulator, which can hold several)."""
+    own_sector = SECTOR_FOR_TYPE.get(organisation.organisation_type)
+    if own_sector:
+        return own_sector
+    if organisation.organisation_type == OrganisationType.REGULATOR:
+        return ""
+    try:
+        return organisation.compliance_application.sector or ""
+    except ObjectDoesNotExist:
+        return ""
+
+
+def wrong_sector_message(organisation, sector):
+    """Why a join code or invitation from ``organisation`` cannot be used on
+    ``sector``'s sign-up, or "" when it can.
+
+    A logistics firm's code does not let someone in through the mining
+    screen, and the other way round. An organisation that records no sector
+    is not refused, since there is nothing to compare.
+    """
+    if not sector or organisation_matches(organisation, sector) is not False:
+        return ""
+    from organisations.models import SECTOR_CHOICES
+
+    names = dict(SECTOR_CHOICES)
+    home = organisation_sector(organisation)
+    if home:
+        return (
+            f"This belongs to a {names.get(home, home)} organisation. "
+            f"Choose {names.get(home, home)} on the sign-up screen to join it."
+        )
+    return f"This organisation does not work in {names.get(sector, sector)}."
+
+
 def _pick(rows, sector, get_org):
     exact = [row for row in rows if organisation_matches(get_org(row), sector) is True]
     if exact:

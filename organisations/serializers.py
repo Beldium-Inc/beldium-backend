@@ -4,6 +4,7 @@ from rest_framework import serializers
 
 from accounts.models import AccountAuditEvent
 from accounts.serializers import UserSerializer
+from organisations.rights import wrong_sector_message
 from organisations.role_permissions import permissions_for_role
 from organisations.models import (
     JoinRequest,
@@ -11,6 +12,7 @@ from organisations.models import (
     Organisation,
     OrganisationInvitation,
     OrganisationMembership,
+    SECTOR_CHOICES,
     normalise_join_code,
 )
 
@@ -162,12 +164,15 @@ class JoinRequestSerializer(serializers.ModelSerializer):
     organisation_name = serializers.CharField(source="organisation.name", read_only=True)
     # The usual way in: the code or link an organisation administrator shared.
     join_code = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    # The sector the person is signing up in. A code from another sector's
+    # organisation is refused.
+    sector = serializers.ChoiceField(choices=SECTOR_CHOICES, write_only=True, required=False)
 
     class Meta:
         model = JoinRequest
         fields = [
             "id", "organisation", "organisation_name", "requester", "requested_role",
-            "job_title", "employee_id", "justification", "join_code",
+            "job_title", "employee_id", "justification", "join_code", "sector",
             "status", "decision_notes", "decided_at", "created_at",
         ]
         read_only_fields = [
@@ -191,6 +196,9 @@ class JoinRequestSerializer(serializers.ModelSerializer):
             attrs["organisation"] = organisation
         if not attrs.get("organisation"):
             raise serializers.ValidationError({"join_code": ["Enter the join code your organisation shared with you."]})
+        wrong = wrong_sector_message(attrs["organisation"], attrs.pop("sector", ""))
+        if wrong:
+            raise serializers.ValidationError({"join_code": [wrong]})
         request = self.context.get("request")
         if request and JoinRequest.objects.filter(
             organisation=attrs["organisation"], requester=request.user, status="pending"
@@ -203,6 +211,7 @@ class JoinRequestSerializer(serializers.ModelSerializer):
 
 class JoinCodeLookupSerializer(serializers.Serializer):
     join_code = serializers.CharField()
+    sector = serializers.ChoiceField(choices=SECTOR_CHOICES, required=False)
 
 
 class JoinRequestDecisionSerializer(serializers.Serializer):
@@ -213,6 +222,7 @@ class JoinRequestDecisionSerializer(serializers.Serializer):
 
 class InvitationAcceptanceSerializer(serializers.Serializer):
     token = serializers.CharField()
+    sector = serializers.ChoiceField(choices=SECTOR_CHOICES, required=False)
 
 
 class MembershipUpdateSerializer(serializers.Serializer):
