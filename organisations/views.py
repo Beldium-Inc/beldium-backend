@@ -29,6 +29,7 @@ from organisations.models import (
 from common.exceptions import ConflictError, ResourceNotFoundError
 from organisations.timeline import build_timeline
 from organisations.permissions import has_organisation_role
+from organisations.rights import wrong_sector_message
 from organisations.serializers import (
     INVALID_JOIN_CODE_MESSAGE,
     JoinCodeLookupSerializer,
@@ -407,6 +408,9 @@ class JoinRequestViewSet(viewsets.ModelViewSet):
         organisation = organisation_for_join_code(serializer.validated_data["join_code"])
         if organisation is None:
             raise ResourceNotFoundError(INVALID_JOIN_CODE_MESSAGE, code="join_code_invalid")
+        wrong = wrong_sector_message(organisation, serializer.validated_data.get("sector", ""))
+        if wrong:
+            raise ConflictError(wrong, code="join_code_wrong_sector")
         signed_in = request.user.is_authenticated
         return Response({
             "organisation": organisation.id,
@@ -518,6 +522,9 @@ class InvitationAcceptanceView(generics.GenericAPIView):
             )
         if invitation.email.lower() != request.user.email.lower():
             raise PermissionDenied("This invitation belongs to another email address.")
+        wrong = wrong_sector_message(invitation.organisation, serializer.validated_data.get("sector", ""))
+        if wrong:
+            raise ConflictError(wrong, code="invitation_wrong_sector")
         OrganisationMembership.objects.update_or_create(
             organisation=invitation.organisation,
             user=request.user,

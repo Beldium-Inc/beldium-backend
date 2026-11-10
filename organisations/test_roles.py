@@ -208,3 +208,61 @@ class MembershipShapeTests(RoleTestCase):
         membership = OrganisationMembership.objects.get(user=invited)
         self.assertTrue(membership.is_active)
         self.assertEqual(membership.invited_by, self.admin)
+
+
+class SectorLockTests(APITestCase):
+    """A join code or invitation only works on its own sector's sign-up."""
+
+    def setUp(self):
+        cache.clear()
+        from compliance.models import ComplianceApplication
+
+        self.owner = make_user("owner@haul.test")
+        self.firm = Organisation.objects.create(
+            name="Jos Logistics Reviewers", organisation_type="compliance_partner", verification_status="verified",
+        )
+        OrganisationMembership.objects.create(organisation=self.firm, user=self.owner, role=MembershipRole.OWNER)
+        ComplianceApplication.objects.create(organisation=self.firm, created_by=self.owner, sector="logistics")
+        self.legacy = Organisation.objects.create(
+            name="Older Partners", organisation_type="compliance_partner", verification_status="verified",
+        )
+        self.person = make_user("person@x.test")
+        self.client.force_authenticate(self.person)
+
+    def test_lookup_refuses_a_code_from_another_sector(self):
+        url = reverse("join-request-lookup")
+        self.assertEqual(self.client.post(url, {"join_code": self.firm.join_code}).status_code, 200)
+        self.assertEqual(self.client.post(url, {"join_code": self.firm.join_code, "sector": "logistics"}).status_code, 200)
+        response = self.client.post(url, {"join_code": self.firm.join_code, "sector": "mining"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "join_code_wrong_sector")
+
+    def test_join_request_from_another_sector_is_refused(self):
+        url = reverse("join-request-list")
+        response = self.client.post(url, {"join_code": self.firm.join_code, "sector": "mining"})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(JoinRequest.objects.filter(requester=self.person).exists())
+        response = self.client.post(url, {"join_code": self.firm.join_code, "sector": "logistics"})
+        self.assertEqual(response.status_code, 201)
+
+    def test_organisation_without_a_sector_is_not_refused(self):
+        response = self.client.post(reverse("join-request-list"), {"join_code": self.legacy.join_code, "sector": "mining"})
+        self.assertEqual(response.status_code, 201)
+
+    def test_invitation_from_another_sector_is_refused(self):
+        invitation = OrganisationInvitation.objects.create(
+            organisation=self.firm, email=self.person.email, role=MembershipRole.MEMBER,
+            invited_by=self.owner, expires_at=timezone.now() + timedelta(days=3),
+        )
+        url = reverse("accept-invitation")
+        response = self.client.post(url, {"token": invitation.token, "sector": "processing"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["error"]["code"], "invitation_wrong_sector")
+        self.assertFalse(OrganisationMembership.objects.filter(user=self.person).exists())
+        response = self.client.post(url, {"token": invitation.token, "sector": "logistics"})
+        self.assertEqual(response.status_code, 200)
+
+    def test_sector_company_codes_are_locked_too(self):
+        exporter = Organisation.objects.create(name="Jos Exports", organisation_type="exporter")
+        response = self.client.post(reverse("join-request-list"), {"join_code": exporter.join_code, "sector": "warehousing"})
+        self.assertEqual(response.status_code, 400)
