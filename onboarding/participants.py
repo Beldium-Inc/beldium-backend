@@ -21,7 +21,8 @@ SECTIONS = ["company", "operations", "sites", "representative", "declarations"]
 ADMIN_SECTIONS = {"company", "representative", "declarations"}
 
 COMPANY_REQUIRED = ["legalName", "rcNumber", "tin", "address", "email", "phone", "state"]
-REPRESENTATIVE_REQUIRED = ["fullName", "jobTitle", "email", "phone", "signature"]
+# The frontend asks for name and email; job title and phone are optional.
+REPRESENTATIVE_REQUIRED = ["fullName", "email", "signature"]
 
 COMMON_DECLARATIONS = ["accurate", "verify", "notLicence"]
 
