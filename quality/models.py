@@ -170,6 +170,9 @@ class Sample(TimeStampedModel):
     )
     buyer_spec = models.ForeignKey(BuyerSpec, on_delete=models.SET_NULL, null=True, blank=True, related_name="samples")
     status = models.CharField(max_length=20, choices=SampleStatus.choices, default=SampleStatus.REGISTERED, db_index=True)
+    # Rows carried over from the old system are read only and marked legacy.
+    # Set by the 0005 data migration; new samples are never legacy.
+    is_legacy = models.BooleanField(default=False, db_index=True)
 
     registered_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
@@ -188,16 +191,26 @@ class Sample(TimeStampedModel):
 
 class Certificate(TimeStampedModel):
     reference = models.CharField(max_length=50, unique=True, default=certificate_reference, editable=False)
-    sample = models.ForeignKey(Sample, on_delete=models.CASCADE, related_name="certificates")
+    # A certificate cannot disappear with its sample. Corrections are new records.
+    sample = models.ForeignKey(Sample, on_delete=models.PROTECT, related_name="certificates")
     issued_at = models.DateTimeField(default=timezone.now)
     issued_by = models.CharField(max_length=255, blank=True)
     valid_until = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=CertificateStatus.choices, default=CertificateStatus.ACTIVE, db_index=True)
     verification_hash = models.CharField(max_length=128, blank=True)
     scans = models.PositiveIntegerField(default=0)
+    is_legacy = models.BooleanField(default=False, db_index=True)
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            # Blank hashes are allowed (old rows never had one). Every real hash is unique.
+            models.UniqueConstraint(
+                fields=["verification_hash"],
+                condition=~models.Q(verification_hash=""),
+                name="unique_certificate_verification_hash",
+            ),
+        ]
 
     def __str__(self):
         return self.reference
@@ -235,6 +248,7 @@ class QualityNonConformity(TimeStampedModel):
     status = models.CharField(max_length=20, choices=NCStatus.choices, default=NCStatus.OPEN, db_index=True)
     detail = models.TextField(blank=True)
     capa = models.JSONField(default=list, blank=True)
+    is_legacy = models.BooleanField(default=False, db_index=True)
 
     raised_by_user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 

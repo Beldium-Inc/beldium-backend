@@ -1,6 +1,7 @@
 from django.urls import reverse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
+from django.utils import timezone
 from rest_framework import serializers
 
 from organisations.access import sector_allowed
@@ -105,9 +106,9 @@ class SampleSerializer(serializers.ModelSerializer):
             "registered_at", "miner_org", "partner_org", "buyer_org", "buyer_spec",
             "miner_organisation", "partner_organisation", "buyer_organisation",
             "status", "custody", "test_request", "results", "quality_review", "audit",
-            "created_at", "updated_at",
+            "is_legacy", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "reference", "registered_at", "created_at", "updated_at", "custody", "test_request", "results", "quality_review", "audit"]
+        read_only_fields = ["id", "reference", "registered_at", "created_at", "updated_at", "custody", "test_request", "results", "quality_review", "audit", "is_legacy"]
 
 
 class NewSampleSerializer(serializers.Serializer):
@@ -195,18 +196,45 @@ class CertificateSerializer(serializers.ModelSerializer):
         model = m.Certificate
         fields = [
             "id", "reference", "sample", "sample_reference", "material", "issued_at",
-            "issued_by", "valid_until", "status", "verification_hash", "scans",
+            "issued_by", "valid_until", "status", "verification_hash", "scans", "is_legacy",
         ]
-        read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans"]
+        read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans", "is_legacy"]
 
 
 class CertificateVerificationSerializer(serializers.ModelSerializer):
+    """What the public verify page may show.
+
+    ``verification`` is the answer the page must display:
+    ``legacy_not_verified`` for every carried-over certificate, otherwise
+    ``valid``, ``expired`` (valid_until is before today on the server),
+    ``revoked`` or ``not_verified`` (no expiry date, or not active).
+    """
+
     sample_reference = serializers.CharField(source="sample.reference", read_only=True)
     material = serializers.CharField(source="sample.material", read_only=True)
+    verification = serializers.SerializerMethodField()
+    valid = serializers.SerializerMethodField()
 
     class Meta:
         model = m.Certificate
-        fields = ["reference", "sample_reference", "material", "issued_at", "valid_until", "status", "scans"]
+        fields = [
+            "reference", "sample_reference", "material", "issued_at", "valid_until", "status", "scans",
+            "is_legacy", "verification", "valid",
+        ]
+
+    def get_verification(self, obj):
+        if obj.is_legacy:
+            return "legacy_not_verified"
+        if obj.status == m.CertificateStatus.REVOKED:
+            return "revoked"
+        if obj.status != m.CertificateStatus.ACTIVE or obj.valid_until is None:
+            return "not_verified"
+        if timezone.localdate(obj.valid_until) < timezone.localdate():
+            return "expired"
+        return "valid"
+
+    def get_valid(self, obj):
+        return self.get_verification(obj) == "valid"
 
 
 class QualityApplicationDocumentSerializer(serializers.ModelSerializer):
@@ -246,9 +274,9 @@ class QualityNonConformitySerializer(serializers.ModelSerializer):
         model = m.QualityNonConformity
         fields = [
             "id", "reference", "title", "raised_at", "raised_by", "against",
-            "severity", "status", "detail", "capa",
+            "severity", "status", "detail", "capa", "is_legacy",
         ]
-        read_only_fields = ["id", "reference", "raised_at", "status", "capa"]
+        read_only_fields = ["id", "reference", "raised_at", "status", "capa", "is_legacy"]
 
 
 class RaiseNonConformitySerializer(serializers.Serializer):
