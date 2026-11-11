@@ -3,6 +3,8 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from organisations.access import sector_allowed
+from organisations.models import Organisation, OrganisationType
 from quality import models as m
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
@@ -131,6 +133,24 @@ class TestRequestInputSerializer(serializers.Serializer):
     methods = serializers.ListField(child=serializers.CharField())
     priority = serializers.ChoiceField(choices=["standard", "expedited"])
     turnaround = serializers.CharField(required=False, allow_blank=True, default="")
+    # Set by the quality desk only. The laboratory must be a verified partner
+    # organisation with a seat in quality.
+    laboratory = serializers.PrimaryKeyRelatedField(
+        queryset=Organisation.objects.filter(
+            verification_status="verified",
+            organisation_type__in=[
+                OrganisationType.LABORATORY,
+                OrganisationType.COMPLIANCE_PARTNER,
+                OrganisationType.INSPECTION_BODY,
+            ],
+        ),
+        required=False,
+    )
+
+    def validate_laboratory(self, value):
+        if not sector_allowed(value, "quality"):
+            raise serializers.ValidationError("This organisation is not approved to work in quality.")
+        return value
 
 
 class ResultVerdictInputSerializer(serializers.Serializer):

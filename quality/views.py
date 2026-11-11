@@ -93,6 +93,10 @@ class SummaryView(APIView):
         if kind == "me":
             return Response({**build_me(user, "quality"), **s.QualityCapabilitiesSerializer(capabilities).data})
 
+        # Platform wide totals and other organisations' applications are for
+        # the quality desk and oversight only.
+        services.require_role(user, "operator", "regulator")
+
         totals = {
             "applications": m.QualityApplication.objects.count(),
             "applications_in_review": m.QualityApplication.objects.filter(status=m.ApplicationStatus.IN_REVIEW).count(),
@@ -126,24 +130,34 @@ class QualityApplicationViewSet(
         return s.QualityApplicationSerializer
 
     def get_queryset(self):
+        # The same scope applies to reads and writes, so a record the caller
+        # cannot read is a record the caller cannot change.
         qs = self.queryset
-        if self.request.method not in {"GET", "HEAD", "OPTIONS"}:
-            return qs
         role = services.derive_role(self.request.user)
-        org = services.user_organisation(self.request.user)
-        if role in {"operator", "regulator"}:
+        if role == "operator":
             return qs
-        if role == "partner" and org:
+        if role == "regulator" and self.request.method in {"GET", "HEAD", "OPTIONS"}:
+            return qs
+        org = services.applicant_organisation(self.request.user)
+        if org:
             return qs.filter(organisation=org)
         return qs.none()
 
     def perform_create(self, serializer):
-        role = services.require_role(self.request.user, "partner", "operator")
-        org = services.user_organisation(self.request.user) if role == "partner" else None
-        request_org_id = self.request.data.get("organisation_id")
-        if request_org_id:
-            from organisations.models import Organisation
-            org = Organisation.objects.filter(pk=request_org_id).first()
+        if services.derive_role(self.request.user) == "operator":
+            # Only the quality desk may file on behalf of a named organisation.
+            org = None
+            request_org_id = self.request.data.get("organisation_id")
+            if request_org_id:
+                org = Organisation.objects.filter(pk=request_org_id).first()
+                if org is None:
+                    raise ValidationError({"organisation_id": ["Select a registered organisation."]})
+        else:
+            # Anyone else files for their own organisation. An organisation id
+            # sent by the client is ignored.
+            org = services.applicant_organisation(self.request.user)
+            if org is None:
+                raise PermissionDenied("You do not have permission to perform this action.")
         app = serializer.save(organisation=org)
         app.audit = [services.audit_entry(self.request.user, "submitted", "Application submitted")]
         app.save(update_fields=["audit"])
@@ -157,7 +171,7 @@ class QualityApplicationViewSet(
 
     @action(detail=True, methods=["patch"], url_path=r"documents/(?P<doc_id>[^/.]+)")
     def document_status(self, request, pk=None, doc_id=None):
-        services.require_role(request.user, "operator", "regulator")
+        services.require_role(request.user, "operator")
         app = self.get_object()
         serializer = s.SetDocumentStatusSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -174,8 +188,9 @@ class QualityApplicationViewSet(
 
     @action(detail=True, methods=["post"], url_path=r"documents/(?P<doc_id>[^/.]+)/upload", parser_classes=[MultiPartParser, FormParser])
     def upload_document(self, request, pk=None, doc_id=None):
+        # get_object is scoped: only the applicant's own members or the
+        # quality desk reach this point.
         app = self.get_object()
-        services.require_role(request.user, "partner", "operator")
         doc = _find(app.documents, doc_id)
         if doc is None:
             raise ResourceNotFoundError("Document not found on this application.")
@@ -211,7 +226,7 @@ class QualityApplicationViewSet(
 
     @action(detail=True, methods=["post"], url_path=r"risk-flags/(?P<flag_id>[^/.]+)/resolve")
     def resolve_risk_flag(self, request, pk=None, flag_id=None):
-        services.require_role(request.user, "operator", "regulator")
+        services.require_role(request.user, "operator")
         app = self.get_object()
         flag = _find(app.risk_flags, flag_id)
         if flag is None:
@@ -225,10 +240,9 @@ class QualityApplicationViewSet(
 
     @action(detail=True, methods=["post"])
     def decide(self, request, pk=None):
-        app = self.get_object()
         if not services.can_decide(request.user):
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Only Beldium quality operators may decide applications.")
+        app = self.get_object()
         if app.status in {m.ApplicationStatus.APPROVED, m.ApplicationStatus.REJECTED}:
             raise ConflictError("This application has already reached a final decision.")
         serializer = s.DecideApplicationSerializer(data=request.data)
@@ -245,10 +259,11 @@ class QualityApplicationViewSet(
 
     @action(detail=True, methods=["post"])
     def assign(self, request, pk=None):
-        app = self.get_object()
         if not services.can_review(request.user):
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You do not have quality review authority.")
+        app = self.get_object()
+        if app.status in {m.ApplicationStatus.APPROVED, m.ApplicationStatus.REJECTED}:
+            raise ConflictError("This application has already reached a final decision.")
         app.assigned_to = request.user
         if app.status == m.ApplicationStatus.SUBMITTED:
             app.status = m.ApplicationStatus.IN_REVIEW
@@ -368,13 +383,16 @@ class SampleViewSet(
         return s.SampleSerializer
 
     def get_queryset(self):
+        # The same scope applies to reads and writes, so a sample the caller
+        # cannot read is a sample the caller cannot change. A regulator reads
+        # every sample and writes none.
         qs = self.queryset
-        if self.request.method not in {"GET", "HEAD", "OPTIONS"}:
-            return qs
         role = services.derive_role(self.request.user)
         org = services.user_organisation(self.request.user)
-        if role in {"operator", "regulator"}:
+        if role == "operator":
             return qs
+        if role == "regulator":
+            return qs if self.request.method in {"GET", "HEAD", "OPTIONS"} else qs.none()
         if role == "miner" and org:
             return qs.filter(Q(miner_organisation=org) | Q(registered_by__organisation_memberships__organisation=org, registered_by__organisation_memberships__is_active=True)).distinct()
         if role == "partner" and org:
@@ -412,7 +430,10 @@ class SampleViewSet(
         serializer.is_valid(raise_exception=True)
         new_status = serializer.validated_data.get("status")
         if new_status:
-            services.require_role(request.user, "operator", "partner")
+            # Moving a sample by hand, including rejecting it, is a quality
+            # desk decision. Laboratories move samples through custody, test
+            # requests and results.
+            services.require_role(request.user, "operator")
             services.transition_sample(sample, new_status)
             sample.audit = [*sample.audit, services.audit_entry(request.user, "status_changed", f"Status set to {new_status}")]
             sample.save(update_fields=["status", "audit", "updated_at"])
@@ -422,6 +443,8 @@ class SampleViewSet(
     def custody(self, request, pk=None):
         services.require_role(request.user, "miner", "partner", "operator")
         sample = self.get_object()
+        if sample.status in {m.SampleStatus.CERTIFIED, m.SampleStatus.REJECTED}:
+            raise ConflictError("Custody cannot be added to a sample that is certified or rejected.")
         serializer = s.CustodyEventInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -445,11 +468,21 @@ class SampleViewSet(
 
     @action(detail=True, methods=["post"], url_path="test-request")
     def test_request(self, request, pk=None):
-        services.require_role(request.user, "partner", "operator")
+        role = services.require_role(request.user, "partner", "operator")
+        # A laboratory reaches only samples already assigned to it, so it can
+        # no longer take over someone else's sample by requesting a test.
         sample = self.get_object()
+        if sample.test_request:
+            raise ConflictError("A test has already been requested for this sample.")
         serializer = s.TestRequestInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        laboratory = data.get("laboratory")
+        if laboratory is not None:
+            if role != "operator":
+                raise PermissionDenied("Only Beldium quality operators assign a laboratory.")
+            sample.partner_organisation = laboratory
+            sample.partner_org = laboratory.name
         sample.test_request = {
             "id": services.new_id(),
             "requested_at": timezone.now().isoformat(),
@@ -463,14 +496,7 @@ class SampleViewSet(
             services.transition_sample(sample, m.SampleStatus.RECEIVED)
         services.transition_sample(sample, m.SampleStatus.TESTING)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "test_requested", ", ".join(data["methods"]))]
-        if services.derive_role(request.user) == "partner":
-            org = services.user_organisation(request.user)
-            sample.partner_organisation = org
-            sample.partner_org = getattr(org, "name", "")
-            update_fields = ["test_request", "results", "status", "audit", "partner_organisation", "partner_org", "updated_at"]
-        else:
-            update_fields = ["test_request", "results", "status", "audit", "updated_at"]
-        sample.save(update_fields=update_fields)
+        sample.save(update_fields=["test_request", "results", "status", "audit", "partner_organisation", "partner_org", "updated_at"])
         _notify_users(_organisation_users(sample.partner_organisation), "Sample assigned", f"{sample.reference} is assigned for testing.", "sample_assigned", sample=sample)
         return Response(s.SampleSerializer(sample).data)
 
@@ -478,6 +504,8 @@ class SampleViewSet(
     def result(self, request, pk=None, result_id=None):
         services.require_role(request.user, "partner", "operator")
         sample = self.get_object()
+        if sample.status != m.SampleStatus.TESTING:
+            raise ConflictError("Results can only be changed while the sample is in testing.")
         serializer = s.ResultVerdictInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         item = _find(sample.results, result_id)
@@ -498,13 +526,25 @@ class SampleViewSet(
 
     @action(detail=True, methods=["post"])
     def review(self, request, pk=None):
-        sample = self.get_object()
         if not services.can_review(request.user):
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You do not have quality review authority.")
+        sample = self.get_object()
+        if sample.quality_review:
+            raise ConflictError("This sample has already been reviewed.")
         serializer = s.QualityReviewInputSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        if data["verdict"] == m.ResultVerdict.PENDING:
+            raise ValidationError({"verdict": ["A review must record a verdict, not pending."]})
+        if data["verdict"] == m.ResultVerdict.PASS:
+            # A pass must agree with the results on file. Checking the review
+            # record itself is left out because it is being written now.
+            blockers = [
+                reason for reason in services.certificate_blockers(sample)
+                if reason != "The quality review verdict is not pass."
+            ]
+            if blockers:
+                raise ConflictError(" ".join(blockers))
         sample.quality_review = {
             "reviewer": services.actor_label(request.user),
             "at": timezone.now().isoformat(),
@@ -518,12 +558,14 @@ class SampleViewSet(
 
     @action(detail=True, methods=["post"])
     def certificate(self, request, pk=None):
-        sample = self.get_object()
         if not services.can_decide(request.user):
-            from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("Only Beldium quality operators may issue certificates.")
+        sample = self.get_object()
         if sample.status != m.SampleStatus.REVIEWED:
             raise ConflictError("Only reviewed samples can be certified.")
+        blockers = services.certificate_blockers(sample)
+        if blockers:
+            raise ConflictError(" ".join(blockers))
         cert = m.Certificate.objects.create(
             sample=sample,
             issued_by=services.actor_label(request.user),
@@ -609,8 +651,24 @@ class NonConformityViewSet(
     search_fields = ["reference", "title", "against"]
     http_method_names = ["get", "post", "head", "options"]
 
+    def get_queryset(self):
+        # The quality desk and oversight read every nonconformity. Anyone else
+        # reads only the ones they raised before raising was limited to Q&C.
+        # TODO(Q&C, Release 2): link a nonconformity to the responsible
+        # organisation so that party can read it and submit the root cause.
+        qs = self.queryset
+        role = services.derive_role(self.request.user)
+        if role == "operator":
+            return qs
+        if role == "regulator" and self.request.method in {"GET", "HEAD", "OPTIONS"}:
+            return qs
+        if self.request.method in {"GET", "HEAD", "OPTIONS"}:
+            return qs.filter(raised_by_user=self.request.user)
+        return qs.none()
+
     def create(self, request, *args, **kwargs):
-        services.require_role(request.user, "operator", "regulator", "partner")
+        # Only Q&C raises and closes nonconformities.
+        services.require_role(request.user, "operator")
         serializer = s.RaiseNonConformitySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
@@ -627,7 +685,9 @@ class NonConformityViewSet(
 
     @action(detail=True, methods=["post"])
     def capa(self, request, pk=None):
-        services.require_role(request.user, "operator", "partner")
+        # Until a nonconformity names its responsible party (see get_queryset),
+        # the quality desk records corrective actions on that party's behalf.
+        services.require_role(request.user, "operator")
         nc = self.get_object()
         if nc.status == m.NCStatus.CLOSED:
             raise ConflictError("Cannot add a corrective action to a closed non-conformity.")
@@ -648,8 +708,10 @@ class NonConformityViewSet(
 
     @action(detail=True, methods=["post"], url_path=r"capa/(?P<action_id>[^/.]+)/advance")
     def advance_capa(self, request, pk=None, action_id=None):
-        services.require_role(request.user, "operator", "partner")
+        services.require_role(request.user, "operator")
         nc = self.get_object()
+        if nc.status == m.NCStatus.CLOSED:
+            raise ConflictError("Cannot change a corrective action on a closed non-conformity.")
         item = _find(nc.capa, action_id)
         if item is None:
             raise ResourceNotFoundError("Corrective action not found on this non-conformity.")
@@ -663,7 +725,7 @@ class NonConformityViewSet(
 
     @action(detail=True, methods=["post"])
     def close(self, request, pk=None):
-        services.require_role(request.user, "operator", "regulator")
+        services.require_role(request.user, "operator")
         nc = self.get_object()
         if nc.status == m.NCStatus.CLOSED:
             raise ConflictError("Non-conformity is already closed.")
