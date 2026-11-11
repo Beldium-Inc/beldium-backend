@@ -15,6 +15,7 @@ from django.db import transaction
 from django.db.models import ProtectedError
 
 from accounts.models import User
+from common.environment_guard import require_safe_environment
 from organisations.models import Organisation
 
 SEEDED_COMPANY_PREFIX = "Beldium "
@@ -29,6 +30,7 @@ class Command(BaseCommand):
         parser.add_argument("--yes", action="store_true", help="Commit the deletion.")
 
     def handle(self, *args, **options):
+        require_safe_environment("purge_demo_data")
         companies = Organisation.objects.filter(organisation_type="mining_company").filter(
             name__startswith=SEEDED_COMPANY_PREFIX
         ) | Organisation.objects.filter(name__in=EXTRA_SEEDED_COMPANIES)

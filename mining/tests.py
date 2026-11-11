@@ -1,5 +1,7 @@
 from datetime import timedelta
+from tempfile import TemporaryDirectory
 
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -17,6 +19,13 @@ from mining.models import (
     SiteStatus,
 )
 from organisations.models import MembershipRole, Organisation, OrganisationMembership, OrganisationType
+
+
+# Uploads in these tests go to a throwaway folder, never to the repo media
+# folder. The holder is kept at module level so the folder lasts for the whole
+# run and is removed when the process exits.
+_MEDIA_HOLDER = TemporaryDirectory()
+MEDIA_TEMP_ROOT = _MEDIA_HOLDER.name
 
 
 def make_user(email, **extra):
@@ -321,6 +330,7 @@ class ChecklistTests(MiningTestCase):
         self.assertEqual(len(response.data["sections"]), len(SectionKey.choices))
 
 
+@override_settings(MEDIA_ROOT=MEDIA_TEMP_ROOT)
 class UploadDownloadTests(MiningTestCase):
     def _file(self, name="doc.pdf"):
         from django.core.files.uploadedfile import SimpleUploadedFile
@@ -480,6 +490,7 @@ class OrganisationVerificationTests(MiningTestCase):
         self.assertEqual(self.client.post(self.url("verify")).status_code, 403)
 
 
+@override_settings(MEDIA_ROOT=MEDIA_TEMP_ROOT)
 class InfoRequestResponseTests(MiningTestCase):
     """A miner answers an information request with files the desk can review."""
 
@@ -543,6 +554,7 @@ class InfoRequestResponseTests(MiningTestCase):
         self.assertTrue(any("Director ID does not match" in b for b in bodies))
 
 
+@override_settings(MEDIA_ROOT=MEDIA_TEMP_ROOT)
 class ApplicationDecisionTests(MiningTestCase):
     """The claimed reviewer verifies an application once every document is verified."""
 

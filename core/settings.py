@@ -1,3 +1,4 @@
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -203,6 +204,11 @@ DELETE_TEST_USER_EMAILS = config("DELETE_TEST_USER_EMAILS", default="")
 # bootstrap_admin.py) — the only way to get one without Render shell access.
 ADMIN_EMAIL = config("ADMIN_EMAIL", default="")
 ADMIN_BOOTSTRAP_SECRET = config("ADMIN_BOOTSTRAP_SECRET", default="")
+
+# Tests only: MD5 is far faster than the default PBKDF2 hasher, and the suite
+# creates many users. Every other command, and production, keeps the default.
+if sys.argv[1:2] == ["test"]:
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
