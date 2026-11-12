@@ -126,7 +126,10 @@ class VaultTests(APITestCase):
     def test_desk_can_file_for_beldium_or_for_an_organisation(self):
         response = self.upload(self.operator)
         self.assertEqual(response.data["organisation"], {"id": None, "name": "Beldium"})
-        response = self.upload(self.operator, file=pdf(b"other"), organisation=str(self.lab.pk))
+        response = self.upload(
+            self.operator, file=pdf(b"other"), organisation=str(self.lab.pk),
+            received_from="email", received_date="2026-11-10",
+        )
         self.assertEqual(response.data["organisation"]["name"], "Assay Labs")
 
     def test_wrong_roles_cannot_upload(self):

@@ -3,7 +3,7 @@ from pathlib import Path
 from django.conf import settings
 from rest_framework import serializers
 
-from vault.models import VaultActivity, VaultCategory, VaultDocument
+from vault.models import ReceivedFrom, VaultActivity, VaultCategory, VaultDocument
 
 ALLOWED_EXTENSIONS = {"pdf", "doc", "docx", "xls", "xlsx", "csv", "jpg", "jpeg", "png", "zip"}
 
@@ -52,6 +52,7 @@ class VaultDocumentSerializer(serializers.ModelSerializer):
         fields = [
             "id", "reference", "sector", "category", "organisation", "family", "version", "is_latest",
             "title", "description", "version_note", "original_name", "content_type", "size_bytes", "sha256",
+            "sniffed_type", "scan_status", "on_behalf_of_company", "received_from", "received_date",
             "uploaded_by", "created_at", "status", "approved_by", "approved_at",
         ]
 
@@ -101,11 +102,16 @@ class VaultUploadSerializer(serializers.Serializer):
     description = serializers.CharField(required=False, allow_blank=True, default="")
     organisation = serializers.UUIDField(required=False, allow_null=True, default=None)
     file = serializers.FileField(validators=[validate_vault_file])
+    # Required when the desk files for an organisation (on behalf of it).
+    received_from = serializers.ChoiceField(choices=ReceivedFrom.choices, required=False, allow_blank=True, default="")
+    received_date = serializers.DateField(required=False, allow_null=True, default=None)
 
 
 class VaultVersionSerializer(serializers.Serializer):
     file = serializers.FileField(validators=[validate_vault_file])
     note = serializers.CharField(required=False, allow_blank=True, max_length=255, default="")
+    received_from = serializers.ChoiceField(choices=ReceivedFrom.choices, required=False, allow_blank=True, default="")
+    received_date = serializers.DateField(required=False, allow_null=True, default=None)
 
 
 class VaultApproveSerializer(serializers.Serializer):

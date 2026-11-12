@@ -117,6 +117,7 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
         document = services.upload(
             request.user, sector=sector, category=category, title=data["title"],
             description=data["description"], uploaded_file=data["file"], organisation=organisation,
+            received_from=data["received_from"], received_date=data["received_date"],
         )
         return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
 
@@ -129,6 +130,8 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
         document = services.add_version(
             request.user, current, uploaded_file=serializer.validated_data["file"],
             note=serializer.validated_data["note"],
+            received_from=serializer.validated_data["received_from"],
+            received_date=serializer.validated_data["received_date"],
         )
         return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
 
@@ -147,6 +150,9 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
         document = self.get_object()
         if not document.file:
             raise ResourceNotFoundError("The stored file is missing.")
+        if document.scan_status == "infected":
+            from common.exceptions import AppError
+            raise AppError("This file failed the safety scan and cannot be opened.", code="file_quarantined", status_code=410)
         services.record_download(request.user, document)
         return serve_stored_file(document.file, document.original_name)
 

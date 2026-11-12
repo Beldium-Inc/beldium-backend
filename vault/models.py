@@ -83,6 +83,18 @@ class VaultCategory(TimeStampedModel):
         return f"{self.get_sector_display()}: {self.name}"
 
 
+class ScanStatus(models.TextChoices):
+    PENDING = "pending", "Not scanned yet"
+    CLEAN = "clean", "Clean"
+    INFECTED = "infected", "Infected"
+
+
+class ReceivedFrom(models.TextChoices):
+    EMAIL = "email", "Email"
+    WHATSAPP = "whatsapp", "WhatsApp"
+    IN_PERSON = "in_person", "In person"
+
+
 class VaultDocument(AppendOnlyModel):
     reference = models.CharField(max_length=50, unique=True, default=vault_reference, editable=False)
     sector = models.CharField(max_length=20, choices=Sector.choices, db_index=True)
@@ -110,6 +122,15 @@ class VaultDocument(AppendOnlyModel):
     content_type = models.CharField(max_length=120, blank=True)
     size_bytes = models.PositiveBigIntegerField()
     sha256 = models.CharField(max_length=64, db_index=True)
+    # From common.scanning.inspect_upload at upload time (G7). Blank on files
+    # stored before inspection existed.
+    sniffed_type = models.CharField(max_length=120, blank=True)
+    scan_status = models.CharField(max_length=10, choices=ScanStatus.choices, blank=True)
+    # Filed by the Beldium desk for an organisation (decision 3), with how and
+    # when the desk received it.
+    on_behalf_of_company = models.BooleanField(default=False)
+    received_from = models.CharField(max_length=20, choices=ReceivedFrom.choices, blank=True)
+    received_date = models.DateField(null=True, blank=True)
 
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="+")
 

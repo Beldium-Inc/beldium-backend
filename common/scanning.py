@@ -30,7 +30,11 @@ _SIGNATURES = [
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "application/x-ole-storage"),  # old Word and Excel
     (b"PK\x03\x04", "application/zip"),  # also docx and xlsx, told apart below
+    (b"MZ", "application/x-msdownload"),  # Windows programs
+    (b"\x7fELF", "application/x-executable"),  # Linux programs
 ]
+
+EXECUTABLE_TYPES = {"application/x-msdownload", "application/x-executable"}
 
 
 def _sniff(head, tail_names):
@@ -117,6 +121,20 @@ EXTENSION_TYPES = {
     "docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
     "xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
 }
+
+
+def disguised(filename, sniffed_type):
+    """True when the bytes are a program, or a known type other than the one
+    the name claims. Bytes of no known type are not called disguised."""
+    if sniffed_type in EXECUTABLE_TYPES:
+        return True
+    if sniffed_type == "application/octet-stream":
+        return False
+    extension = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+    if extension in {"zip"}:
+        return sniffed_type != "application/zip" and not sniffed_type.startswith("application/vnd.openxml")
+    allowed = EXTENSION_TYPES.get(extension)
+    return allowed is not None and sniffed_type not in allowed
 
 
 def matches_extension(filename, sniffed_type):
