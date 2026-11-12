@@ -7,6 +7,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from accounts.models import User
+from common.environment_guard import require_safe_environment
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ class Command(BaseCommand):
     help = "Import user credentials from the legacy backend's database (set LEGACY_DATABASE_URL)."
 
     def handle(self, *args, **options):
+        require_safe_environment("import_legacy_users")
         legacy_url = getattr(settings, "LEGACY_DATABASE_URL", "")
         if not legacy_url:
             self.stdout.write("LEGACY_DATABASE_URL not set, skipping legacy user import.")

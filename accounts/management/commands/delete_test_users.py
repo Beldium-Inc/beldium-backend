@@ -5,6 +5,7 @@ from django.core.management.base import BaseCommand
 from django.db.models import ProtectedError
 
 from accounts.models import User
+from common.environment_guard import require_safe_environment
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class Command(BaseCommand):
     help = "Delete specific users by email (set DELETE_TEST_USER_EMAILS)."
 
     def handle(self, *args, **options):
+        require_safe_environment("delete_test_users")
         raw = getattr(settings, "DELETE_TEST_USER_EMAILS", "")
         emails = [e.strip().lower() for e in raw.split(",") if e.strip()]
         if not emails:

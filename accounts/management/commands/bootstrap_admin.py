@@ -2,6 +2,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from accounts.models import User
+from common.environment_guard import require_safe_environment
 
 
 class Command(BaseCommand):
@@ -18,6 +19,7 @@ class Command(BaseCommand):
     help = "Create or promote the admin user from ADMIN_EMAIL/ADMIN_BOOTSTRAP_SECRET."
 
     def handle(self, *args, **options):
+        require_safe_environment("bootstrap_admin")
         email = getattr(settings, "ADMIN_EMAIL", "").strip().lower()
         password = getattr(settings, "ADMIN_BOOTSTRAP_SECRET", "")
         if not email or not password:

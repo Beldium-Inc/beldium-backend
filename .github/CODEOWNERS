@@ -1,0 +1,20 @@
+# Code owners. GitHub asks each owner to review changes to their paths.
+#
+# TODO: the handles below are placeholders. Replace each PLACEHOLDER value
+# with the real GitHub handle (with a leading @) before this file takes
+# effect. They are written as plain text on purpose, so that nobody is
+# notified while the file is still a draft.
+#
+# Owner for the quality app and every migration: backend developer (Gbemileke).
+# TODO: fill in the GitHub handle for Gbemileke.
+quality/              PLACEHOLDER-gbemileke-github-handle
+**/migrations/       PLACEHOLDER-gbemileke-github-handle
+
+# Owner for deployment, CI, shared core code and the build: Emmanuel.
+# TODO: fill in the GitHub handle for Emmanuel.
+deploy/               PLACEHOLDER-emmanuel-github-handle
+.github/              PLACEHOLDER-emmanuel-github-handle
+core/                 PLACEHOLDER-emmanuel-github-handle
+common/               PLACEHOLDER-emmanuel-github-handle
+Dockerfile            PLACEHOLDER-emmanuel-github-handle
+requirements.txt      PLACEHOLDER-emmanuel-github-handle

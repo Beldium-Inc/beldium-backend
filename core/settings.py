@@ -1,3 +1,4 @@
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -204,6 +205,11 @@ DELETE_TEST_USER_EMAILS = config("DELETE_TEST_USER_EMAILS", default="")
 ADMIN_EMAIL = config("ADMIN_EMAIL", default="")
 ADMIN_BOOTSTRAP_SECRET = config("ADMIN_BOOTSTRAP_SECRET", default="")
 
+# Tests only: MD5 is far faster than the default PBKDF2 hasher, and the suite
+# creates many users. Every other command, and production, keeps the default.
+if sys.argv[1:2] == ["test"]:
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -254,6 +260,13 @@ CAREERS_NOTIFY_EMAIL = config("CAREERS_NOTIFY_EMAIL", default="support@beldium.c
 # out of the box in Nigeria without registering a custom sender ID first.
 TERMII_API_KEY = config("TERMII_API_KEY", default="")
 TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
+# SMS goes out only when this is on and TERMII_API_KEY is set (common/sms.py).
+# Off until the Termii sender ID is approved.
+SMS_ENABLED = config("SMS_ENABLED", default=False, cast=bool)
+# Upload scanning (common/scanning.py). Empty means no scanner: uploads are
+# marked scan pending, never clean.
+CLAMAV_HOST = config("CLAMAV_HOST", default="")
+CLAMAV_PORT = config("CLAMAV_PORT", default=3310, cast=int)
 GOOGLE_OAUTH_CLIENT_ID = config("GOOGLE_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_CLIENT_ID = config("MICROSOFT_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_TENANT_ID = config("MICROSOFT_OAUTH_TENANT_ID", default="common")
