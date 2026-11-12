@@ -3,7 +3,7 @@ from rest_framework.generics import get_object_or_404
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import MethodNotAllowed, PermissionDenied
+from rest_framework.exceptions import MethodNotAllowed, PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
@@ -35,12 +35,41 @@ from compliance.quality_sections import (
     is_quality_application, quality_section_serializer,
 )
 from compliance.workflow import require_review, transition
+from compliance.signatory import mismatch_message, names_match
 from common.exceptions import AppError, ConflictError
 from common.files import serve_stored_file
 from organisations.models import MembershipRole
 
 
 EDIT_ROLES = {MembershipRole.OWNER, MembershipRole.ADMIN, MembershipRole.COMPLIANCE_MANAGER}
+
+
+def signatory_error(application, signed):
+    """An organisation declaration is signed by the representative named on it."""
+    full_name = (application.representative or {}).get("full_name", "")
+    if names_match(signed, full_name):
+        return ""
+    return mismatch_message(full_name, "the representative's full name")
+
+
+def quality_signature_error(user, signed):
+    """A Q&C declaration is signed by the account holder who submits it."""
+    if names_match(signed, user.full_name):
+        return ""
+    if not user.full_name:
+        return "Add your first and last name to your account before signing. The signature must match it exactly."
+    return mismatch_message(user.full_name, "your full name")
+
+
+def submission_signature_error(application, user):
+    """Re-check a saved signature at submit: the name it must match may have changed since."""
+    if is_quality_application(application):
+        declaration = application.quality_profile.get("declaration")
+        return quality_signature_error(user, declaration["signature"]) if declaration else ""
+    if application.declaration:
+        return signatory_error(application, application.declaration.get("signatory_name"))
+    return ""
+
 class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     queryset = ComplianceApplication.objects.none()
     serializer_class = ComplianceApplicationSerializer
@@ -123,11 +152,13 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         if application.status == ApplicationStatus.VERIFIED:
             raise ConflictError("This application has been verified and can no longer be changed.", code="application_locked")
 
-    def _save_section(self, request, application, serializer_class, model_field):
+    def _save_section(self, request, application, serializer_class, model_field, check=None):
         self._assert_editor(application)
         self._assert_editable(application)
         serializer = serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
+        if check is not None:
+            check(serializer.validated_data["data"])
         setattr(application, model_field, serializer.data["data"])
         application.save(update_fields=[model_field, "updated_at"])
         self._record(application, "section_saved", section=model_field)
@@ -206,7 +237,14 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
     @extend_schema(request=DeclarationSectionSerializer, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
     @action(detail=True, methods=["patch"], url_path="sections/declaration", url_name="declaration-section")
     def declaration_section(self, request, pk=None):
-        return self._save_section(request, self.get_object(), DeclarationSectionSerializer, "declaration")
+        application = self.get_object()
+
+        def signed_by_representative(data):
+            error = signatory_error(application, data.get("signatory_name"))
+            if error:
+                raise ValidationError({"data": {"signatory_name": [error]}})
+
+        return self._save_section(request, application, DeclarationSectionSerializer, "declaration", check=signed_by_representative)
 
     @extend_schema(request=OpenApiTypes.OBJECT, responses={status.HTTP_200_OK: ComplianceApplicationSerializer})
     @action(
@@ -223,6 +261,10 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
         serializer = quality_section_serializer(section)(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data["data"]
+        if section == "declaration":
+            error = quality_signature_error(request.user, data["signature"])
+            if error:
+                raise ValidationError({"data": {"signature": [error]}})
         application.quality_profile = {**application.quality_profile, section: data}
         fields = ["quality_profile", "updated_at"]
         if section == "organisation":
@@ -447,6 +489,9 @@ class ComplianceApplicationViewSet(viewsets.ModelViewSet):
                 + ".",
                 code="documents_rejected", status_code=409, details=progress,
             )
+        error = submission_signature_error(application, request.user)
+        if error:
+            raise AppError(error, code="signatory_mismatch", status_code=409, details=progress)
         application.submitted_at = timezone.now()
         transition(application, ApplicationStatus.UNDER_REVIEW)
         # An incomplete file may be submitted, so what was missing at that

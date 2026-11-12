@@ -29,10 +29,10 @@ class ReviewWorkflowTests(APITestCase):
         OrganisationMembership.objects.create(organisation=self.org, user=self.member, role='member')
         self.app = ComplianceApplication.objects.create(
             organisation=self.org, created_by=self.owner, status='under_review',
-            organisation_profile={'name': 'Review Org'}, representative={'authorised': True},
+            organisation_profile={'name': 'Review Org'}, representative={'full_name': 'Ada Owner', 'authorised': True},
             services={'selected_services': ['inspection']}, professional_capability={'years_mining_experience': 5},
             inspection_capability={'conducts_physical_inspections': True}, conflict_declaration={'agreed': True},
-            declaration={'confirmed': True}, submitted_at=timezone.now())
+            declaration={'confirmed': True, 'signatory_name': 'Ada Owner'}, submitted_at=timezone.now())
         Personnel.objects.create(application=self.app, full_name='Inspector', role='Inspector')
         for key, title in REQUIRED_DOCUMENTS:
             ComplianceDocument.objects.create(application=self.app, document_type=key, title=title,
@@ -284,6 +284,7 @@ class ReviewWorkflowTests(APITestCase):
         self.client.force_authenticate(self.owner)
         data = dict.fromkeys(['accuracy_confirmed', 'documents_genuine', 'compliance_agreed', 'disclose_changes', 'authorised', 'confirmed'], True)
         data['declaration_date'] = timezone.localdate().isoformat()
+        data['signatory_name'] = 'Ada Owner'
         response = self.client.patch(self.url('declaration-section'), {'data': data}, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         self.app.refresh_from_db()

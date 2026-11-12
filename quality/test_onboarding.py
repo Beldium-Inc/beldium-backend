@@ -58,7 +58,10 @@ class MediaTestCase(APITestCase):
 class QualityOrganisationOnboardingTests(MediaTestCase):
     def setUp(self):
         super().setUp()
-        self.owner = User.objects.create_user("owner@lab.test", email_verified_at=timezone.now())
+        # The declaration is signed with this account's full name.
+        self.owner = User.objects.create_user(
+            "owner@lab.test", first_name="Ngozi", last_name="Eze", email_verified_at=timezone.now()
+        )
         self.staff = User.objects.create_user("operator@beldium.test", is_staff=True)
         self.org = Organisation.objects.create(name="Draft Lab", organisation_type="laboratory")
         OrganisationMembership.objects.create(organisation=self.org, user=self.owner, role="owner")

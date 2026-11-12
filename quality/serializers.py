@@ -3,6 +3,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from compliance.signatory import mismatch_message, names_match
 from quality import models as m
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
@@ -343,6 +344,14 @@ class ProfessionalApplicationInputSerializer(serializers.Serializer):
     capability = ProfessionalCapabilitySerializer()
     experience = ProfessionalExperienceSerializer()
     declaration = ProfessionalDeclarationSerializer()
+
+    def validate(self, attrs):
+        full_name = attrs["personal"]["full_legal_name"]
+        if not names_match(attrs["declaration"]["signature"], full_name):
+            raise serializers.ValidationError(
+                {"declaration": {"signature": [mismatch_message(full_name, "your full legal name")]}}
+            )
+        return attrs
 
 
 class QualityProfessionalDocumentSerializer(serializers.ModelSerializer):

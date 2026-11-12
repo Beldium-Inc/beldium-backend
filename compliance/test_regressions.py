@@ -30,7 +30,10 @@ class DeclarationDateTests(APITestCase):
             name="Assurance Ltd", organisation_type="compliance_partner", registration_number="RC-90101"
         )
         self.organisation.memberships.create(user=self.owner, role="owner", is_active=True)
-        self.application = ComplianceApplication.objects.create(organisation=self.organisation)
+        # The declaration is signed by this representative.
+        self.application = ComplianceApplication.objects.create(
+            organisation=self.organisation, representative={"full_name": "Ada Lovelace"}
+        )
 
     def _save(self, data):
         return self.client.patch(
