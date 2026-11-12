@@ -1,5 +1,7 @@
 # Cutover: Render → AWS production
 
+> **This cutover is finished. Do not run it again.** `api.beldium.com` points to AWS and users write to the production database there. This page is kept as a record of what was done. Phase C loaded an empty database; run against production today it would overwrite live data with an old copy. The restore command in step C3 has been removed for that reason.
+
 The exact order for moving live users from Render to AWS. This is the same procedure rehearsed on staging on 2026-09-30. Run everything in **Mac Terminal** from the repository folder unless a step says otherwise. The commands are written for zsh.
 
 **Window:** about 1 hour, of which the API is unavailable for roughly 40 minutes (Phase B to Phase D).
@@ -123,12 +125,9 @@ psql "$TARGET" -Atc "select count(*) from accounts_user"
 
 **C3. Restore** (5 to 15 minutes through the tunnel, quiet stretches are normal, don't press Ctrl+C):
 
-```bash
-time pg_restore --verbose --clean --if-exists --no-owner --no-acl --single-transaction --exit-on-error -n public -d "$TARGET" migration/dumps/final/v2.dump 2>&1 | grep -E "creating TABLE|processing data|error" ; echo "exit=${pipestatus[1]}"
-psql "$TARGET" -Atc "select count(*) from accounts_user"
-```
+**Command removed.** This step restored the final v2 dump into the empty production database. The restore dropped every table before loading, so it must never be pointed at a database that holds live data. It was run once, at cutover, and is not needed again. The original command is in the git history of this file.
 
-✅ `exit=0`, then the same user count as `psql -d copy_v2_final -Atc "select count(*) from accounts_user"`.
+The check at the time was `exit=0`, then the same user count as `psql -d copy_v2_final -Atc "select count(*) from accounts_user"`.
 
 **C4. Merge, reactivate, verify:**
 

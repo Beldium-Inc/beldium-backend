@@ -677,13 +677,13 @@ aws ecs wait services-stable --cluster beldium-$ENV --services beldium-$ENV-work
 - Window 1: `bash deploy/db-tunnel.sh <env>`. Leave it open.
 - Window 2: `export TARGET=$(bash deploy/db-url.sh <env>)`. `$TARGET` now reaches the environment's database. The password is never printed.
 
-Restore a dump into it. `-n public` leaves the schema itself alone. `--single-transaction` means it fully succeeds or changes nothing:
+**Never restore a dump into production.** The restore command that used to be here dropped every table before loading. It was for filling a new, empty database once, at cutover. Production now holds live data, so running it there would replace that data with an old copy. The command has been removed from this guide on purpose. If a brand new, empty environment ever needs loading, take the command from this file's git history, and first confirm the target is empty:
 
 ```bash
-pg_restore --clean --if-exists --no-owner --no-acl --single-transaction --exit-on-error -n public -d "$TARGET" migration/dumps/v2.dump
+psql "$TARGET" -Atc "select count(*) from accounts_user"   # must print 0
 ```
 
-Then use `migration/merge.py`, `reactivate_users.py`, `verify.sql` and `smoke_test.py` with `--target "$TARGET"` (see `migration/README.md`).
+`migration/merge.py`, `reactivate_users.py`, `verify.sql` and `smoke_test.py` take `--target "$TARGET"` (see `migration/README.md`). They were also one-time cutover tools.
 
 Afterwards, force a new deployment of the web service so it drops old connections. When the environment no longer needs loading, turn the tunnel access off again: `update-service ... --disable-execute-command --force-new-deployment`, then `aws iam delete-role-policy --role-name beldium-$ENV-ecs-task --policy-name ecs-exec`.
 
