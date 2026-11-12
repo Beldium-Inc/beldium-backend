@@ -196,9 +196,9 @@ class CertificateSerializer(serializers.ModelSerializer):
         model = m.Certificate
         fields = [
             "id", "reference", "sample", "sample_reference", "material", "issued_at",
-            "issued_by", "valid_until", "status", "verification_hash", "scans", "is_legacy",
+            "issued_by", "valid_until", "status", "verification_hash", "scans", "is_legacy", "rule_version",
         ]
-        read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans", "is_legacy"]
+        read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans", "is_legacy", "rule_version"]
 
 
 class CertificateVerificationSerializer(serializers.ModelSerializer):
@@ -511,3 +511,28 @@ class QualityAuditEntrySerializer(serializers.ModelSerializer):
             "before", "after", "ip_address", "rule_version",
         ]
         read_only_fields = fields
+
+
+# --- settings (G5) ------------------------------------------------------------
+
+
+class SettingChangeSerializer(serializers.ModelSerializer):
+    setting_key = serializers.CharField(source="setting_id", read_only=True)
+    unit = serializers.CharField(source="setting.unit", read_only=True)
+    new_value = serializers.JSONField(source="value", read_only=True)
+    rule_version = serializers.CharField(source="rule_version_id", read_only=True)
+    changed_by = serializers.UUIDField(source="changed_by_id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = m.QualitySettingChange
+        fields = [
+            "id", "setting_key", "new_value", "unit", "effective_from", "reason",
+            "changed_by", "changed_by_name", "changed_at", "rule_version",
+        ]
+        read_only_fields = fields
+
+
+class NewSettingChangeSerializer(serializers.Serializer):
+    value = serializers.JSONField()
+    effective_from = serializers.DateTimeField()
+    reason = serializers.CharField(max_length=2000)

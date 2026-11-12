@@ -200,6 +200,9 @@ class Certificate(TimeStampedModel):
     verification_hash = models.CharField(max_length=128, blank=True)
     scans = models.PositiveIntegerField(default=0)
     is_legacy = models.BooleanField(default=False, db_index=True)
+    # The rule version the issuing decision used (G5). Blank on rows issued
+    # before settings existed.
+    rule_version = models.CharField(max_length=20, blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -460,3 +463,88 @@ class QualityAuditEntry(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionError("Audit entries are append only.")
+
+
+# --- settings, change log and rule versions (Release 1, task G5) -------------
+
+
+class SettingValueType(models.TextChoices):
+    POSITIVE_INT = "positive_int", "Whole number above zero"
+    POSITIVE_INT_LIST = "positive_int_list", "List of whole numbers above zero"
+    BOOLEAN = "boolean", "Yes or no"
+    TEXT = "text", "Text"
+    TEXT_LIST = "text_list", "List of text"
+    JSON = "json", "Structured value"
+
+
+class QualitySetting(models.Model):
+    """A named Q&C rule value. The value itself lives in the change log, so
+    every value it ever had, and when it took effect, is kept."""
+
+    key = models.CharField(max_length=60, primary_key=True)
+    label = models.CharField(max_length=200)
+    unit = models.CharField(max_length=30, blank=True)
+    value_type = models.CharField(max_length=20, choices=SettingValueType.choices)
+    owner = models.CharField(max_length=120, help_text="Who decides the value")
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["key"]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("Settings are never deleted.")
+
+
+class QualityRuleVersion(models.Model):
+    """Each settings change that takes effect starts a new rule version.
+    Decisions store the version they were made under."""
+
+    number = models.PositiveIntegerField(primary_key=True)
+    effective_from = models.DateTimeField(db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-number"]
+
+    def __str__(self):
+        return str(self.number)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionError("Rule versions are append only.")
+        kwargs["force_insert"] = True
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("Rule versions are append only.")
+
+
+class QualitySettingChange(models.Model):
+    """Append only. A setting changes only by a new row here. A null value
+    means the value is a placeholder that Q&C has not given yet."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    setting = models.ForeignKey(QualitySetting, on_delete=models.PROTECT, related_name="changes")
+    value = models.JSONField(null=True, blank=True)
+    effective_from = models.DateTimeField(db_index=True)
+    reason = models.TextField()
+    changed_by_id = models.UUIDField(null=True, blank=True)
+    changed_by_name = models.CharField(max_length=255, blank=True)
+    changed_at = models.DateTimeField(default=timezone.now)
+    rule_version = models.ForeignKey(QualityRuleVersion, on_delete=models.PROTECT, related_name="changes")
+
+    objects = AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-effective_from", "-changed_at"]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionError("Setting changes are append only.")
+        kwargs["force_insert"] = True
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("Setting changes are append only.")

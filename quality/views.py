@@ -22,6 +22,7 @@ from quality import audit_log
 from quality import bridge
 from quality import permissions
 from quality import roles as role_data
+from quality import rules
 from quality import models as m
 from quality import serializers as s
 from quality import services
@@ -435,6 +436,27 @@ class QualityProfessionalApplicationViewSet(
         return serve_stored_file(document.file, document.original_name)
 
 
+PARTY_NAME_FIELDS = ("miner_org", "buyer_org", "miner_organisation", "buyer_organisation")
+
+
+def _hide_party_names(user):
+    """Decision 10: the laboratory does not see supplier or buyer names,
+    behind a setting that defaults to hidden."""
+    if services.derive_role(user) != "partner":
+        return False
+    try:
+        return not rules.get("laboratory_sees_party_names")
+    except rules.RuleNotSet:
+        return True
+
+
+def _strip_party_names(row):
+    if isinstance(row, dict):
+        for field in PARTY_NAME_FIELDS:
+            if field in row:
+                row[field] = None if field.endswith("organisation") else ""
+
+
 class SampleViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
     mixins.UpdateModelMixin, AtomicViewSet
@@ -444,6 +466,18 @@ class SampleViewSet(
     filterset_fields = ["status", "buyer_spec"]
     search_fields = ["reference", "material", "lot", "mine_site"]
     http_method_names = ["get", "post", "patch", "head", "options"]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        data = getattr(response, "data", None)
+        if data is not None and response.status_code < 400 and _hide_party_names(request.user):
+            # A paged list has count and results. A single sample also has a
+            # results field (its test results), so count tells them apart.
+            paged = isinstance(data, dict) and "count" in data and "results" in data
+            rows = data["results"] if paged else data
+            for row in rows if isinstance(rows, list) else [rows]:
+                _strip_party_names(row)
+        return response
 
     def get_serializer_class(self):
         if self.action == "create":
@@ -620,6 +654,7 @@ class SampleViewSet(
             "at": timezone.now().isoformat(),
             "verdict": data["verdict"],
             "note": data.get("note", ""),
+            "rule_version": rules.current_rule_version(),
         }
         services.transition_sample(sample, m.SampleStatus.REVIEWED if data["verdict"] != m.ResultVerdict.FAIL else m.SampleStatus.REJECTED)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "reviewed", f"Verdict: {data['verdict']}")]
@@ -636,11 +671,14 @@ class SampleViewSet(
         blockers = services.certificate_blockers(sample)
         if blockers:
             raise ConflictError(" ".join(blockers))
+        # Validity is a Q&C setting (decision 4), read at the moment of issue.
+        validity_days = rules.get("certificate_validity_days")
         cert = m.Certificate.objects.create(
             sample=sample,
             issued_by=services.actor_label(request.user),
-            valid_until=timezone.now() + timezone.timedelta(days=365),
+            valid_until=timezone.now() + timezone.timedelta(days=validity_days),
             verification_hash=services.gen_hash(sample.reference, "certificate"),
+            rule_version=rules.current_rule_version(),
         )
         services.transition_sample(sample, m.SampleStatus.CERTIFIED)
         sample.audit = [*sample.audit, services.audit_entry(request.user, "certified", cert.reference)]
@@ -1059,3 +1097,86 @@ def _parse_when(value, field):
     if timezone.is_naive(parsed):
         parsed = timezone.make_aware(parsed)
     return parsed
+
+
+# --- settings (G5) ------------------------------------------------------------
+
+SETTINGS_READERS = ("QC", "CEO", "TL")
+SETTINGS_WRITERS = ("QC",)
+
+
+class QualitySettingViewSet(AtomicViewSet):
+    """Q&C rule settings. The grid has no row for settings, so who reads and
+    changes them follows the API contract: Q&C, CEO and the Technical Lead
+    read, Q&C changes. There is no PATCH and no DELETE: a value changes only
+    by a new change row.
+    TODO(Q&C Partner): confirm who may read and change settings."""
+
+    audit_record_type = "setting"
+    queryset = m.QualitySetting.objects.all()
+    lookup_field = "key"
+    lookup_value_regex = "[a-z0-9_]+"
+    http_method_names = ["get", "post", "head", "options"]
+
+    def _require(self, codes):
+        if not permissions.has_role(self.request.user, *codes):
+            _refuse("You do not have permission to perform this action.", "permission_denied")
+
+    def _row(self, setting, now):
+        change = rules._effective_change(setting.key, now)
+        pending = (
+            m.QualitySettingChange.objects.filter(setting=setting, effective_from__gt=now)
+            .order_by("effective_from").first()
+        )
+        return {
+            "setting_key": setting.key,
+            "label": setting.label,
+            "value": change.value if change else None,
+            "unit": setting.unit or None,
+            "value_type": setting.value_type,
+            "effective_from": change.effective_from if change else None,
+            "is_placeholder": change is None or change.value is None,
+            "owner": setting.owner,
+            "note": setting.note,
+            "rule_version": change.rule_version_id if change else None,
+            "pending_change": {"value": pending.value, "effective_from": pending.effective_from} if pending else None,
+        }
+
+    def list(self, request, *args, **kwargs):
+        self._require(SETTINGS_READERS)
+        now = timezone.now()
+        version = m.QualityRuleVersion.objects.filter(effective_from__lte=now).order_by("-number").first()
+        return Response({
+            "rule_version": str(version.number) if version else "",
+            "rule_version_effective_from": version.effective_from if version else None,
+            "results": [self._row(setting, now) for setting in self.get_queryset()],
+        })
+
+    def retrieve(self, request, *args, **kwargs):
+        self._require(SETTINGS_READERS)
+        return Response(self._row(self.get_object(), timezone.now()))
+
+    @action(detail=True, methods=["get", "post"])
+    def changes(self, request, key=None):
+        if request.method == "GET":
+            self._require(SETTINGS_READERS)
+            setting = self.get_object()
+            page = self.paginate_queryset(setting.changes.select_related("setting").order_by("-effective_from", "-changed_at"))
+            return self.get_paginated_response(s.SettingChangeSerializer(page, many=True).data)
+        self._require(SETTINGS_WRITERS)
+        setting = self.get_object()
+        serializer = s.NewSettingChangeSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        before = rules._effective_change(setting.key)
+        row = rules.change(
+            setting, value=data["value"], effective_from=data["effective_from"],
+            reason=data["reason"], user=request.user,
+        )
+        self.audit_detail = {
+            "record_label": setting.key,
+            "before": {"value": before.value if before else None},
+            "after": {"value": row.value, "effective_from": row.effective_from.isoformat(), "rule_version": row.rule_version_id},
+            "reason": row.reason,
+        }
+        return Response(s.SettingChangeSerializer(row).data, status=status.HTTP_201_CREATED)
