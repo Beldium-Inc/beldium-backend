@@ -260,6 +260,13 @@ CAREERS_NOTIFY_EMAIL = config("CAREERS_NOTIFY_EMAIL", default="support@beldium.c
 # out of the box in Nigeria without registering a custom sender ID first.
 TERMII_API_KEY = config("TERMII_API_KEY", default="")
 TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
+# SMS goes out only when this is on and TERMII_API_KEY is set (common/sms.py).
+# Off until the Termii sender ID is approved.
+SMS_ENABLED = config("SMS_ENABLED", default=False, cast=bool)
+# Upload scanning (common/scanning.py). Empty means no scanner: uploads are
+# marked scan pending, never clean.
+CLAMAV_HOST = config("CLAMAV_HOST", default="")
+CLAMAV_PORT = config("CLAMAV_PORT", default=3310, cast=int)
 GOOGLE_OAUTH_CLIENT_ID = config("GOOGLE_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_CLIENT_ID = config("MICROSOFT_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_TENANT_ID = config("MICROSOFT_OAUTH_TENANT_ID", default="common")
