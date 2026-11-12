@@ -159,3 +159,34 @@ class SocialIdentity(TimeStampedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["provider", "subject"], name="unique_social_identity")]
+
+
+# --- second factor at sign in (Release 1, task G8) ---------------------------
+
+
+class SecondFactorDevice(TimeStampedModel):
+    """An authenticator app linked to the account. The shared secret is kept
+    encrypted (accounts/second_factor.py)."""
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="second_factor_device")
+    secret_encrypted = models.TextField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    # The last 30 second time step accepted, so one code cannot be used twice.
+    last_used_step = models.BigIntegerField(default=0)
+
+
+class SecondFactorChallenge(TimeStampedModel):
+    """Issued after a correct password when a second factor is due. Only a
+    hash of the token is stored."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="second_factor_challenges")
+    token_hash = models.CharField(max_length=64, unique=True)
+    expires_at = models.DateTimeField(db_index=True)
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+
+class SecondFactorRecoveryCode(TimeStampedModel):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="second_factor_recovery_codes")
+    code_hash = models.CharField(max_length=64, db_index=True)
+    used_at = models.DateTimeField(null=True, blank=True)

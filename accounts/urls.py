@@ -15,11 +15,17 @@ from accounts.views import (
     PhoneVerificationRequestView,
     PhoneVerificationConfirmView,
     ThrottledTokenRefreshView,
+    SecondFactorEnrolConfirmView,
+    SecondFactorEnrolView,
+    SecondFactorTokenView,
 )
 
 urlpatterns = [
     path("register/", RegistrationView.as_view(), name="register"),
     path("token/", VerifiedTokenObtainPairView.as_view(), name="token"),
+    path("token/second-factor/", SecondFactorTokenView.as_view(), name="token-second-factor"),
+    path("second-factor/enrol/", SecondFactorEnrolView.as_view(), name="second-factor-enrol"),
+    path("second-factor/enrol/confirm/", SecondFactorEnrolConfirmView.as_view(), name="second-factor-enrol-confirm"),
     path("token/refresh/", ThrottledTokenRefreshView.as_view(), name="token-refresh"),
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),
     path("resend-verification/", ResendVerificationView.as_view(), name="resend-verification"),

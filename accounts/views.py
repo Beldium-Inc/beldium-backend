@@ -14,6 +14,9 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from accounts.models import AccountAuditEvent, SocialIdentity, User
 from accounts.portal import portal_for_request
 from accounts.serializers import (
+    SecondFactorCodeSerializer,
+    SecondFactorConfirmSerializer,
+    SecondFactorEnrolSerializer,
     AccountAuditEventSerializer,
     ChangeEmailConfirmSerializer,
     ChangeEmailRequestSerializer,
@@ -54,6 +57,7 @@ from accounts.throttles import (
 from common.exceptions import AppError
 from accounts.audit import record_account_event
 from accounts.social import verify_social_token
+from accounts import second_factor
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +101,15 @@ class VerifiedTokenObtainPairView(TokenObtainPairView):
         except Exception:
             record_account_event(request, "account.login_failed", actor=user)
             raise
+        if user is not None and second_factor.is_required(user):
+            # The password was right, but no tokens leave until the second
+            # factor is passed. The pair just made is revoked at once.
+            try:
+                RefreshToken(response.data["refresh"]).blacklist()
+            except (KeyError, TokenError, AttributeError):
+                pass
+            record_account_event(request, "account.second_factor_challenged", actor=user)
+            return Response(second_factor.start_challenge(user), status=status.HTTP_200_OK)
         record_account_event(request, "account.login_succeeded", actor=user)
         return response
 
@@ -175,9 +188,11 @@ class VerifyEmailView(generics.GenericAPIView):
         else:
             user.portal = portal
             user.save(update_fields=["portal"])
-        refresh = RefreshToken.for_user(user)
         record_account_event(request, "account.email_verified", actor=user)
         transaction.on_commit(lambda: enqueue_account_email("send_welcome_email", str(user.id)))
+        if second_factor.is_required(user):
+            return Response({"message": "Email verified successfully.", **second_factor.start_challenge(user)})
+        refresh = RefreshToken.for_user(user)
         return Response({
             "message": "Email verified successfully.",
             "access": str(refresh.access_token),
@@ -384,3 +399,91 @@ class SocialLinkView(generics.GenericAPIView):
         SocialIdentity.objects.get_or_create(user=request.user, provider=provider, subject=identity["subject"])
         record_account_event(request, "account.social_identity_linked", provider=provider)
         return Response({"message": f"{provider.title()} account linked successfully."})
+
+
+# --- second factor at sign in (G8) --------------------------------------------
+
+
+def _token_pair(user):
+    refresh = RefreshToken.for_user(user)
+    return {"refresh": str(refresh), "access": str(refresh.access_token)}
+
+
+class SecondFactorTokenView(generics.GenericAPIView):
+    """Swap a sign in challenge and a code from the authenticator app (or a
+    recovery code) for a token pair. Five wrong codes lock the challenge."""
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = [VerificationAttemptThrottle]
+    serializer_class = SecondFactorCodeSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        with transaction.atomic():
+            challenge = second_factor.open_challenge(data["challenge_token"])
+            user = challenge.user
+            passed = second_factor.check_code(user, data["code"])
+            if passed:
+                second_factor.close_challenge(challenge)
+            else:
+                second_factor.fail_challenge(challenge)
+        if not passed:
+            record_account_event(request, "account.second_factor_failed", actor=user)
+            raise AppError("That code is not correct.", code="second_factor_invalid")
+        record_account_event(request, "account.login_succeeded", actor=user, second_factor=True)
+        return Response(_token_pair(user))
+
+
+def _enrolling_user(request, challenge_token):
+    """The signed in caller, or the owner of a valid sign in challenge."""
+    if challenge_token:
+        return second_factor.open_challenge(challenge_token)
+    if request.user and request.user.is_authenticated:
+        return None
+    raise AppError("Sign in again. The code step took too long.", code="challenge_expired", status_code=401)
+
+
+class SecondFactorEnrolView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [VerificationAttemptThrottle]
+    serializer_class = SecondFactorEnrolSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            challenge = _enrolling_user(request, serializer.validated_data.get("challenge_token"))
+            user = challenge.user if challenge else request.user
+            result = second_factor.begin_enrolment(user)
+        record_account_event(request, "account.second_factor_enrolment_started", actor=user)
+        return Response(result)
+
+
+class SecondFactorEnrolConfirmView(generics.GenericAPIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [VerificationAttemptThrottle]
+    serializer_class = SecondFactorConfirmSerializer
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        with transaction.atomic():
+            challenge = _enrolling_user(request, data.get("challenge_token"))
+            user = challenge.user if challenge else request.user
+            codes = second_factor.confirm_enrolment(user, data["code"])
+            if codes is None and challenge:
+                second_factor.fail_challenge(challenge)
+            elif codes is not None and challenge:
+                second_factor.close_challenge(challenge)
+        if codes is None:
+            record_account_event(request, "account.second_factor_failed", actor=user)
+            raise AppError("That code is not correct.", code="second_factor_invalid")
+        record_account_event(request, "account.second_factor_enrolled", actor=user)
+        body = {"recovery_codes": codes}
+        if challenge:
+            body.update(_token_pair(user))
+        return Response(body)

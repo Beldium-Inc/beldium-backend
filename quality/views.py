@@ -18,6 +18,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from organisations.rights import build_me
 from organisations.models import Organisation
+from accounts import second_factor
 from quality import audit_log
 from quality import bridge
 from quality import permissions
@@ -157,8 +158,7 @@ class SummaryView(APIView):
                 "role_codes": sorted(permissions.role_codes(user)),
                 "permissions": rights,
                 "restricted_views": restricted,
-                # TODO(G8): read the enrolment once the second factor exists.
-                "second_factor_enrolled": False,
+                "second_factor_enrolled": second_factor.is_enrolled(user),
             })
 
         # Platform wide totals and other organisations' applications are for

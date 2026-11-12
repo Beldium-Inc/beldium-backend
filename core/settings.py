@@ -263,6 +263,12 @@ TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
 # SMS goes out only when this is on and TERMII_API_KEY is set (common/sms.py).
 # Off until the Termii sender ID is approved.
 SMS_ENABLED = config("SMS_ENABLED", default=False, cast=bool)
+# Second factor at sign in (accounts/second_factor.py). Off until the
+# frontend has the code step (task E13); enrolment works either way.
+SECOND_FACTOR_ENFORCED = config("SECOND_FACTOR_ENFORCED", default=False, cast=bool)
+# A Fernet key for the stored authenticator secrets. When empty, one is
+# derived from SECRET_KEY; set this before SECRET_KEY is ever rotated.
+SECOND_FACTOR_ENCRYPTION_KEY = config("SECOND_FACTOR_ENCRYPTION_KEY", default="")
 # Upload scanning (common/scanning.py). Empty means no scanner: uploads are
 # marked scan pending, never clean.
 CLAMAV_HOST = config("CLAMAV_HOST", default="")

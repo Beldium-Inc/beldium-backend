@@ -162,3 +162,22 @@ class ChangeEmailConfirmSerializer(ChangeEmailRequestSerializer):
 
 class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField()
+
+
+# --- second factor (G8) -------------------------------------------------------
+
+
+class SecondFactorCodeSerializer(serializers.Serializer):
+    challenge_token = serializers.CharField(max_length=200)
+    # Six digits from the app, or a recovery code.
+    code = serializers.CharField(max_length=20)
+
+
+class SecondFactorEnrolSerializer(serializers.Serializer):
+    challenge_token = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    method = serializers.ChoiceField(choices=["totp"], default="totp")
+
+
+class SecondFactorConfirmSerializer(serializers.Serializer):
+    challenge_token = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    code = serializers.CharField(max_length=10)
