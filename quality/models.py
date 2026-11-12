@@ -548,3 +548,23 @@ class QualitySettingChange(models.Model):
 
     def delete(self, *args, **kwargs):
         raise PermissionError("Setting changes are append only.")
+
+
+# --- ID counters (Release 1, task G6) ----------------------------------------
+
+
+class QualityIdCounter(models.Model):
+    """One locked counter row per prefix and year. Numbers are never reused."""
+
+    prefix = models.CharField(max_length=40)
+    year = models.PositiveSmallIntegerField()
+    last_value = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["prefix", "year"], name="unique_quality_id_counter"),
+        ]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("ID counters are never deleted, so numbers are never reused.")
