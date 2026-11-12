@@ -10,7 +10,24 @@ from accounts.models import AccountAuditEvent, AccountRecoveryCode, EmailVerific
 
 admin.site.register(EmailVerificationCode)
 admin.site.register(AccountRecoveryCode)
-admin.site.register(AccountAuditEvent)
+class ReadOnlyAuditAdmin(admin.ModelAdmin):
+    """Audit rows are looked at, never added, changed or deleted here."""
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AccountAuditEvent)
+class AccountAuditEventAdmin(ReadOnlyAuditAdmin):
+    list_display = ("created_at", "event_type", "actor_email", "ip_address")
+    list_filter = ("event_type",)
+    search_fields = ("actor_email", "event_type")
 admin.site.register(PhoneVerificationCode)
 admin.site.register(SocialIdentity)
 

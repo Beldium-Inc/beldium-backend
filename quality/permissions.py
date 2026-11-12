@@ -118,3 +118,11 @@ def require(user, record_type, action, *, message=None, code="permission_denied"
 
 def has_role(user, *codes):
     return bool(role_codes(user) & set(codes))
+
+
+def admin_only(user):
+    """True for a holder of the Beldium Admin role with no role that may read
+    audit logs. Used to close the other apps' audit trails to Admin
+    (decision 8)."""
+    codes = role_codes(user)
+    return "ADM" in codes and not (codes & {"QC", "CEO", "TL", "LGL"})

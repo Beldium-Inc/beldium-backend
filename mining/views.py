@@ -1168,6 +1168,18 @@ class MiningAuditViewSet(MiningViewSetMixin, viewsets.ReadOnlyModelViewSet):
     ordering = ["-created_at"]
     ordering_fields = ["created_at"]
 
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # Decision 8: the Beldium Admin role has no access to any audit log.
+        from quality.permissions import admin_only
+
+        if admin_only(request.user):
+            from common.exceptions import AppError
+
+            raise AppError(
+                "Your role does not have access to the audit log.", code="audit_log_closed", status_code=403,
+            )
+
     def get_queryset(self):
         if getattr(self, "swagger_fake_view", False):
             return self.queryset

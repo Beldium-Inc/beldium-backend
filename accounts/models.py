@@ -129,6 +129,10 @@ class AccountAuditEvent(TimeStampedModel):
         blank=True,
         related_name="account_audit_events",
     )
+    # A text copy of who acted, kept when the user account is later removed
+    # and the foreign key above is cleared (G10).
+    actor_email = models.CharField(max_length=254, blank=True)
+    actor_name = models.CharField(max_length=255, blank=True)
     event_type = models.CharField(max_length=80, db_index=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.TextField(blank=True)
@@ -136,6 +140,12 @@ class AccountAuditEvent(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.actor_id and not self.actor_email:
+            self.actor_email = self.actor.email
+            self.actor_name = (getattr(self.actor, "full_name", "") or "").strip()
+        return super().save(*args, **kwargs)
 
 
 class SocialIdentity(TimeStampedModel):

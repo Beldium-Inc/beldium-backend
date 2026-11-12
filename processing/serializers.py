@@ -676,6 +676,9 @@ class ProcessingAuditEventSerializer(serializers.ModelSerializer):
         fields = ["id", "created_at", "actor", "role", "action", "target", "detail"]
 
     def get_actor(self, obj) -> str:
+        if obj.actor is None and (obj.actor_name or obj.actor_email):
+            # The account was removed; the copy taken at the time remains.
+            return obj.actor_name or obj.actor_email
         return actor_name(obj.actor)
 
     def get_role(self, obj) -> str:
