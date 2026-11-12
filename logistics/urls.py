@@ -33,5 +33,5 @@ for prefix, view, basename in [
 
 urlpatterns = router.urls + [
     path(name + '/', views.SummaryViewSet.as_view({'get': name}), name='logistics-' + name)
-    for name in ['me', 'dashboard', 'risk', 'audit', 'operations_dashboard']
+    for name in ['me', 'desk', 'dashboard', 'risk', 'audit', 'operations_dashboard']
 ]

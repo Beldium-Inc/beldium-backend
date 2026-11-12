@@ -18,12 +18,13 @@ from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 
 from accounts.models import AccountAuditEvent
+from organisations import access
 from organisations.rights import build_me
 from organisations.models import OrganisationMembership
 from common.exceptions import ConflictError
 from compliance.logistics_documents import LOGISTICS_DOCUMENT_TITLES, LOGISTICS_EVIDENCE_DOMAINS
 from logistics import models as m, serializers as s, services
-from logistics.permissions import company_ids, can_review, can_edit, assert_editor, assert_reviewer, is_desk, EDIT_ROLES
+from logistics.permissions import company_ids, can_review, can_edit, can_see_driver_details, assert_editor, assert_reviewer, is_desk, EDIT_ROLES, SECTOR
 
 
 class AtomicViewSet(viewsets.GenericViewSet):
@@ -271,6 +272,14 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
                 application.save(update_fields=['status', 'updated_at'])
         services.audit(request, application.company, 'document_uploaded', document_id=str(document.pk), version=document.version)
         return Response(s.DocumentSerializer(document, context=self.context()).data, status=201)
+
+    @extend_schema(responses=s.ChecklistItemSerializer(many=True))
+    @action(detail=True, methods=['get'], pagination_class=None)
+    def checklist(self, request, pk=None):
+        """What the submission gate asks for, so the uploader never has to guess the type keys."""
+        application = self.get_object()
+        show_driver = request.user.is_staff or can_see_driver_details(request.user, application.company)
+        return Response(s.ChecklistItemSerializer(services.checklist(application, show_driver), many=True).data)
 
     @extend_schema(methods=['GET'], responses=s.InformationRequestSerializer(many=True))
     @extend_schema(methods=['POST'], request=s.InformationRequestSerializer, responses={201: s.InformationRequestSerializer})
@@ -1002,6 +1011,13 @@ class SummaryViewSet(AtomicViewSet):
         return Response({**build_me(request.user, 'logistics'), 'is_staff': request.user.is_staff, 'companies': [
             {'id': company.pk, 'name': company.organisation.name, 'can_edit': can_edit(request.user, company),
              'can_review': can_review(request.user, company), 'can_read': True} for company in companies]})
+
+    @extend_schema(responses=s.SummarySerializer)
+    @action(detail=False, methods=['get'])
+    def desk(self, request):
+        # The vetted compliance-desk audience for logistics, decided server-side by
+        # organisations.access.audience: staff, or a verified partner/regulator membership.
+        return Response({'audience': access.audience(request.user, SECTOR)})
 
     @extend_schema(responses=s.SummarySerializer)
     @action(detail=False, methods=['get'])
