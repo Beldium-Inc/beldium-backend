@@ -188,17 +188,43 @@ class BuyerSpecSerializer(serializers.ModelSerializer):
 
 # --- certificates --------------------------------------------------------------
 
+LEGACY_LABEL = "Legacy, not verified"
+
+
+def certificate_display_status(cert):
+    """The status a screen shows, worked out on the server so no screen ever
+    relies on the device clock (E10). Same rules as the public check."""
+    if cert.is_legacy:
+        return "legacy_not_verified"
+    if cert.status == m.CertificateStatus.REVOKED:
+        return "revoked"
+    if cert.status != m.CertificateStatus.ACTIVE or cert.valid_until is None:
+        return "not_verified"
+    if timezone.localdate(cert.valid_until) < timezone.localdate():
+        return "expired"
+    return "valid"
+
+
 class CertificateSerializer(serializers.ModelSerializer):
     sample_reference = serializers.CharField(source="sample.reference", read_only=True)
     material = serializers.CharField(source="sample.material", read_only=True)
+    display_status = serializers.SerializerMethodField()
+    legacy_label = serializers.SerializerMethodField()
 
     class Meta:
         model = m.Certificate
         fields = [
             "id", "reference", "sample", "sample_reference", "material", "issued_at",
             "issued_by", "valid_until", "status", "verification_hash", "scans", "is_legacy", "rule_version",
+            "display_status", "legacy_label",
         ]
         read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans", "is_legacy", "rule_version"]
+
+    def get_display_status(self, obj):
+        return certificate_display_status(obj)
+
+    def get_legacy_label(self, obj):
+        return LEGACY_LABEL if obj.is_legacy else None
 
 
 class CertificateVerificationSerializer(serializers.ModelSerializer):
@@ -219,19 +245,20 @@ class CertificateVerificationSerializer(serializers.ModelSerializer):
         model = m.Certificate
         fields = [
             "reference", "sample_reference", "material", "issued_at", "valid_until", "status", "scans",
-            "is_legacy", "verification", "valid",
+            "is_legacy", "verification", "valid", "legacy_label", "checked_at",
         ]
 
+    legacy_label = serializers.SerializerMethodField()
+    checked_at = serializers.SerializerMethodField()
+
     def get_verification(self, obj):
-        if obj.is_legacy:
-            return "legacy_not_verified"
-        if obj.status == m.CertificateStatus.REVOKED:
-            return "revoked"
-        if obj.status != m.CertificateStatus.ACTIVE or obj.valid_until is None:
-            return "not_verified"
-        if timezone.localdate(obj.valid_until) < timezone.localdate():
-            return "expired"
-        return "valid"
+        return certificate_display_status(obj)
+
+    def get_legacy_label(self, obj):
+        return LEGACY_LABEL if obj.is_legacy else None
+
+    def get_checked_at(self, obj):
+        return timezone.now()
 
     def get_valid(self, obj):
         return self.get_verification(obj) == "valid"
