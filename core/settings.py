@@ -269,6 +269,13 @@ SECOND_FACTOR_ENFORCED = config("SECOND_FACTOR_ENFORCED", default=False, cast=bo
 # A Fernet key for the stored authenticator secrets. When empty, one is
 # derived from SECRET_KEY; set this before SECRET_KEY is ever rotated.
 SECOND_FACTOR_ENCRYPTION_KEY = config("SECOND_FACTOR_ENCRYPTION_KEY", default="")
+# The refresh token also travels in an HttpOnly cookie (accounts/refresh_cookie.py).
+# The body copy stays while the frontend moves over to the cookie.
+# TODO(Emmanuel): set REFRESH_TOKEN_IN_BODY off once E13 ships.
+REFRESH_TOKEN_IN_BODY = config("REFRESH_TOKEN_IN_BODY", default=True, cast=bool)
+REFRESH_COOKIE_NAME = "beldium_refresh"
+# The browser sends the cookie on credentialed calls from the portals.
+CORS_ALLOW_CREDENTIALS = True
 # Upload scanning (common/scanning.py). Empty means no scanner: uploads are
 # marked scan pending, never clean.
 CLAMAV_HOST = config("CLAMAV_HOST", default="")
