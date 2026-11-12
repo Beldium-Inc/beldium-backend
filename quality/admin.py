@@ -69,3 +69,7 @@ class QualityRoleAssignmentAdmin(ReadOnlyAdmin):
     list_display = ("user", "role", "organisation", "status", "valid_from", "valid_to")
     list_filter = ("status", "role")
     search_fields = ("user__email",)
+
+
+# The audit log is deliberately not registered here. Decision 8: Admin has
+# no access to the audit log. It is read through /quality/audit-log/ only.

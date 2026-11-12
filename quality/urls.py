@@ -12,6 +12,7 @@ router.register("buyer-specs", views.BuyerSpecViewSet, basename="quality-buyer-s
 router.register("non-conformities", views.NonConformityViewSet, basename="quality-non-conformity")
 router.register("roles", views.QualityRoleViewSet, basename="quality-role")
 router.register("role-assignments", views.QualityRoleAssignmentViewSet, basename="quality-role-assignment")
+router.register("audit-log", views.QualityAuditLogViewSet, basename="quality-audit-log")
 router.register("notifications", views.QualityNotificationViewSet, basename="quality-notification")
 
 urlpatterns = [

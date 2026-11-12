@@ -18,6 +18,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from organisations.rights import build_me
 from organisations.models import Organisation
+from quality import audit_log
 from quality import bridge
 from quality import permissions
 from quality import roles as role_data
@@ -26,15 +27,58 @@ from quality import serializers as s
 from quality import services
 
 
-class AtomicViewSet(viewsets.GenericViewSet):
-    permission_classes = [IsAuthenticated]
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
-    @transaction.atomic
+
+class AtomicViewSet(viewsets.GenericViewSet):
+    """Every call runs in one transaction. A successful write is written to
+    the audit log inside that transaction. A refused call (403, or a 404 that
+    hides a record the caller may not see) is rolled back and then written to
+    the audit log on its own, so the refusal is kept."""
+
+    permission_classes = [IsAuthenticated]
+    audit_record_type = ""
+    audit_writes = True
+
     def dispatch(self, request, *args, **kwargs):
-        result = super().dispatch(request, *args, **kwargs)
-        if result.status_code >= 400:
-            transaction.set_rollback(True)
+        self.audit_detail = {}
+        with transaction.atomic():
+            result = super().dispatch(request, *args, **kwargs)
+            if result.status_code >= 400:
+                transaction.set_rollback(True)
+            elif self.audit_writes and request.method not in SAFE_METHODS:
+                self._write_audit(result, kwargs, m.AuditOutcome.SUCCESS)
+        if result.status_code in {403, 404}:
+            user = getattr(self.request, "user", None)
+            if user is not None and getattr(user, "is_authenticated", False):
+                with transaction.atomic():
+                    self._write_audit(result, kwargs, m.AuditOutcome.REFUSED)
         return result
+
+    def _write_audit(self, result, kwargs, outcome):
+        data = getattr(result, "data", None)
+        record_id = kwargs.get("pk") or ""
+        label = ""
+        reason = ""
+        if isinstance(data, dict):
+            if not record_id and outcome == m.AuditOutcome.SUCCESS:
+                record_id = data.get("id") or ""
+            label = data.get("reference") or ""
+            if outcome == m.AuditOutcome.REFUSED:
+                reason = data.get("message") or str(data.get("detail") or "")
+        detail = getattr(self, "audit_detail", {}) or {}
+        audit_log.record(
+            actor=self.request.user,
+            action=f"{self.audit_record_type or self.basename}.{getattr(self, 'action', None) or self.request.method.lower()}",
+            record_type=self.audit_record_type,
+            record_id=record_id,
+            record_label=detail.get("record_label", label),
+            outcome=outcome,
+            reason=detail.get("reason", reason) if outcome == m.AuditOutcome.SUCCESS else reason,
+            before=detail.get("before") if outcome == m.AuditOutcome.SUCCESS else None,
+            after=detail.get("after") if outcome == m.AuditOutcome.SUCCESS else None,
+            request=self.request,
+        )
 
     def get_object(self):
         obj = super().get_object()
@@ -142,6 +186,7 @@ class SummaryView(APIView):
 class QualityApplicationViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, AtomicViewSet
 ):
+    audit_record_type = "quality_application"
     queryset = m.QualityApplication.objects.all().select_related("assigned_to", "organisation")
     filterset_fields = ["status"]
     search_fields = ["reference", "organisation__name"]
@@ -304,6 +349,7 @@ class QualityProfessionalApplicationViewSet(
     Beldium's quality operators read and decide all of them.
     """
 
+    audit_record_type = "professional_application"
     serializer_class = s.QualityProfessionalApplicationSerializer
     queryset = m.QualityProfessionalApplication.objects.all().select_related("applicant", "organisation").prefetch_related("documents")
     filterset_fields = ["status"]
@@ -393,6 +439,7 @@ class SampleViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin,
     mixins.UpdateModelMixin, AtomicViewSet
 ):
+    audit_record_type = "sample"
     queryset = m.Sample.objects.all().select_related("buyer_spec", "miner_organisation", "partner_organisation", "buyer_organisation", "registered_by")
     filterset_fields = ["status", "buyer_spec"]
     search_fields = ["reference", "material", "lot", "mine_site"]
@@ -603,6 +650,7 @@ class SampleViewSet(
 
 
 class CertificateViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicViewSet):
+    audit_record_type = "verification_certificate"
     queryset = m.Certificate.objects.all().select_related("sample")
     filterset_fields = ["status", "sample"]
     search_fields = ["reference", "sample__reference"]
@@ -638,6 +686,7 @@ class CertificateViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, Atomi
 
 
 class BuyerSpecViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, mixins.UpdateModelMixin, AtomicViewSet):
+    audit_record_type = "buyer_spec"
     queryset = m.BuyerSpec.objects.all()
     serializer_class = s.BuyerSpecSerializer
     search_fields = ["name", "buyer_org", "material"]
@@ -668,6 +717,7 @@ class BuyerSpecViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.
 class NonConformityViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, AtomicViewSet
 ):
+    audit_record_type = "ncr_capa"
     queryset = m.QualityNonConformity.objects.all()
     serializer_class = s.QualityNonConformitySerializer
     filterset_fields = ["status", "severity"]
@@ -774,6 +824,9 @@ class CertificateVerificationView(APIView):
 
 
 class QualityNotificationViewSet(mixins.ListModelMixin, AtomicViewSet):
+    audit_record_type = "notification"
+    # Marking one's own notice as read is not a change to a Q&C record.
+    audit_writes = False
     serializer_class = s.QualityNotificationSerializer
     queryset = m.QualityNotification.objects.none()
 
@@ -798,9 +851,19 @@ def _refuse(message, code, status_code=403):
     raise AppError(message, code=code, status_code=status_code)
 
 
+def _assignment_snapshot(assignment):
+    return {
+        "user_id": str(assignment.user_id), "role_code": assignment.role_id,
+        "organisation_id": str(assignment.organisation_id) if assignment.organisation_id else None,
+        "status": assignment.status, "valid_from": str(assignment.valid_from),
+        "valid_to": str(assignment.valid_to) if assignment.valid_to else None,
+    }
+
+
 class QualityRoleViewSet(mixins.ListModelMixin, AtomicViewSet):
     """The 12 roles with their grid. Not paged: there are always 12."""
 
+    audit_record_type = "users_and_roles"
     serializer_class = s.QualityRoleSerializer
     queryset = m.QualityRole.objects.all().prefetch_related("grants")
     pagination_class = None
@@ -815,6 +878,7 @@ class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMi
     Q&C approves, CEO reads. An assignment gives no access until approved and
     is never deleted."""
 
+    audit_record_type = "users_and_roles"
     serializer_class = s.RoleAssignmentSerializer
     queryset = m.QualityRoleAssignment.objects.all().select_related("user", "role", "organisation")
     filterset_fields = ["status"]
@@ -874,6 +938,7 @@ class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMi
             user=target, role=role, organisation=organisation,
             valid_from=data["valid_from"], valid_to=data.get("valid_to"), granted_by=request.user,
         )
+        self.audit_detail = {"record_label": f"{role.code} for {target.email}", "after": _assignment_snapshot(assignment)}
         return Response(self.get_serializer(assignment).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
@@ -886,12 +951,17 @@ class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMi
             _refuse("This assignment has already been decided.", "already_decided", 409)
         serializer = s.DecideRoleAssignmentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        before = _assignment_snapshot(assignment)
         approved = serializer.validated_data["decision"] == "approve"
         assignment.status = m.RoleAssignmentStatus.ACTIVE if approved else m.RoleAssignmentStatus.REJECTED
         assignment.approved_by = request.user
         assignment.decided_at = timezone.now()
         assignment.decision_reason = serializer.validated_data.get("reason", "")
         assignment.save(update_fields=["status", "approved_by", "decided_at", "decision_reason", "updated_at"])
+        self.audit_detail = {
+            "record_label": f"{assignment.role_id} for {assignment.user.email}", "before": before,
+            "after": _assignment_snapshot(assignment), "reason": assignment.decision_reason,
+        }
         return Response(self.get_serializer(assignment).data)
 
     @action(detail=True, methods=["post"])
@@ -904,6 +974,7 @@ class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMi
             _refuse("Only an active assignment can be ended.", "not_active", 409)
         serializer = s.EndRoleAssignmentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        before = _assignment_snapshot(assignment)
         today = timezone.localdate()
         assignment.status = m.RoleAssignmentStatus.ENDED
         assignment.valid_to = today if assignment.valid_to is None or assignment.valid_to > today else assignment.valid_to
@@ -911,4 +982,80 @@ class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMi
         assignment.ended_at = timezone.now()
         assignment.end_reason = serializer.validated_data["reason"]
         assignment.save(update_fields=["status", "valid_to", "ended_by", "ended_at", "end_reason", "updated_at"])
+        self.audit_detail = {
+            "record_label": f"{assignment.role_id} for {assignment.user.email}", "before": before,
+            "after": _assignment_snapshot(assignment), "reason": assignment.end_reason,
+        }
         return Response(self.get_serializer(assignment).data)
+
+
+# --- audit log read (G4) ------------------------------------------------------
+
+
+class QualityAuditLogViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicViewSet):
+    """Read only. There is no create, update or delete route. Beldium Admin is
+    refused (decision 8, rule AT-05). Reading the log is itself logged."""
+
+    audit_record_type = "audit_log"
+    serializer_class = s.QualityAuditEntrySerializer
+    queryset = m.QualityAuditEntry.objects.all()
+    http_method_names = ["get", "head", "options"]
+    MAX_RANGE_DAYS = 366
+
+    def _require_access(self):
+        permissions.require(
+            self.request.user, "audit_log", "read",
+            message="Your role does not have access to the audit log.", code="audit_log_closed",
+        )
+
+    def get_queryset(self):
+        self._require_access()
+        qs = self.queryset
+        params = self.request.query_params
+        for field in ("record_type", "record_id", "batch_id", "actor_id", "action", "outcome"):
+            if params.get(field):
+                qs = qs.filter(**{field: params[field]})
+        start = _parse_when(params.get("from"), "from")
+        end = _parse_when(params.get("to"), "to")
+        if start and end and (end - start).days > self.MAX_RANGE_DAYS:
+            from common.exceptions import AppError
+            raise AppError("Ask for 366 days or fewer at a time.", code="date_range_too_wide")
+        if start:
+            qs = qs.filter(occurred_at__gte=start)
+        if end:
+            qs = qs.filter(occurred_at__lte=end)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        audit_log.record(
+            actor=request.user, action="audit_log.read", record_type="audit_log",
+            reason=request.META.get("QUERY_STRING", "")[:500], request=request,
+        )
+        return response
+
+    def retrieve(self, request, *args, **kwargs):
+        response = super().retrieve(request, *args, **kwargs)
+        audit_log.record(
+            actor=request.user, action="audit_log.read", record_type="audit_log",
+            record_id=kwargs.get("pk", ""), request=request,
+        )
+        return response
+
+
+def _parse_when(value, field):
+    if not value:
+        return None
+    from django.utils.dateparse import parse_date, parse_datetime
+
+    parsed = parse_datetime(value)
+    if parsed is None:
+        day = parse_date(value)
+        if day is None:
+            raise ValidationError({field: ["Use a date (YYYY-MM-DD) or an ISO 8601 time."]})
+        from datetime import datetime, time
+
+        parsed = datetime.combine(day, time.max if field == "to" else time.min)
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed

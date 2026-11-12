@@ -497,3 +497,17 @@ class DecideRoleAssignmentSerializer(serializers.Serializer):
 
 class EndRoleAssignmentSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=2000)
+
+
+# --- audit log (G4) -----------------------------------------------------------
+
+
+class QualityAuditEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.QualityAuditEntry
+        fields = [
+            "id", "occurred_at", "actor_id", "actor_name", "actor_role_code", "action",
+            "record_type", "record_id", "record_label", "batch_id", "outcome", "reason",
+            "before", "after", "ip_address", "rule_version",
+        ]
+        read_only_fields = fields

@@ -400,3 +400,63 @@ class QualityRoleAssignment(TimeStampedModel):
 
     def __str__(self):
         return f"{self.user_id} {self.role_id} {self.status}"
+
+
+# --- audit log (Release 1, task G4) -----------------------------------------
+
+
+class AppendOnlyQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise PermissionError("Audit entries are append only.")
+
+    def delete(self):
+        raise PermissionError("Audit entries are append only.")
+
+
+class AuditOutcome(models.TextChoices):
+    SUCCESS = "success", "Success"
+    REFUSED = "refused", "Refused"
+
+
+class QualityAuditEntry(models.Model):
+    """One append only row per action on a Q&C record, refused ones included.
+
+    The actor is stored as an id and a text copy, not a foreign key, so a
+    removed user account never changes or blocks the history. Updates and
+    deletes are refused here, in the admin, and by a database trigger
+    (migration 0009).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    occurred_at = models.DateTimeField(default=timezone.now, db_index=True)
+    actor_id = models.UUIDField(null=True, blank=True, db_index=True)
+    actor_name = models.CharField(max_length=255, blank=True)
+    actor_email = models.CharField(max_length=254, blank=True)
+    actor_role_code = models.CharField(max_length=80, blank=True)
+    action = models.CharField(max_length=120, db_index=True)
+    record_type = models.CharField(max_length=60, blank=True, db_index=True)
+    record_id = models.CharField(max_length=64, blank=True, db_index=True)
+    record_label = models.CharField(max_length=120, blank=True)
+    batch_id = models.CharField(max_length=64, blank=True)
+    outcome = models.CharField(max_length=10, choices=AuditOutcome.choices, default=AuditOutcome.SUCCESS, db_index=True)
+    reason = models.TextField(blank=True)
+    before = models.JSONField(null=True, blank=True)
+    after = models.JSONField(null=True, blank=True)
+    ip_address = models.CharField(max_length=64, blank=True)
+    method = models.CharField(max_length=10, blank=True)
+    path = models.CharField(max_length=255, blank=True)
+    rule_version = models.CharField(max_length=40, blank=True)
+
+    objects = AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-occurred_at"]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise PermissionError("Audit entries are append only.")
+        kwargs["force_insert"] = True
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("Audit entries are append only.")
