@@ -57,3 +57,15 @@ class QualityProfessionalApplicationAdmin(ReadOnlyAdmin):
     list_display = ("reference", "applicant", "organisation", "status", "submitted_at")
     list_filter = ("status",)
     search_fields = ("reference", "applicant__email")
+
+
+@admin.register(m.QualityRole)
+class QualityRoleAdmin(ReadOnlyAdmin):
+    list_display = ("code", "name", "is_internal", "second_factor_required")
+
+
+@admin.register(m.QualityRoleAssignment)
+class QualityRoleAssignmentAdmin(ReadOnlyAdmin):
+    list_display = ("user", "role", "organisation", "status", "valid_from", "valid_to")
+    list_filter = ("status", "role")
+    search_fields = ("user__email",)

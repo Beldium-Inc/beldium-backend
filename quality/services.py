@@ -40,7 +40,41 @@ _ORG_TYPE_TO_ROLE = {
 BLOCKED_ORGANISATION_STATUSES = {"suspended", "rejected"}
 
 
+# Stored role codes mapped to the five roles the existing endpoints check.
+# CEO, TL, Legal and Admin read and change nothing through these endpoints, so
+# they get the read only "regulator" seat. The export agent has no seat on
+# these endpoints yet.
+_CODE_TO_LEGACY_ROLE = {
+    "QC": "operator",
+    "CEO": "regulator", "TL": "regulator", "LGL": "regulator", "ADM": "regulator",
+    "LAB": "partner", "INS": "partner", "SMP": "partner", "LOG": "partner",
+    "SUP": "miner",
+    "BYR": "buyer",
+}
+_LEGACY_ROLE_ORDER = ["operator", "regulator", "partner", "miner", "buyer"]
+
+
 def derive_role(user):
+    """The caller's quality role on the existing endpoints.
+
+    Users with stored role assignments (quality/permissions.py) get the role
+    their approved assignments give. Everyone else keeps the old derivation
+    until they are given an assignment.
+    """
+    from quality import permissions
+
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    if permissions.uses_stored_roles(user):
+        held = {_CODE_TO_LEGACY_ROLE.get(code) for code in permissions.role_codes(user)}
+        for role in _LEGACY_ROLE_ORDER:
+            if role in held:
+                return role
+        return None
+    return legacy_derive_role(user)
+
+
+def legacy_derive_role(user):
     if not user or not getattr(user, "is_authenticated", False):
         return None
     if user.is_staff:
@@ -119,8 +153,16 @@ def can_review(user):
 
 
 def can_decide(user):
-    """Only Beldium operators (staff) make binding accreditation/certification decisions."""
-    return bool(user and user.is_active and user.is_staff)
+    """Only Beldium operators make binding accreditation and certification
+    decisions: the Q&C Partner role once stored roles are in use, staff
+    before that."""
+    from quality import permissions
+
+    if not (user and getattr(user, "is_authenticated", False) and user.is_active):
+        return False
+    if permissions.uses_stored_roles(user):
+        return permissions.has_role(user, "QC")
+    return bool(user.is_staff)
 
 
 # --- misc helpers -------------------------------------------------------------

@@ -19,6 +19,8 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from organisations.rights import build_me
 from organisations.models import Organisation
 from quality import bridge
+from quality import permissions
+from quality import roles as role_data
 from quality import models as m
 from quality import serializers as s
 from quality import services
@@ -91,7 +93,28 @@ class SummaryView(APIView):
             "is_staff": bool(user.is_staff),
         }
         if kind == "me":
-            return Response({**build_me(user, "quality"), **s.QualityCapabilitiesSerializer(capabilities).data})
+            rights, restricted = permissions.permissions_for(user)
+            roles = [
+                {
+                    "role_code": assignment.role_id,
+                    "organisation_id": str(assignment.organisation_id) if assignment.organisation_id else None,
+                    "organisation_name": getattr(assignment.organisation, "name", ""),
+                    "valid_from": assignment.valid_from,
+                    "valid_to": assignment.valid_to,
+                }
+                for assignment in permissions.active_assignments(user)
+            ]
+            return Response({
+                **build_me(user, "quality"),
+                **s.QualityCapabilitiesSerializer(capabilities).data,
+                "user_id": str(user.id),
+                "roles": roles,
+                "role_codes": sorted(permissions.role_codes(user)),
+                "permissions": rights,
+                "restricted_views": restricted,
+                # TODO(G8): read the enrolment once the second factor exists.
+                "second_factor_enrolled": False,
+            })
 
         # Platform wide totals and other organisations' applications are for
         # the quality desk and oversight only.
@@ -764,3 +787,128 @@ class QualityNotificationViewSet(mixins.ListModelMixin, AtomicViewSet):
             notification.read_at = timezone.now()
             notification.save(update_fields=["read_at", "updated_at"])
         return Response(s.QualityNotificationSerializer(notification).data)
+
+
+# --- roles and role assignments (G3) -----------------------------------------
+
+
+def _refuse(message, code, status_code=403):
+    from common.exceptions import AppError
+
+    raise AppError(message, code=code, status_code=status_code)
+
+
+class QualityRoleViewSet(mixins.ListModelMixin, AtomicViewSet):
+    """The 12 roles with their grid. Not paged: there are always 12."""
+
+    serializer_class = s.QualityRoleSerializer
+    queryset = m.QualityRole.objects.all().prefetch_related("grants")
+    pagination_class = None
+
+    def list(self, request, *args, **kwargs):
+        permissions.require(request.user, "users_and_roles", "read")
+        return super().list(request, *args, **kwargs)
+
+
+class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, AtomicViewSet):
+    """Figure 5 row "Users and roles": Admin creates, Technical Lead updates,
+    Q&C approves, CEO reads. An assignment gives no access until approved and
+    is never deleted."""
+
+    serializer_class = s.RoleAssignmentSerializer
+    queryset = m.QualityRoleAssignment.objects.all().select_related("user", "role", "organisation")
+    filterset_fields = ["status"]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def get_queryset(self):
+        if not permissions.can(self.request.user, "users_and_roles", "read"):
+            return self.queryset.none()
+        qs = self.queryset
+        params = self.request.query_params
+        if params.get("user_id"):
+            qs = qs.filter(user_id=params["user_id"])
+        if params.get("role_code"):
+            qs = qs.filter(role_id=params["role_code"])
+        if params.get("organisation_id"):
+            qs = qs.filter(organisation_id=params["organisation_id"])
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        permissions.require(request.user, "users_and_roles", "read")
+        return super().list(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        from accounts.models import User
+        from organisations.models import OrganisationMembership
+
+        permissions.require(request.user, "users_and_roles", "create")
+        serializer = s.CreateRoleAssignmentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        target = User.objects.filter(pk=data["user_id"], is_active=True).first()
+        if target is None:
+            raise ValidationError({"user_id": ["Select an active user."]})
+        if target.pk == request.user.pk:
+            _refuse("You cannot give a role to yourself.", "self_assignment")
+        role = m.QualityRole.objects.get(pk=data["role_code"])
+        organisation = None
+        if data.get("organisation_id"):
+            organisation = Organisation.objects.filter(pk=data["organisation_id"]).first()
+            if organisation is None:
+                raise ValidationError({"organisation_id": ["Select a registered organisation."]})
+        if role.code in role_data.ORGANISATION_ROLES:
+            if organisation is None:
+                _refuse("This role needs an organisation.", "organisation_required", 400)
+            if organisation.verification_status != "verified":
+                _refuse("The organisation is not verified, or is suspended.", "organisation_not_verified", 409)
+            if not OrganisationMembership.objects.filter(user=target, organisation=organisation, is_active=True).exists():
+                _refuse("The user is not an active member of this organisation.", "not_a_member", 409)
+        elif organisation is not None:
+            raise ValidationError({"organisation_id": ["An internal role is not tied to an organisation."]})
+        open_statuses = [m.RoleAssignmentStatus.PENDING_APPROVAL, m.RoleAssignmentStatus.ACTIVE]
+        if m.QualityRoleAssignment.objects.filter(
+            user=target, role=role, organisation=organisation, status__in=open_statuses,
+        ).exists():
+            _refuse("This user already holds this role for this organisation.", "assignment_exists", 409)
+        assignment = m.QualityRoleAssignment.objects.create(
+            user=target, role=role, organisation=organisation,
+            valid_from=data["valid_from"], valid_to=data.get("valid_to"), granted_by=request.user,
+        )
+        return Response(self.get_serializer(assignment).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        permissions.require(request.user, "users_and_roles", "approve")
+        assignment = self.get_object()
+        if request.user.pk in {assignment.granted_by_id, assignment.user_id}:
+            _refuse("You cannot approve something you submitted, or your own role.", "same_person")
+        if assignment.status != m.RoleAssignmentStatus.PENDING_APPROVAL:
+            _refuse("This assignment has already been decided.", "already_decided", 409)
+        serializer = s.DecideRoleAssignmentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        approved = serializer.validated_data["decision"] == "approve"
+        assignment.status = m.RoleAssignmentStatus.ACTIVE if approved else m.RoleAssignmentStatus.REJECTED
+        assignment.approved_by = request.user
+        assignment.decided_at = timezone.now()
+        assignment.decision_reason = serializer.validated_data.get("reason", "")
+        assignment.save(update_fields=["status", "approved_by", "decided_at", "decision_reason", "updated_at"])
+        return Response(self.get_serializer(assignment).data)
+
+    @action(detail=True, methods=["post"])
+    def end(self, request, pk=None):
+        permissions.require(request.user, "users_and_roles", "update")
+        assignment = self.get_object()
+        if assignment.status == m.RoleAssignmentStatus.ENDED:
+            _refuse("This assignment has already ended.", "already_ended", 409)
+        if assignment.status != m.RoleAssignmentStatus.ACTIVE:
+            _refuse("Only an active assignment can be ended.", "not_active", 409)
+        serializer = s.EndRoleAssignmentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        today = timezone.localdate()
+        assignment.status = m.RoleAssignmentStatus.ENDED
+        assignment.valid_to = today if assignment.valid_to is None or assignment.valid_to > today else assignment.valid_to
+        assignment.ended_by = request.user
+        assignment.ended_at = timezone.now()
+        assignment.end_reason = serializer.validated_data["reason"]
+        assignment.save(update_fields=["status", "valid_to", "ended_by", "ended_at", "end_reason", "updated_at"])
+        return Response(self.get_serializer(assignment).data)

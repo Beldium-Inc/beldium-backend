@@ -327,3 +327,76 @@ class QualityProfessionalDocument(TimeStampedModel):
     @property
     def original_name(self):
         return Path(self.file.name).name if self.file else ""
+
+
+# --- Q&C roles (Release 1, task G3) ------------------------------------------
+#
+# The 12 roles and the access grid from Figure 5 are stored as rows, seeded by
+# a data migration from quality/roles.py. A role assignment gives no access
+# until Q&C approves it, and it is never deleted: ending it is a new state.
+
+
+class QualityRole(models.Model):
+    code = models.CharField(max_length=8, primary_key=True)
+    name = models.CharField(max_length=80)
+    is_internal = models.BooleanField(default=False)
+    second_factor_required = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["code"]
+
+    def __str__(self):
+        return self.code
+
+
+class QualityRoleGrant(models.Model):
+    """One cell of the access grid: what a role may do on a record type."""
+
+    role = models.ForeignKey(QualityRole, on_delete=models.PROTECT, related_name="grants")
+    record_type = models.CharField(max_length=40)
+    letters = models.CharField(max_length=4, help_text="C create, R read, U update, A approve")
+    restricted = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["role", "record_type"]
+        constraints = [
+            models.UniqueConstraint(fields=["role", "record_type"], name="unique_quality_role_grant"),
+        ]
+
+
+class RoleAssignmentStatus(models.TextChoices):
+    PENDING_APPROVAL = "pending_approval", "Pending approval"
+    ACTIVE = "active", "Active"
+    ENDED = "ended", "Ended"
+    REJECTED = "rejected", "Rejected"
+
+
+class QualityRoleAssignment(TimeStampedModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="quality_role_assignments")
+    role = models.ForeignKey(QualityRole, on_delete=models.PROTECT, related_name="assignments")
+    organisation = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="quality_role_assignments",
+    )
+    valid_from = models.DateField()
+    valid_to = models.DateField(null=True, blank=True)
+    status = models.CharField(
+        max_length=20, choices=RoleAssignmentStatus.choices,
+        default=RoleAssignmentStatus.PENDING_APPROVAL, db_index=True,
+    )
+    granted_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    decision_reason = models.TextField(blank=True)
+    ended_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
+    ended_at = models.DateTimeField(null=True, blank=True)
+    end_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def delete(self, *args, **kwargs):
+        raise PermissionError("Role assignments are never deleted. End the assignment instead.")
+
+    def __str__(self):
+        return f"{self.user_id} {self.role_id} {self.status}"

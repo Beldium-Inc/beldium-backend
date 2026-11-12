@@ -421,3 +421,79 @@ class QualityProfessionalApplicationSerializer(serializers.ModelSerializer):
             "documents", "audit", "decision_note", "submitted_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+
+# --- roles (G3) ---------------------------------------------------------------
+
+
+class QualityRoleSerializer(serializers.ModelSerializer):
+    role_code = serializers.CharField(source="code")
+    role_name = serializers.CharField(source="name")
+    grid = serializers.SerializerMethodField()
+    restricted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.QualityRole
+        fields = ["role_code", "role_name", "is_internal", "second_factor_required", "grid", "restricted"]
+
+    def get_grid(self, role):
+        from quality.roles import letters_to_actions
+
+        return {grant.record_type: letters_to_actions(grant.letters) for grant in role.grants.all()}
+
+    def get_restricted(self, role):
+        return sorted(grant.record_type for grant in role.grants.all() if grant.restricted)
+
+
+class RoleAssignmentSerializer(serializers.ModelSerializer):
+    user_id = serializers.UUIDField(source="user.id", read_only=True)
+    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_name = serializers.CharField(source="user.full_name", read_only=True)
+    role_code = serializers.CharField(source="role_id", read_only=True)
+    organisation_id = serializers.UUIDField(source="organisation.id", read_only=True, allow_null=True, default=None)
+    organisation_name = serializers.CharField(source="organisation.name", read_only=True, default="")
+    granted_by = serializers.UUIDField(source="granted_by_id", read_only=True, allow_null=True)
+    approved_by = serializers.UUIDField(source="approved_by_id", read_only=True, allow_null=True)
+    ended_by = serializers.UUIDField(source="ended_by_id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = m.QualityRoleAssignment
+        fields = [
+            "id", "user_id", "user_email", "user_name", "role_code", "organisation_id", "organisation_name",
+            "valid_from", "valid_to", "status", "granted_by", "approved_by", "decided_at", "decision_reason",
+            "ended_by", "ended_at", "end_reason", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class CreateRoleAssignmentSerializer(serializers.Serializer):
+    user_id = serializers.UUIDField()
+    role_code = serializers.ChoiceField(choices=[])
+    organisation_id = serializers.UUIDField(required=False, allow_null=True)
+    valid_from = serializers.DateField()
+    valid_to = serializers.DateField(required=False, allow_null=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from quality.roles import ROLE_CODES
+
+        self.fields["role_code"].choices = ROLE_CODES
+
+    def validate(self, data):
+        if data.get("valid_to") and data["valid_to"] < data["valid_from"]:
+            raise serializers.ValidationError({"valid_to": ["The end date cannot be before the start date."]})
+        return data
+
+
+class DecideRoleAssignmentSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=["approve", "reject"])
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+    def validate(self, data):
+        if data["decision"] == "reject" and not data.get("reason", "").strip():
+            raise serializers.ValidationError({"reason": ["Give a reason for rejecting."]})
+        return data
+
+
+class EndRoleAssignmentSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=2000)
