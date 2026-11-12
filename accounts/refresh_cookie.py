@@ -48,7 +48,21 @@ def attach_refresh_cookie(response):
     return response
 
 
-def refresh_without_access(user):
+def refresh_without_access(user, token, *, from_cookie):
+    """May this refresh token be used with no live access token?
+
+    Field roles: always. Anyone else: only a cookie token issued within the
+    access token lifetime, which is the same idle limit an access token has.
+    """
+    import time
+
     from quality.permissions import role_codes
 
-    return bool(role_codes(user) & FIELD_ROLES)
+    if role_codes(user) & FIELD_ROLES:
+        return True
+    if not from_cookie:
+        return False
+    issued = token.get("iat")
+    if not isinstance(issued, (int, float)):
+        return False
+    return time.time() - issued <= api_settings.ACCESS_TOKEN_LIFETIME.total_seconds()

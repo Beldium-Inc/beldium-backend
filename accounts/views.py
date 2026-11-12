@@ -128,8 +128,11 @@ class ThrottledTokenRefreshView(TokenRefreshView):
     cookie (G9). A caller presenting an access token must own the refresh
     token. Without a live access token the call works only for the partner
     field roles (Sampler, Inspector, Logistics), whose phones sit idle in the
-    field; for everyone else an idle session still ends when the access token
-    lapses. A refresh token read from the cookie is rotated: the old one is
+    field. A cookie token issued within the access token lifetime also works
+    without one, so a page reload (the frontend keeps the access token in
+    memory only) does not sign anyone out. The cookie is rotated on every
+    refresh, so for everyone else an idle session still ends when the access
+    token lifetime passes with no activity. A refresh token read from the cookie is rotated: the old one is
     revoked and the new one goes back into the cookie.
     """
 
@@ -157,7 +160,7 @@ class ThrottledTokenRefreshView(TokenRefreshView):
                 raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401)
         else:
             owner = User.objects.filter(pk=owner_id, is_active=True).first()
-            if owner is None or not refresh_without_access(owner):
+            if owner is None or not refresh_without_access(owner, token, from_cookie=from_cookie):
                 raise AppError(
                     "Authentication credentials were not provided.", code="not_authenticated", status_code=401,
                 )

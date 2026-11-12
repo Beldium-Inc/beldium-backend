@@ -62,9 +62,25 @@ class RefreshCookieTests(APITestCase):
         response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN="https://evil.example")
         self.assertEqual(response.status_code, 401)
 
-    def test_idle_office_session_still_ends(self):
+    def test_reload_with_a_recent_cookie_keeps_the_session(self):
         self.sign_in()
         response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_idle_office_session_still_ends(self):
+        from datetime import timedelta
+        from unittest import mock
+
+        self.sign_in()
+        later = timezone.now() + timedelta(minutes=31)
+        with mock.patch("time.time", return_value=later.timestamp()):
+            response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, 401)
+
+    def test_body_token_without_access_is_still_refused(self):
+        login = self.sign_in()
+        self.client.cookies.clear()
+        response = self.client.post(reverse("token-refresh"), {"refresh": login.data["refresh"]})
         self.assertEqual(response.status_code, 401)
 
     def test_field_role_refreshes_after_access_lapsed(self):
