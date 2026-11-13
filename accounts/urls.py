@@ -15,6 +15,12 @@ from accounts.views import (
     PhoneVerificationRequestView,
     PhoneVerificationConfirmView,
     ThrottledTokenRefreshView,
+    MfaBackupCodesView,
+    MfaConfirmView,
+    MfaDisableView,
+    MfaSetupView,
+    MfaStatusView,
+    MfaVerifyView,
 )
 
 urlpatterns = [
@@ -33,6 +39,12 @@ urlpatterns = [
     path("me/", CurrentUserView.as_view(), name="current-user"),
     path("verify-phone/request/", PhoneVerificationRequestView.as_view(), name="phone-verification-request"),
     path("verify-phone/confirm/", PhoneVerificationConfirmView.as_view(), name="phone-verification-confirm"),
+    path("mfa/", MfaStatusView.as_view(), name="mfa-status"),
+    path("mfa/setup/", MfaSetupView.as_view(), name="mfa-setup"),
+    path("mfa/confirm/", MfaConfirmView.as_view(), name="mfa-confirm"),
+    path("mfa/disable/", MfaDisableView.as_view(), name="mfa-disable"),
+    path("mfa/backup-codes/", MfaBackupCodesView.as_view(), name="mfa-backup-codes"),
+    path("mfa/verify/", MfaVerifyView.as_view(), name="mfa-verify"),
     # Social login (Google/Microsoft) is disabled: it was a second bypass path
     # for the cross-portal login issue (creates/authenticates accounts with no
     # portal awareness at all). Re-enable only once it enforces the same

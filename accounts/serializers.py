@@ -11,9 +11,17 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 
 class UserSerializer(serializers.ModelSerializer):
+    # Whether sign-in asks for an authenticator code after the password.
+    mfa_enabled = serializers.SerializerMethodField()
+
+    def get_mfa_enabled(self, obj) -> bool:
+        from accounts.mfa import is_enabled
+
+        return is_enabled(obj)
+
     class Meta:
         model = User
-        fields = ["id", "email", "first_name", "last_name", "phone_number", "country", "onboarding_role", "email_verified_at", "phone_verified_at", "is_staff", "created_at"]
+        fields = ["id", "email", "first_name", "last_name", "phone_number", "country", "onboarding_role", "email_verified_at", "phone_verified_at", "is_staff", "mfa_enabled", "created_at"]
         # is_staff is what gates the reviewer-only compliance actions, and this
         # endpoint accepts PATCH: leaving it writable would let any account
         # grant itself staff, so it stays read-only.
@@ -128,6 +136,12 @@ class VerifiedTokenObtainPairSerializer(TokenObtainPairSerializer):
             # leaving it permanently unrestricted.
             self.user.portal = portal
             self.user.save(update_fields=["portal"])
+        from accounts.mfa import is_enabled, issue_challenge
+
+        if is_enabled(self.user):
+            # The password was right, but the tokens wait for the second
+            # step: /auth/mfa/verify/ swaps this challenge and a code for them.
+            return {"mfa_required": True, "mfa_token": issue_challenge(self.user, portal)}
         return data
 
 
@@ -162,3 +176,15 @@ class ChangeEmailConfirmSerializer(ChangeEmailRequestSerializer):
 
 class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField()
+
+
+class MfaCodeSerializer(serializers.Serializer):
+    code = serializers.CharField(max_length=20)
+
+
+class MfaDisableSerializer(MfaCodeSerializer):
+    password = serializers.CharField(write_only=True)
+
+
+class MfaVerifySerializer(MfaCodeSerializer):
+    mfa_token = serializers.CharField()

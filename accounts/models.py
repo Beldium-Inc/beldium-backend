@@ -149,3 +149,44 @@ class SocialIdentity(TimeStampedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["provider", "subject"], name="unique_social_identity")]
+
+
+class AuthenticatorDevice(TimeStampedModel):
+    """The authenticator app a user has paired for two-step sign-in.
+
+    Created unconfirmed when setup starts; two-step sign-in only switches on
+    once ``confirmed_at`` is set by a correct code, so a half-finished setup
+    can never lock anyone out. One per user.
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="authenticator")
+    # Base32 TOTP secret. It has to be readable to check codes, so it cannot
+    # be hashed like a password; it is never returned by the API once setup
+    # is confirmed.
+    secret = models.CharField(max_length=64)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    # The last time step accepted, so a code cannot be used twice.
+    last_used_step = models.BigIntegerField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    # Wrong codes since the last right one. Kept in the database rather than
+    # the cache so that neither a new sign-in nor a new address resets it.
+    failed_attempts = models.PositiveSmallIntegerField(default=0)
+    locked_until = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def is_confirmed(self):
+        return self.confirmed_at is not None
+
+    def __str__(self):
+        return f"Authenticator for {self.user.email}"
+
+
+class MfaBackupCode(TimeStampedModel):
+    """Single-use codes for signing in when the phone with the authenticator is lost."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="mfa_backup_codes")
+    code_hash = models.CharField(max_length=128)
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
