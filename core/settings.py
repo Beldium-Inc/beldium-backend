@@ -321,6 +321,7 @@ REST_FRAMEWORK = {
         "social_auth": "20/10m",
         "login": "10/15m",
         "login_email": "20/1h",
+        "mfa_verify": "20/10m",
         "token_refresh": "120/1h",
         "sensitive_action": "10/1h",
         # Looking up or using an organisation join code.

@@ -84,6 +84,12 @@ class LoginEmailThrottle(EmailRateThrottle):
     scope = "login_email"
 
 
+class MfaVerifyThrottle(IPRateThrottle):
+    """Second sign-in step. The per-account lockout in accounts.mfa is the real bound."""
+
+    scope = "mfa_verify"
+
+
 class TokenRefreshThrottle(IPRateThrottle):
     scope = "token_refresh"
 
