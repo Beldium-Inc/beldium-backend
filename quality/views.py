@@ -947,9 +947,13 @@ class QualityRoleAssignmentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMi
         serializer = s.CreateRoleAssignmentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        target = User.objects.filter(pk=data["user_id"], is_active=True).first()
+        people = User.objects.filter(is_active=True)
+        if data.get("user_id"):
+            target = people.filter(pk=data["user_id"]).first()
+        else:
+            target = people.filter(email__iexact=data["user_email"]).first()
         if target is None:
-            raise ValidationError({"user_id": ["Select an active user."]})
+            raise ValidationError({"user_id": ["No active account matches that person."]})
         if target.pk == request.user.pk:
             _refuse("You cannot give a role to yourself.", "self_assignment")
         role = m.QualityRole.objects.get(pk=data["role_code"])

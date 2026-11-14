@@ -494,7 +494,9 @@ class RoleAssignmentSerializer(serializers.ModelSerializer):
 
 
 class CreateRoleAssignmentSerializer(serializers.Serializer):
-    user_id = serializers.UUIDField()
+    # Name the person by id or by email address; one of the two is required.
+    user_id = serializers.UUIDField(required=False)
+    user_email = serializers.EmailField(required=False)
     role_code = serializers.ChoiceField(choices=[])
     organisation_id = serializers.UUIDField(required=False, allow_null=True)
     valid_from = serializers.DateField()
@@ -507,6 +509,8 @@ class CreateRoleAssignmentSerializer(serializers.Serializer):
         self.fields["role_code"].choices = ROLE_CODES
 
     def validate(self, data):
+        if not data.get("user_id") and not data.get("user_email"):
+            raise serializers.ValidationError({"user_id": ["Name the person by user id or email address."]})
         if data.get("valid_to") and data["valid_to"] < data["valid_from"]:
             raise serializers.ValidationError({"valid_to": ["The end date cannot be before the start date."]})
         return data

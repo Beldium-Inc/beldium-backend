@@ -228,3 +228,25 @@ class BootstrapCommandTests(QualityAccessBase):
         self.assertEqual(permissions.role_codes(user), {"ADM"})
         with self.assertRaises(CommandError):
             call_command("grant_first_quality_role", email=self.operator.email, role="ADM")
+
+
+class AssignByEmailTests(RoleAssignmentApiTests):
+    """Runs only the test below; the inherited ones run in their own class."""
+
+    def test_admin_can_name_the_person_by_email(self):
+        self.as_user(self.admin)
+        response = self.client.post(reverse("quality-role-assignment-list"), {
+            "user_email": self.lab1.email.upper(), "role_code": "LAB",
+            "organisation_id": str(self.lab_one.pk), "valid_from": str(timezone.localdate()),
+        }, format="json")
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["user_email"], self.lab1.email)
+        missing = self.client.post(reverse("quality-role-assignment-list"), {
+            "role_code": "CEO", "valid_from": str(timezone.localdate()),
+        }, format="json")
+        self.assertEqual(missing.status_code, 400)
+
+
+for _name in [name for name in dir(RoleAssignmentApiTests) if name.startswith("test_")]:
+    if _name not in AssignByEmailTests.__dict__:
+        setattr(AssignByEmailTests, _name, None)
