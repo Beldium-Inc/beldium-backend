@@ -189,7 +189,16 @@ elif config("DB_ENGINE", default="sqlite") == "postgresql":
         "PORT": config("DB_PORT", default="5432"),
     }}
 else:
-    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+    # Local development and tests only. A write after a read in one
+    # transaction (for example the audit entry written when the audit log is
+    # read) fails at once on SQLite if another request writes at the same
+    # time. IMMEDIATE takes the write lock when the transaction starts, and the
+    # timeout lets the second request wait its turn instead of failing.
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 20},
+    }}
 
 # Old backend's database, read-only source for the one-time `import_legacy_users`
 # credential carry-over (see accounts/management/commands/import_legacy_users.py).
