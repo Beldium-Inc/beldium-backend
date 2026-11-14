@@ -22,8 +22,19 @@ def is_safe_environment(environment=None):
     return str(environment).strip().lower() in SAFE_ENVIRONMENTS
 
 
-def require_safe_environment(command_name):
-    """Raise CommandError unless the app runs as ci, local or development."""
+def require_safe_environment(command_name, *, confirmed_environment=None):
+    """Raise CommandError unless the app runs as ci, local or development.
+
+    ``confirmed_environment`` is for the few commands that must sometimes run
+    on a real environment, such as creating the first admin. The operator
+    types the environment's name (for example ``--confirm-environment
+    production``) and it must match exactly. Destructive commands never pass
+    it, so they stay refused everywhere outside ci, local and development.
+    """
+    if confirmed_environment is not None and str(confirmed_environment).strip().lower() == str(
+        settings.ENVIRONMENT
+    ).strip().lower():
+        return
     if not is_safe_environment():
         raise CommandError(
             f"{command_name} refuses to run when ENVIRONMENT={settings.ENVIRONMENT}. "
