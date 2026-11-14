@@ -272,12 +272,6 @@ TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
 # SMS goes out only when this is on and TERMII_API_KEY is set (common/sms.py).
 # Off until the Termii sender ID is approved.
 SMS_ENABLED = config("SMS_ENABLED", default=False, cast=bool)
-# Second factor at sign in (accounts/second_factor.py). Off until the
-# frontend has the code step (task E13); enrolment works either way.
-SECOND_FACTOR_ENFORCED = config("SECOND_FACTOR_ENFORCED", default=False, cast=bool)
-# A Fernet key for the stored authenticator secrets. When empty, one is
-# derived from SECRET_KEY; set this before SECRET_KEY is ever rotated.
-SECOND_FACTOR_ENCRYPTION_KEY = config("SECOND_FACTOR_ENCRYPTION_KEY", default="")
 # The refresh token also travels in an HttpOnly cookie (accounts/refresh_cookie.py).
 # The body copy stays while the frontend moves over to the cookie.
 # TODO(Emmanuel): set REFRESH_TOKEN_IN_BODY off once E13 ships.
@@ -356,6 +350,7 @@ REST_FRAMEWORK = {
         "social_auth": "20/10m",
         "login": "10/15m",
         "login_email": "20/1h",
+        "mfa_verify": "20/10m",
         "token_refresh": "120/1h",
         "sensitive_action": "10/1h",
         # Looking up or using an organisation join code.

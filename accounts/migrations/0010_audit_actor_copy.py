@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('accounts', '0008_alter_user_portal'),
+        ("accounts", "0009_authenticator_2fa"),
     ]
 
     operations = [

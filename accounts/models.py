@@ -161,32 +161,42 @@ class SocialIdentity(TimeStampedModel):
         constraints = [models.UniqueConstraint(fields=["provider", "subject"], name="unique_social_identity")]
 
 
-# --- second factor at sign in (Release 1, task G8) ---------------------------
+class AuthenticatorDevice(TimeStampedModel):
+    """The authenticator app a user has paired for two-step sign-in.
 
+    Created unconfirmed when setup starts; two-step sign-in only switches on
+    once ``confirmed_at`` is set by a correct code, so a half-finished setup
+    can never lock anyone out. One per user.
+    """
 
-class SecondFactorDevice(TimeStampedModel):
-    """An authenticator app linked to the account. The shared secret is kept
-    encrypted (accounts/second_factor.py)."""
-
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="second_factor_device")
-    secret_encrypted = models.TextField()
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="authenticator")
+    # Base32 TOTP secret. It has to be readable to check codes, so it cannot
+    # be hashed like a password; it is never returned by the API once setup
+    # is confirmed.
+    secret = models.CharField(max_length=64)
     confirmed_at = models.DateTimeField(null=True, blank=True)
-    # The last 30 second time step accepted, so one code cannot be used twice.
-    last_used_step = models.BigIntegerField(default=0)
-
-
-class SecondFactorChallenge(TimeStampedModel):
-    """Issued after a correct password when a second factor is due. Only a
-    hash of the token is stored."""
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="second_factor_challenges")
-    token_hash = models.CharField(max_length=64, unique=True)
-    expires_at = models.DateTimeField(db_index=True)
+    # The last time step accepted, so a code cannot be used twice.
+    last_used_step = models.BigIntegerField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    # Wrong codes since the last right one. Kept in the database rather than
+    # the cache so that neither a new sign-in nor a new address resets it.
     failed_attempts = models.PositiveSmallIntegerField(default=0)
-    used_at = models.DateTimeField(null=True, blank=True)
+    locked_until = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def is_confirmed(self):
+        return self.confirmed_at is not None
+
+    def __str__(self):
+        return f"Authenticator for {self.user.email}"
 
 
-class SecondFactorRecoveryCode(TimeStampedModel):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="second_factor_recovery_codes")
-    code_hash = models.CharField(max_length=64, db_index=True)
+class MfaBackupCode(TimeStampedModel):
+    """Single-use codes for signing in when the phone with the authenticator is lost."""
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="mfa_backup_codes")
+    code_hash = models.CharField(max_length=128)
     used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]

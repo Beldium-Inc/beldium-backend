@@ -6,7 +6,10 @@ from django.utils import timezone
 from accounts.audit import record_account_event
 from accounts.models import User
 from common.exceptions import ConflictError
-from compliance.logistics_documents import LOGISTICS_DOCUMENT_DOMAINS, LOGISTICS_REQUIRED_DOCUMENT_TYPES
+from compliance.logistics_documents import (
+    LOGISTICS_DOCUMENT_CONDITIONS, LOGISTICS_DOCUMENT_DOMAINS, LOGISTICS_DOCUMENT_TITLES, LOGISTICS_DOCUMENTS,
+    LOGISTICS_REQUIRED_DOCUMENT_TYPES,
+)
 from logistics import metadata, models as m
 
 EDITABLE = {'draft', 'awaiting_information', 'rejected'}
@@ -74,6 +77,36 @@ def initialise(application):
 
 def valid_documents(application):
     return application.documents.filter(is_current=True).exclude(status='rejected').filter(Q(expires_on__isnull=True) | Q(expires_on__gte=timezone.localdate()))
+
+
+def checklist(application, show_driver_evidence=True):
+    """The document checklist with where this application stands on each item.
+
+    ``satisfied`` follows the same rule as the submission gate in ``progress``:
+    the current file must not be rejected and must not be past its expiry. The
+    driver schedule is reported as ``restricted`` to readers who may not see
+    driver evidence, so a regulator never learns more than the register shows.
+    """
+    today = timezone.localdate()
+    current = {doc.document_type: doc for doc in application.documents.filter(
+        is_current=True, document_type__in=LOGISTICS_DOCUMENT_TITLES)}
+    rows = []
+    for document_type, title, required, _ in LOGISTICS_DOCUMENTS:
+        domain = LOGISTICS_DOCUMENT_DOMAINS[document_type]
+        document = current.get(document_type)
+        row = {'document_type': document_type, 'title': title, 'required': required,
+               'applies_when': LOGISTICS_DOCUMENT_CONDITIONS[document_type], 'domain': domain,
+               'status': 'not_submitted', 'satisfied': False,
+               'document_id': None, 'version': None, 'expires_on': None}
+        if domain == 'driver' and not show_driver_evidence:
+            row['status'] = 'restricted'
+        elif document:
+            expired = bool(document.expires_on and document.expires_on < today)
+            row.update(document_id=document.pk, version=document.version, expires_on=document.expires_on,
+                       status='rejected' if document.status == 'rejected' else 'expired' if expired else document.status,
+                       satisfied=document.status != 'rejected' and not expired)
+        rows.append(row)
+    return rows
 
 
 def evidence_checks(application, data):

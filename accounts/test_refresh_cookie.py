@@ -114,3 +114,32 @@ class RefreshCookieTests(APITestCase):
         self.client.force_authenticate(self.user)
         response = self.client.post(reverse("token-refresh"), {"refresh": str(RefreshToken.for_user(other))})
         self.assertEqual(response.status_code, 401)
+
+
+class CookieAfterCodeStepTests(APITestCase):
+    """With two-step sign-in on, the cookie is set only after the code step."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = make_user("twostep@beldium.test")
+        from accounts import mfa, totp
+
+        secret = mfa.start_setup(self.user)["secret"]
+        mfa.confirm_setup(self.user, totp.code_at_step(secret, totp.current_step()))
+        self.secret = secret
+
+    def test_cookie_only_after_the_code(self):
+        from accounts import totp
+
+        login = self.client.post(
+            reverse("token"), {"email": self.user.email, "password": PASSWORD}, HTTP_ORIGIN=COMPLIANCE_ORIGIN,
+        )
+        self.assertTrue(login.data["mfa_required"])
+        self.assertNotIn(COOKIE, login.cookies)
+        verified = self.client.post(
+            reverse("mfa-verify"),
+            {"mfa_token": login.data["mfa_token"], "code": totp.code_at_step(self.secret, totp.current_step() + 1)},
+            HTTP_ORIGIN=COMPLIANCE_ORIGIN,
+        )
+        self.assertEqual(verified.status_code, 200, verified.data)
+        self.assertEqual(verified.cookies[COOKIE].value, verified.data["refresh"])

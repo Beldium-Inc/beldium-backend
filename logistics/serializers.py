@@ -294,6 +294,19 @@ class DocumentSerializer(serializers.ModelSerializer):
         return validity([obj.expires_on])
 
 
+class ChecklistItemSerializer(serializers.Serializer):
+    document_type = serializers.CharField()
+    title = serializers.CharField()
+    required = serializers.BooleanField()
+    applies_when = serializers.CharField(allow_blank=True)
+    domain = serializers.CharField()
+    status = serializers.ChoiceField(choices=['not_submitted', 'pending', 'verified', 'rejected', 'expired', 'restricted'])
+    satisfied = serializers.BooleanField()
+    document_id = serializers.UUIDField(allow_null=True)
+    version = serializers.IntegerField(allow_null=True)
+    expires_on = serializers.DateField(allow_null=True)
+
+
 class ApplicationSerializer(OwnedSerializer):
     sections = DomainSerializer(many=True, read_only=True)
     conditions = ConditionSerializer(many=True, read_only=True)

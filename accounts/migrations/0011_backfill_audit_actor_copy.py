@@ -17,7 +17,7 @@ def backfill(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("accounts", "0009_audit_actor_copy"),
+        ("accounts", "0010_audit_actor_copy"),
     ]
 
     operations = [

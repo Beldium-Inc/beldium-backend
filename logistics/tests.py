@@ -1315,3 +1315,99 @@ class LogisticsOnboardingProfileTests(LogisticsTestCase):
         self.assertEqual(status('logistics-vehicle-detail', expired.id), 'expired')
         self.assertEqual(status('logistics-vehicle-detail', current.id), 'current')
         self.assertEqual(status('logistics-driver-detail', driver.id), 'undeclared')
+
+
+class LogisticsChecklistTests(LogisticsTestCase):
+    def url(self, application):
+        return reverse("logistics-application-checklist", args=[application.id])
+
+    def rows(self, response):
+        return {row["document_type"]: row for row in response.data}
+
+    def add_checklist_document(self, application, document_type, **overrides):
+        return self.add_document(application, LOGISTICS_DOCUMENT_DOMAINS[document_type], document_type=document_type, **overrides)
+
+    def test_checklist_lists_every_item_and_marks_required_ones(self):
+        application = self.make_application()
+        self.client.force_authenticate(self.owner)
+        response = self.client.get(self.url(application))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data), 15)
+        required = {row["document_type"] for row in response.data if row["required"]}
+        self.assertEqual(required, LOGISTICS_REQUIRED_DOCUMENT_TYPES)
+        self.assertTrue(all(row["status"] == "not_submitted" and not row["satisfied"] for row in response.data))
+        self.assertTrue(all(row["domain"] == LOGISTICS_DOCUMENT_DOMAINS[row["document_type"]] for row in response.data))
+
+    def test_checklist_agrees_with_the_submission_gate(self):
+        application = self.make_application()
+        self.complete_application(application)
+        self.client.force_authenticate(self.owner)
+        rows = self.rows(self.client.get(self.url(application)))
+        self.assertTrue(all(rows[key]["satisfied"] for key in LOGISTICS_REQUIRED_DOCUMENT_TYPES))
+        self.assertEqual(services.progress(application)["missing_document_types"], [])
+
+        # The old per domain files do not count, and the checklist says so.
+        old = self.make_application_with_old_types()
+        unsatisfied = {key for key, row in self.rows(self.client.get(self.url(old))).items() if row["required"] and not row["satisfied"]}
+        self.assertEqual(unsatisfied, set(services.progress(old)["missing_document_types"]))
+        self.assertEqual(unsatisfied, LOGISTICS_REQUIRED_DOCUMENT_TYPES)
+
+    def make_application_with_old_types(self):
+        org = make_org("Old Types Haulage")
+        OrganisationMembership.objects.create(organisation=org, user=self.owner, role=MembershipRole.OWNER)
+        company = LogisticsCompany.objects.create(
+            organisation=org, contact_name="Ada Bello", contact_email="old@types.example",
+            contact_phone="+2348000000002", services=["general freight"])
+        application = LogisticsApplication.objects.create(company=company, created_by=self.owner)
+        services.initialise(application)
+        for key in application.sections.filter(applicable=True).values_list("key", flat=True):
+            self.add_document(application, key)
+        return application
+
+    def test_rejected_and_expired_files_do_not_count(self):
+        application = self.make_application()
+        self.add_checklist_document(application, "logistics_cac_incorporation", status="rejected")
+        self.add_checklist_document(application, "logistics_tax_documentation", expires_on=timezone.localdate() - timedelta(days=1))
+        self.add_checklist_document(application, "logistics_vehicle_insurance", status="pending")
+        self.client.force_authenticate(self.owner)
+        rows = self.rows(self.client.get(self.url(application)))
+        self.assertEqual((rows["logistics_cac_incorporation"]["status"], rows["logistics_cac_incorporation"]["satisfied"]), ("rejected", False))
+        self.assertEqual((rows["logistics_tax_documentation"]["status"], rows["logistics_tax_documentation"]["satisfied"]), ("expired", False))
+        self.assertEqual((rows["logistics_vehicle_insurance"]["status"], rows["logistics_vehicle_insurance"]["satisfied"]), ("pending", True))
+
+    def test_only_the_current_version_is_reported(self):
+        application = self.make_application()
+        old = self.add_checklist_document(application, "logistics_hse_declaration", is_current=False, status="rejected")
+        current = self.add_checklist_document(application, "logistics_hse_declaration", version=2)
+        self.client.force_authenticate(self.owner)
+        row = self.rows(self.client.get(self.url(application)))["logistics_hse_declaration"]
+        self.assertEqual(row["document_id"], str(current.id))
+        self.assertEqual(row["version"], 2)
+        self.assertNotEqual(row["document_id"], str(old.id))
+
+    def test_wrong_owner_and_signed_out_callers_are_refused(self):
+        application = self.make_application()
+        self.client.force_authenticate(self.outsider)
+        self.assertEqual(self.client.get(self.url(application)).status_code, 404)
+        self.client.force_authenticate(None)
+        self.assertIn(self.client.get(self.url(application)).status_code, {401, 403})
+
+    def test_checklist_is_read_only(self):
+        application = self.make_application()
+        self.client.force_authenticate(self.owner)
+        for method in ("post", "put", "patch", "delete"):
+            self.assertEqual(getattr(self.client, method)(self.url(application)).status_code, 405)
+
+    def test_driver_schedule_is_restricted_for_regulators(self):
+        application = self.make_application()
+        self.add_checklist_document(application, "logistics_driver_schedule")
+        self.client.force_authenticate(self.regulator)
+        rows = self.rows(self.client.get(self.url(application)))
+        self.assertEqual(self.client.get(self.url(application)).status_code, 200)
+        self.assertEqual(rows["logistics_driver_schedule"]["status"], "restricted")
+        self.assertIsNone(rows["logistics_driver_schedule"]["document_id"])
+        self.assertFalse(rows["logistics_driver_schedule"]["satisfied"])
+
+        for user in (self.owner, self.reviewer):
+            self.client.force_authenticate(user)
+            self.assertEqual(self.rows(self.client.get(self.url(application)))["logistics_driver_schedule"]["status"], "verified")

@@ -14,9 +14,6 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from accounts.models import AccountAuditEvent, SocialIdentity, User
 from accounts.portal import portal_for_request
 from accounts.serializers import (
-    SecondFactorCodeSerializer,
-    SecondFactorConfirmSerializer,
-    SecondFactorEnrolSerializer,
     AccountAuditEventSerializer,
     ChangeEmailConfirmSerializer,
     ChangeEmailRequestSerializer,
@@ -31,7 +28,11 @@ from accounts.serializers import (
     PhoneVerificationRequestSerializer,
     PhoneVerificationConfirmSerializer,
     SocialLoginSerializer,
+    MfaCodeSerializer,
+    MfaDisableSerializer,
+    MfaVerifySerializer,
 )
+from accounts import mfa
 from accounts.services import (
     blacklist_user_refresh_tokens,
     confirm_email_change,
@@ -47,6 +48,7 @@ from accounts.services import (
 from accounts.throttles import (
     LoginEmailThrottle,
     LoginThrottle,
+    MfaVerifyThrottle,
     RegistrationThrottle,
     SensitiveActionThrottle,
     SocialAuthThrottle,
@@ -57,7 +59,6 @@ from accounts.throttles import (
 from common.exceptions import AppError
 from accounts.audit import record_account_event
 from accounts.social import verify_social_token
-from accounts import second_factor
 from accounts.refresh_cookie import (
     attach_refresh_cookie,
     clear_refresh_cookie,
@@ -108,16 +109,10 @@ class VerifiedTokenObtainPairView(TokenObtainPairView):
         except Exception:
             record_account_event(request, "account.login_failed", actor=user)
             raise
-        if user is not None and second_factor.is_required(user):
-            # The password was right, but no tokens leave until the second
-            # factor is passed. The pair just made is revoked at once.
-            try:
-                RefreshToken(response.data["refresh"]).blacklist()
-            except (KeyError, TokenError, AttributeError):
-                pass
-            record_account_event(request, "account.second_factor_challenged", actor=user)
-            return Response(second_factor.start_challenge(user), status=status.HTTP_200_OK)
-        record_account_event(request, "account.login_succeeded", actor=user)
+        if response.data.get("mfa_required"):
+            record_account_event(request, "account.login_mfa_challenged", actor=user)
+        else:
+            record_account_event(request, "account.login_succeeded", actor=user)
         return attach_refresh_cookie(response)
 
 
@@ -235,8 +230,6 @@ class VerifyEmailView(generics.GenericAPIView):
             user.save(update_fields=["portal"])
         record_account_event(request, "account.email_verified", actor=user)
         transaction.on_commit(lambda: enqueue_account_email("send_welcome_email", str(user.id)))
-        if second_factor.is_required(user):
-            return Response({"message": "Email verified successfully.", **second_factor.start_challenge(user)})
         refresh = RefreshToken.for_user(user)
         return attach_refresh_cookie(Response({
             "message": "Email verified successfully.",
@@ -449,89 +442,89 @@ class SocialLinkView(generics.GenericAPIView):
         return Response({"message": f"{provider.title()} account linked successfully."})
 
 
-# --- second factor at sign in (G8) --------------------------------------------
+# --- two-step sign-in with an authenticator app ------------------------------
+
+class MfaStatusView(generics.GenericAPIView):
+    """Whether two-step sign-in is on, and how many backup codes are left."""
+
+    def get(self, request):
+        return Response(mfa.status_for(request.user))
 
 
-def _token_pair(user):
-    refresh = RefreshToken.for_user(user)
-    return {"refresh": str(refresh), "access": str(refresh.access_token)}
+class MfaSetupView(generics.GenericAPIView):
+    """Start (or restart) pairing: returns the secret and the otpauth:// link for the QR code."""
+
+    throttle_classes = [SensitiveActionThrottle]
+
+    def post(self, request):
+        return Response(mfa.start_setup(request.user))
 
 
-class SecondFactorTokenView(generics.GenericAPIView):
-    """Swap a sign in challenge and a code from the authenticator app (or a
-    recovery code) for a token pair. Five wrong codes lock the challenge."""
+class MfaConfirmView(generics.GenericAPIView):
+    """Finish pairing with a code from the app. Returns the backup codes, once."""
 
+    serializer_class = MfaCodeSerializer
+    throttle_classes = [SensitiveActionThrottle]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        codes = mfa.confirm_setup(request.user, serializer.validated_data["code"])
+        record_account_event(request, "account.mfa_enabled")
+        return Response({"enabled": True, "backup_codes": codes})
+
+
+class MfaDisableView(generics.GenericAPIView):
+    """Turn two-step sign-in off. Needs the password and a current code."""
+
+    serializer_class = MfaDisableSerializer
+    throttle_classes = [SensitiveActionThrottle]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not request.user.check_password(serializer.validated_data["password"]):
+            raise AppError("That password is not right.", code="invalid_password", status_code=400)
+        mfa.disable(request.user, serializer.validated_data["code"])
+        record_account_event(request, "account.mfa_disabled")
+        return Response({"enabled": False})
+
+
+class MfaBackupCodesView(generics.GenericAPIView):
+    """Replace the backup codes. The old ones stop working."""
+
+    serializer_class = MfaCodeSerializer
+    throttle_classes = [SensitiveActionThrottle]
+
+    def post(self, request):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        codes = mfa.regenerate_backup_codes(request.user, serializer.validated_data["code"])
+        record_account_event(request, "account.mfa_backup_codes_regenerated")
+        return Response({"backup_codes": codes})
+
+
+class MfaVerifyView(generics.GenericAPIView):
+    """Second sign-in step: the challenge from /auth/token/ plus a code, for the token pair."""
+
+    serializer_class = MfaVerifySerializer
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [VerificationAttemptThrottle]
-    serializer_class = SecondFactorCodeSerializer
+    throttle_classes = [MfaVerifyThrottle]
 
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        with transaction.atomic():
-            challenge = second_factor.open_challenge(data["challenge_token"])
-            user = challenge.user
-            passed = second_factor.check_code(user, data["code"])
-            if passed:
-                second_factor.close_challenge(challenge)
-            else:
-                second_factor.fail_challenge(challenge)
-        if not passed:
-            record_account_event(request, "account.second_factor_failed", actor=user)
-            raise AppError("That code is not correct.", code="second_factor_invalid")
-        record_account_event(request, "account.login_succeeded", actor=user, second_factor=True)
-        return attach_refresh_cookie(Response(_token_pair(user)))
-
-
-def _enrolling_user(request, challenge_token):
-    """The signed in caller, or the owner of a valid sign in challenge."""
-    if challenge_token:
-        return second_factor.open_challenge(challenge_token)
-    if request.user and request.user.is_authenticated:
-        return None
-    raise AppError("Sign in again. The code step took too long.", code="challenge_expired", status_code=401)
-
-
-class SecondFactorEnrolView(generics.GenericAPIView):
-    permission_classes = [AllowAny]
-    throttle_classes = [VerificationAttemptThrottle]
-    serializer_class = SecondFactorEnrolSerializer
-
-    def post(self, request):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        with transaction.atomic():
-            challenge = _enrolling_user(request, serializer.validated_data.get("challenge_token"))
-            user = challenge.user if challenge else request.user
-            result = second_factor.begin_enrolment(user)
-        record_account_event(request, "account.second_factor_enrolment_started", actor=user)
-        return Response(result)
-
-
-class SecondFactorEnrolConfirmView(generics.GenericAPIView):
-    permission_classes = [AllowAny]
-    throttle_classes = [VerificationAttemptThrottle]
-    serializer_class = SecondFactorConfirmSerializer
-
-    def post(self, request):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        with transaction.atomic():
-            challenge = _enrolling_user(request, data.get("challenge_token"))
-            user = challenge.user if challenge else request.user
-            codes = second_factor.confirm_enrolment(user, data["code"])
-            if codes is None and challenge:
-                second_factor.fail_challenge(challenge)
-            elif codes is not None and challenge:
-                second_factor.close_challenge(challenge)
-        if codes is None:
-            record_account_event(request, "account.second_factor_failed", actor=user)
-            raise AppError("That code is not correct.", code="second_factor_invalid")
-        record_account_event(request, "account.second_factor_enrolled", actor=user)
-        body = {"recovery_codes": codes}
-        if challenge:
-            body.update(_token_pair(user))
-        return attach_refresh_cookie(Response(body))
+        user = mfa.user_for_challenge(serializer.validated_data["mfa_token"], portal_for_request(request))
+        device = mfa.confirmed_device(user)
+        if device is None:
+            # Two-step sign-in was turned off between the two steps.
+            raise AppError("Sign in again.", code="mfa_challenge_invalid", status_code=401)
+        try:
+            method = mfa.verify(device, serializer.validated_data["code"])
+        except AppError:
+            record_account_event(request, "account.login_mfa_failed", actor=user)
+            raise
+        refresh = RefreshToken.for_user(user)
+        record_account_event(request, "account.login_succeeded", actor=user, second_step=method)
+        return attach_refresh_cookie(Response({"refresh": str(refresh), "access": str(refresh.access_token)}))

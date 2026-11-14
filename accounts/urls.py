@@ -15,17 +15,17 @@ from accounts.views import (
     PhoneVerificationRequestView,
     PhoneVerificationConfirmView,
     ThrottledTokenRefreshView,
-    SecondFactorEnrolConfirmView,
-    SecondFactorEnrolView,
-    SecondFactorTokenView,
+    MfaBackupCodesView,
+    MfaConfirmView,
+    MfaDisableView,
+    MfaSetupView,
+    MfaStatusView,
+    MfaVerifyView,
 )
 
 urlpatterns = [
     path("register/", RegistrationView.as_view(), name="register"),
     path("token/", VerifiedTokenObtainPairView.as_view(), name="token"),
-    path("token/second-factor/", SecondFactorTokenView.as_view(), name="token-second-factor"),
-    path("second-factor/enrol/", SecondFactorEnrolView.as_view(), name="second-factor-enrol"),
-    path("second-factor/enrol/confirm/", SecondFactorEnrolConfirmView.as_view(), name="second-factor-enrol-confirm"),
     path("token/refresh/", ThrottledTokenRefreshView.as_view(), name="token-refresh"),
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),
     path("resend-verification/", ResendVerificationView.as_view(), name="resend-verification"),
@@ -39,6 +39,12 @@ urlpatterns = [
     path("me/", CurrentUserView.as_view(), name="current-user"),
     path("verify-phone/request/", PhoneVerificationRequestView.as_view(), name="phone-verification-request"),
     path("verify-phone/confirm/", PhoneVerificationConfirmView.as_view(), name="phone-verification-confirm"),
+    path("mfa/", MfaStatusView.as_view(), name="mfa-status"),
+    path("mfa/setup/", MfaSetupView.as_view(), name="mfa-setup"),
+    path("mfa/confirm/", MfaConfirmView.as_view(), name="mfa-confirm"),
+    path("mfa/disable/", MfaDisableView.as_view(), name="mfa-disable"),
+    path("mfa/backup-codes/", MfaBackupCodesView.as_view(), name="mfa-backup-codes"),
+    path("mfa/verify/", MfaVerifyView.as_view(), name="mfa-verify"),
     # Social login (Google/Microsoft) is disabled: it was a second bypass path
     # for the cross-portal login issue (creates/authenticates accounts with no
     # portal awareness at all). Re-enable only once it enforces the same

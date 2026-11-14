@@ -37,7 +37,7 @@ class ComplianceApplicationLifecycleTests(APITestCase):
             "professional-capability": {"years_mining_experience": 8, "mining_engineers": 2},
             "inspection-capability": {"conducts_physical_inspections": True, "gps": True},
             "conflict-declaration": {"owns_assets": False, "serves_mining_companies": True, "trades_minerals": False, "relationships": "None", "agreed": True},
-            "declaration": {"accuracy_confirmed": True, "documents_genuine": True, "compliance_agreed": True, "disclose_changes": True, "authorised": True, "confirmed": True},
+            "declaration": {"accuracy_confirmed": True, "documents_genuine": True, "compliance_agreed": True, "disclose_changes": True, "authorised": True, "confirmed": True, "signatory_name": "Ada Owner"},
         }
         for name, data in sections.items():
             route = f"compliance-application-{name}-section"
