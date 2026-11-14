@@ -272,6 +272,10 @@ TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
 # SMS goes out only when this is on and TERMII_API_KEY is set (common/sms.py).
 # Off until the Termii sender ID is approved.
 SMS_ENABLED = config("SMS_ENABLED", default=False, cast=bool)
+# Two-step sign-in required for internal and partner Q&C roles (accounts/mfa.py
+# is_required). Off until the people affected have been told to set up the
+# app; when on, Q&C refuses them until they have.
+SECOND_FACTOR_ENFORCED = config("SECOND_FACTOR_ENFORCED", default=False, cast=bool)
 # The refresh token also travels in an HttpOnly cookie (accounts/refresh_cookie.py).
 # The body copy stays while the frontend moves over to the cookie.
 # TODO(Emmanuel): set REFRESH_TOKEN_IN_BODY off once E13 ships.

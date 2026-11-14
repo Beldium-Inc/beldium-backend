@@ -38,7 +38,7 @@ class AtomicViewSet(viewsets.GenericViewSet):
     hides a record the caller may not see) is rolled back and then written to
     the audit log on its own, so the refusal is kept."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, permissions.SecondStepSetUp]
     audit_record_type = ""
     audit_writes = True
 
@@ -131,6 +131,9 @@ class SummaryView(APIView):
     @extend_schema(responses=s.QualityCapabilitiesSerializer)
     def get(self, request, kind):
         user = request.user
+        if kind != "me":
+            # /quality/me/ stays open so the screen can say what is needed.
+            permissions.SecondStepSetUp().has_permission(request, self)
         role = services.derive_role(user)
         capabilities = {
             "role": role,
@@ -159,6 +162,7 @@ class SummaryView(APIView):
                 "permissions": rights,
                 "restricted_views": restricted,
                 "second_factor_enrolled": mfa.is_enabled(user),
+                "second_factor_required": mfa.is_required(user),
             })
 
         # Platform wide totals and other organisations' applications are for

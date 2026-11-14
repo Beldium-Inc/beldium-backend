@@ -126,3 +126,23 @@ def admin_only(user):
     (decision 8)."""
     codes = role_codes(user)
     return "ADM" in codes and not (codes & {"QC", "CEO", "TL", "LGL"})
+
+
+class SecondStepSetUp:
+    """DRF permission: a person who must use an authenticator app (backend
+    G8, accounts.mfa.is_required) is refused until it is set up. The answer
+    names the fix, so the screen can send them to the Security page."""
+
+    def has_permission(self, request, view):
+        from accounts import mfa
+        from common.exceptions import AppError
+
+        if mfa.setup_outstanding(request.user):
+            raise AppError(
+                "Set up two-step sign-in with an authenticator app before using Quality & Control.",
+                code="second_factor_setup_required", status_code=403,
+            )
+        return True
+
+    def has_object_permission(self, request, view, obj):
+        return True

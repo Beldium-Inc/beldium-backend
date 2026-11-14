@@ -485,6 +485,11 @@ class MfaDisableView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
         if not request.user.check_password(serializer.validated_data["password"]):
             raise AppError("That password is not right.", code="invalid_password", status_code=400)
+        if mfa.is_required(request.user):
+            raise AppError(
+                "Your role needs two-step sign-in, so it cannot be turned off.",
+                code="second_factor_required", status_code=409,
+            )
         mfa.disable(request.user, serializer.validated_data["code"])
         record_account_event(request, "account.mfa_disabled")
         return Response({"enabled": False})

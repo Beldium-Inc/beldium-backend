@@ -5,6 +5,8 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+
+from quality.permissions import SecondStepSetUp
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -26,7 +28,7 @@ def _sector_or_404(value):
 class VaultSectorsView(APIView):
     """The vaults the caller can open, with their folders and counts."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SecondStepSetUp]
 
     def get(self, request):
         visible = VaultDocument.objects.filter(access.visible_filter(request.user), superseded_by__isnull=True)
@@ -56,7 +58,7 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
     """Vault documents. There is no update or delete route by design: a
     corrected file is added as a new version of the document."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SecondStepSetUp]
     serializer_class = s.VaultDocumentSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     search_fields = ["reference", "title", "original_name", "description"]
