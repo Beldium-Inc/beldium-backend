@@ -5,9 +5,10 @@ import hashlib
 from django.db import transaction
 from rest_framework.exceptions import PermissionDenied
 
-from common.exceptions import ConflictError
+from common.exceptions import AppError, ConflictError
+from common.scanning import disguised, inspect_upload
 from vault import access
-from vault.models import VaultAction, VaultActivity, VaultApproval, VaultDocument
+from vault.models import ScanStatus, VaultAction, VaultActivity, VaultApproval, VaultDocument
 
 
 def fingerprint(uploaded_file):
@@ -31,8 +32,20 @@ def _refuse_duplicate(sector, organisation, sha256):
         )
 
 
+def _inspect(uploaded_file):
+    """Read the bytes first and the scanner second. A file that is a program,
+    is not what its name says, or fails the scan is not stored."""
+    result = inspect_upload(uploaded_file)
+    if disguised(uploaded_file.name, result["sniffed_type"]):
+        raise AppError("The file is not the type its name says it is.", code="file_type_mismatch", status_code=422)
+    if result["scan_status"] == ScanStatus.INFECTED:
+        raise AppError("This file failed the safety scan and was not stored.", code="malware_detected", status_code=422)
+    return result
+
+
 @transaction.atomic
-def upload(user, *, sector, category, title, uploaded_file, description="", organisation=None):
+def upload(user, *, sector, category, title, uploaded_file, description="", organisation=None,
+           received_from="", received_date=None):
     found = access.standing(user, sector)
     if found is None:
         raise PermissionDenied("You cannot add documents to this vault.")
@@ -45,20 +58,27 @@ def upload(user, *, sector, category, title, uploaded_file, description="", orga
             raise PermissionDenied("You can only add documents for your own organisation.")
         owner = found.organisation
 
-    sha256 = fingerprint(uploaded_file)
+    on_behalf = bool(found.is_desk and owner is not None)
+    if on_behalf and not (received_from and received_date):
+        raise AppError("Say how and when the document was received.", code="received_from_required")
+
+    inspected = _inspect(uploaded_file)
+    sha256 = inspected["sha256"]
     _refuse_duplicate(sector, owner, sha256)
     document = VaultDocument.objects.create(
         sector=sector, category=category, organisation=owner, title=title, description=description,
         file=uploaded_file, original_name=uploaded_file.name[:255],
         content_type=getattr(uploaded_file, "content_type", "") or "", size_bytes=uploaded_file.size,
-        sha256=sha256, uploaded_by=user,
+        sha256=sha256, sniffed_type=inspected["sniffed_type"], scan_status=inspected["scan_status"],
+        on_behalf_of_company=on_behalf, received_from=received_from if on_behalf else "",
+        received_date=received_date if on_behalf else None, uploaded_by=user,
     )
     _log(document, user, VaultAction.UPLOADED, uploaded_file.name)
     return document
 
 
 @transaction.atomic
-def add_version(user, current, *, uploaded_file, note=""):
+def add_version(user, current, *, uploaded_file, note="", received_from="", received_date=None):
     # Lock the current version so two people cannot both replace it.
     current = VaultDocument.objects.select_for_update().get(pk=current.pk)
     found = access.standing(user, current.sector)
@@ -68,7 +88,11 @@ def add_version(user, current, *, uploaded_file, note=""):
     if VaultDocument.objects.filter(supersedes=current).exists():
         raise ConflictError("A newer version already exists. Add the new file to the latest version.")
 
-    sha256 = fingerprint(uploaded_file)
+    on_behalf = bool(found.is_desk and current.organisation_id)
+    if on_behalf and not (received_from and received_date):
+        raise AppError("Say how and when the document was received.", code="received_from_required")
+    inspected = _inspect(uploaded_file)
+    sha256 = inspected["sha256"]
     if sha256 == current.sha256:
         raise ConflictError("This file is identical to the current version.", code="duplicate_file")
     document = VaultDocument.objects.create(
@@ -77,7 +101,9 @@ def add_version(user, current, *, uploaded_file, note=""):
         title=current.title, description=current.description, version_note=note,
         file=uploaded_file, original_name=uploaded_file.name[:255],
         content_type=getattr(uploaded_file, "content_type", "") or "", size_bytes=uploaded_file.size,
-        sha256=sha256, uploaded_by=user,
+        sha256=sha256, sniffed_type=inspected["sniffed_type"], scan_status=inspected["scan_status"],
+        on_behalf_of_company=on_behalf, received_from=received_from if on_behalf else "",
+        received_date=received_date if on_behalf else None, uploaded_by=user,
     )
     _log(document, user, VaultAction.NEW_VERSION, f"Replaces {current.reference} v{current.version}. {note}".strip())
     return document

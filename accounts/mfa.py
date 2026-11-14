@@ -214,3 +214,32 @@ def user_for_challenge(token: str, portal: str) -> User:
     if user is None or payload.get("p") != portal:
         raise AppError("Sign in again.", code="mfa_challenge_invalid", status_code=401)
     return user
+
+
+# --- required for internal and partner roles (Release 1, task G8) --------------
+
+# Roles that sign in without the second step (pack: internal and partner users
+# need it; suppliers, buyers and export agents do not).
+ROLES_WITHOUT_SECOND_STEP = {"SUP", "BYR", "EXP"}
+
+
+def is_required(user) -> bool:
+    """True when this person must have an authenticator app before using Q&C.
+
+    Off until SECOND_FACTOR_ENFORCED is set, so it can be switched on once the
+    people affected have been told. Uses the Q&C role codes, including the
+    staff fallback, so every Beldium staff account is covered.
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "SECOND_FACTOR_ENFORCED", False):
+        return False
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    from quality.permissions import role_codes
+
+    return bool(role_codes(user) - ROLES_WITHOUT_SECOND_STEP)
+
+
+def setup_outstanding(user) -> bool:
+    return is_required(user) and not is_enabled(user)

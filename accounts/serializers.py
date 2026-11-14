@@ -175,7 +175,8 @@ class ChangeEmailConfirmSerializer(ChangeEmailRequestSerializer):
 
 
 class LogoutSerializer(serializers.Serializer):
-    refresh = serializers.CharField()
+    # Optional once the refresh token lives in the HttpOnly cookie (G9).
+    refresh = serializers.CharField(required=False, allow_blank=True)
 
 
 class MfaCodeSerializer(serializers.Serializer):

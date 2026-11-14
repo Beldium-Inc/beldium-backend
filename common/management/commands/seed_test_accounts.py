@@ -27,6 +27,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import User
+from common.environment_guard import require_safe_environment
 from export.models import Exporter, ExportAccessGrant
 from logistics.models import LogisticsCompany, LogisticsAccessGrant
 from marketplace.models import SellerProfile, MarketplaceAccessGrant
@@ -47,6 +48,7 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options):
+        require_safe_environment("seed_test_accounts")
         self.rows = []  # (vertical, role, email, description) for the summary table
 
         self.seed_processing()

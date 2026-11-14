@@ -1,3 +1,4 @@
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -188,7 +189,16 @@ elif config("DB_ENGINE", default="sqlite") == "postgresql":
         "PORT": config("DB_PORT", default="5432"),
     }}
 else:
-    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+    # Local development and tests only. A write after a read in one
+    # transaction (for example the audit entry written when the audit log is
+    # read) fails at once on SQLite if another request writes at the same
+    # time. IMMEDIATE takes the write lock when the transaction starts, and the
+    # timeout lets the second request wait its turn instead of failing.
+    DATABASES = {"default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {"transaction_mode": "IMMEDIATE", "timeout": 20},
+    }}
 
 # Old backend's database, read-only source for the one-time `import_legacy_users`
 # credential carry-over (see accounts/management/commands/import_legacy_users.py).
@@ -203,6 +213,11 @@ DELETE_TEST_USER_EMAILS = config("DELETE_TEST_USER_EMAILS", default="")
 # bootstrap_admin.py) — the only way to get one without Render shell access.
 ADMIN_EMAIL = config("ADMIN_EMAIL", default="")
 ADMIN_BOOTSTRAP_SECRET = config("ADMIN_BOOTSTRAP_SECRET", default="")
+
+# Tests only: MD5 is far faster than the default PBKDF2 hasher, and the suite
+# creates many users. Every other command, and production, keeps the default.
+if sys.argv[1:2] == ["test"]:
+    PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -254,6 +269,24 @@ CAREERS_NOTIFY_EMAIL = config("CAREERS_NOTIFY_EMAIL", default="support@beldium.c
 # out of the box in Nigeria without registering a custom sender ID first.
 TERMII_API_KEY = config("TERMII_API_KEY", default="")
 TERMII_SENDER_ID = config("TERMII_SENDER_ID", default="N-Alert")
+# SMS goes out only when this is on and TERMII_API_KEY is set (common/sms.py).
+# Off until the Termii sender ID is approved.
+SMS_ENABLED = config("SMS_ENABLED", default=False, cast=bool)
+# Two-step sign-in required for internal and partner Q&C roles (accounts/mfa.py
+# is_required). Off until the people affected have been told to set up the
+# app; when on, Q&C refuses them until they have.
+SECOND_FACTOR_ENFORCED = config("SECOND_FACTOR_ENFORCED", default=False, cast=bool)
+# The refresh token also travels in an HttpOnly cookie (accounts/refresh_cookie.py).
+# The body copy stays while the frontend moves over to the cookie.
+# TODO(Emmanuel): set REFRESH_TOKEN_IN_BODY off once E13 ships.
+REFRESH_TOKEN_IN_BODY = config("REFRESH_TOKEN_IN_BODY", default=True, cast=bool)
+REFRESH_COOKIE_NAME = "beldium_refresh"
+# The browser sends the cookie on credentialed calls from the portals.
+CORS_ALLOW_CREDENTIALS = True
+# Upload scanning (common/scanning.py). Empty means no scanner: uploads are
+# marked scan pending, never clean.
+CLAMAV_HOST = config("CLAMAV_HOST", default="")
+CLAMAV_PORT = config("CLAMAV_PORT", default=3310, cast=int)
 GOOGLE_OAUTH_CLIENT_ID = config("GOOGLE_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_CLIENT_ID = config("MICROSOFT_OAUTH_CLIENT_ID", default="")
 MICROSOFT_OAUTH_TENANT_ID = config("MICROSOFT_OAUTH_TENANT_ID", default="common")

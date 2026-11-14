@@ -2,6 +2,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from accounts.models import User
+from common.environment_guard import require_safe_environment
 
 
 class Command(BaseCommand):
@@ -17,7 +18,14 @@ class Command(BaseCommand):
 
     help = "Create or promote the admin user from ADMIN_EMAIL/ADMIN_BOOTSTRAP_SECRET."
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--confirm-environment",
+            help="Type the environment's name (for example production) to run it outside ci and local.",
+        )
+
     def handle(self, *args, **options):
+        require_safe_environment("bootstrap_admin", confirmed_environment=options.get("confirm_environment"))
         email = getattr(settings, "ADMIN_EMAIL", "").strip().lower()
         password = getattr(settings, "ADMIN_BOOTSTRAP_SECRET", "")
         if not email or not password:

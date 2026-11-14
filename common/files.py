@@ -11,4 +11,7 @@ def serve_stored_file(stored_file, filename):
     the browser unless the bucket carries a CORS rule for every frontend
     origin. Proxying the bytes keeps the storage layer out of the picture.
     """
-    return FileResponse(stored_file.open("rb"), as_attachment=True, filename=filename)
+    response = FileResponse(stored_file.open("rb"), as_attachment=True, filename=filename)
+    # The browser must use the declared type and never guess from the bytes.
+    response["X-Content-Type-Options"] = "nosniff"
+    return response

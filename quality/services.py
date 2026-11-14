@@ -37,8 +37,44 @@ _ORG_TYPE_TO_ROLE = {
     OrganisationType.REGULATOR: "regulator",
 }
 
+BLOCKED_ORGANISATION_STATUSES = {"suspended", "rejected"}
+
+
+# Stored role codes mapped to the five roles the existing endpoints check.
+# CEO, TL, Legal and Admin read and change nothing through these endpoints, so
+# they get the read only "regulator" seat. The export agent has no seat on
+# these endpoints yet.
+_CODE_TO_LEGACY_ROLE = {
+    "QC": "operator",
+    "CEO": "regulator", "TL": "regulator", "LGL": "regulator", "ADM": "regulator",
+    "LAB": "partner", "INS": "partner", "SMP": "partner", "LOG": "partner",
+    "SUP": "miner",
+    "BYR": "buyer",
+}
+_LEGACY_ROLE_ORDER = ["operator", "regulator", "partner", "miner", "buyer"]
+
 
 def derive_role(user):
+    """The caller's quality role on the existing endpoints.
+
+    Users with stored role assignments (quality/permissions.py) get the role
+    their approved assignments give. Everyone else keeps the old derivation
+    until they are given an assignment.
+    """
+    from quality import permissions
+
+    if not user or not getattr(user, "is_authenticated", False):
+        return None
+    if permissions.uses_stored_roles(user):
+        held = {_CODE_TO_LEGACY_ROLE.get(code) for code in permissions.role_codes(user)}
+        for role in _LEGACY_ROLE_ORDER:
+            if role in held:
+                return role
+        return None
+    return legacy_derive_role(user)
+
+
+def legacy_derive_role(user):
     if not user or not getattr(user, "is_authenticated", False):
         return None
     if user.is_staff:
@@ -50,11 +86,21 @@ def derive_role(user):
         .first()
     )
     if membership:
-        role = _ORG_TYPE_TO_ROLE.get(membership.organisation.organisation_type)
-        # A partner or regulator vetted for another sector has no seat here;
-        # a miner, who registers no sector, is unaffected.
-        if role in {"partner", "regulator"} and not sector_allowed(membership.organisation, "quality"):
-            role = None
+        organisation = membership.organisation
+        # A suspended or rejected organisation loses its quality seat at once,
+        # whatever its type.
+        if organisation.verification_status in BLOCKED_ORGANISATION_STATUSES:
+            return None
+        role = _ORG_TYPE_TO_ROLE.get(organisation.organisation_type)
+        if role in {"partner", "regulator"}:
+            # organisation_type is chosen by the applicant, so a laboratory or
+            # regulator claim counts only once the platform has verified it.
+            if organisation.verification_status != "verified":
+                return None
+            # A partner or regulator vetted for another sector has no seat
+            # here; a miner, who registers no sector, is unaffected.
+            if not sector_allowed(organisation, "quality"):
+                return None
         if role:
             return role
 
@@ -77,15 +123,46 @@ def user_organisation(user):
     return membership.organisation if membership else None
 
 
+_APPLICANT_TYPES = {
+    OrganisationType.COMPLIANCE_PARTNER,
+    OrganisationType.LABORATORY,
+    OrganisationType.INSPECTION_BODY,
+}
+
+
+def applicant_organisation(user):
+    """The partner type organisation the caller may apply and upload for.
+
+    An applicant is not verified yet, so this does not ask for the partner
+    role. It only asks that the caller is an active member of a laboratory,
+    inspection body or compliance partner that is not suspended or rejected.
+    """
+    org = user_organisation(user)
+    if org is None or org.organisation_type not in _APPLICANT_TYPES:
+        return None
+    if org.verification_status in BLOCKED_ORGANISATION_STATUSES:
+        return None
+    return org
+
+
 def can_review(user):
-    """Reviewers vet applications/samples: staff, or partner/regulator org members."""
-    role = derive_role(user)
-    return bool(user and user.is_active and (user.is_staff or role in {"partner", "regulator", "operator"}))
+    """Only Beldium quality operators take applications for review and record
+    the quality verdict on a sample. A laboratory enters results but never
+    judges its own work, and a regulator reads without changing anything."""
+    return can_decide(user)
 
 
 def can_decide(user):
-    """Only Beldium operators (staff) make binding accreditation/certification decisions."""
-    return bool(user and user.is_active and user.is_staff)
+    """Only Beldium operators make binding accreditation and certification
+    decisions: the Q&C Partner role once stored roles are in use, staff
+    before that."""
+    from quality import permissions
+
+    if not (user and getattr(user, "is_authenticated", False) and user.is_active):
+        return False
+    if permissions.uses_stored_roles(user):
+        return permissions.has_role(user, "QC")
+    return bool(user.is_staff)
 
 
 # --- misc helpers -------------------------------------------------------------
@@ -152,6 +229,30 @@ def parse_number(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def certificate_blockers(sample):
+    """Every reason this sample may not be certified, empty when it may.
+
+    Results are judged again here from their stored limits and values, so a
+    verdict typed by hand or saved under an older rule can never let a failed
+    or missing result through.
+    """
+    reasons = []
+    review = sample.quality_review or {}
+    if review.get("verdict") != "pass":
+        reasons.append("The quality review verdict is not pass.")
+    results = list(sample.results or [])
+    if not results:
+        reasons.append("The sample has no test results.")
+    for row in results:
+        name = row.get("analyte") or row.get("method") or "A result"
+        verdict = limit_verdict(row.get("limit") or {}, row.get("value"))
+        if verdict == "pending":
+            reasons.append(f"{name} has no measured value.")
+        elif verdict != "pass":
+            reasons.append(f"{name} does not meet the specification.")
+    return reasons
 
 
 def limit_verdict(limit, measured):

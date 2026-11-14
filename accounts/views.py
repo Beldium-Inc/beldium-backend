@@ -59,6 +59,13 @@ from accounts.throttles import (
 from common.exceptions import AppError
 from accounts.audit import record_account_event
 from accounts.social import verify_social_token
+from accounts.refresh_cookie import (
+    attach_refresh_cookie,
+    clear_refresh_cookie,
+    cookie_refresh_token,
+    refresh_without_access,
+    set_refresh_cookie,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,27 +113,65 @@ class VerifiedTokenObtainPairView(TokenObtainPairView):
             record_account_event(request, "account.login_mfa_challenged", actor=user)
         else:
             record_account_event(request, "account.login_succeeded", actor=user)
-        return response
+        return attach_refresh_cookie(response)
 
 
 class ThrottledTokenRefreshView(TokenRefreshView):
-    """Refresh mints access tokens, so it needs a ceiling like any other credential endpoint."""
+    """Swap a refresh token for a new access token.
+
+    The refresh token comes from the body, as before, or from the HttpOnly
+    cookie (G9). A caller presenting an access token must own the refresh
+    token. Without a live access token the call works only for the partner
+    field roles (Sampler, Inspector, Logistics), whose phones sit idle in the
+    field. A cookie token issued within the access token lifetime also works
+    without one, so a page reload (the frontend keeps the access token in
+    memory only) does not sign anyone out. The cookie is rotated on every
+    refresh, so for everyone else an idle session still ends when the access
+    token lifetime passes with no activity. A refresh token read from the cookie is rotated: the old one is
+    revoked and the new one goes back into the cookie.
+    """
 
     authentication_classes = [JWTAuthentication]
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
     throttle_classes = [TokenRefreshThrottle]
 
     def post(self, request, *args, **kwargs):
-        refresh_token = request.data.get("refresh")
+        body_token = request.data.get("refresh")
+        from_cookie = not body_token
+        refresh_token = body_token or cookie_refresh_token(request)
         if not refresh_token:
             raise AppError("Refresh token is required.", code="refresh_token_required")
+        if from_cookie and not portal_for_request(request):
+            # The cookie is sent by the browser on its own, so only the
+            # Beldium apps' own origins may use it.
+            raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401)
         try:
             token = RefreshToken(refresh_token)
         except TokenError as exc:
             raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401) from exc
-        if str(token.get(api_settings.USER_ID_CLAIM)) != str(request.user.pk):
+        owner_id = str(token.get(api_settings.USER_ID_CLAIM))
+        if request.user and request.user.is_authenticated:
+            if owner_id != str(request.user.pk):
+                raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401)
+        else:
+            owner = User.objects.filter(pk=owner_id, is_active=True).first()
+            if owner is None or not refresh_without_access(owner, token, from_cookie=from_cookie):
+                raise AppError(
+                    "Authentication credentials were not provided.", code="not_authenticated", status_code=401,
+                )
+        if not from_cookie:
+            return Response({"access": str(token.access_token)}, status=status.HTTP_200_OK)
+        user = User.objects.filter(pk=owner_id, is_active=True).first()
+        if user is None:
             raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401)
-        return Response({"access": str(token.access_token)}, status=status.HTTP_200_OK)
+        try:
+            token.blacklist()
+        except TokenError as exc:
+            raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token", status_code=401) from exc
+        fresh = RefreshToken.for_user(user)
+        response = Response({"access": str(fresh.access_token)}, status=status.HTTP_200_OK)
+        set_refresh_cookie(response, str(fresh))
+        return response
 
 
 class ResendVerificationView(generics.GenericAPIView):
@@ -183,14 +228,14 @@ class VerifyEmailView(generics.GenericAPIView):
         else:
             user.portal = portal
             user.save(update_fields=["portal"])
-        refresh = RefreshToken.for_user(user)
         record_account_event(request, "account.email_verified", actor=user)
         transaction.on_commit(lambda: enqueue_account_email("send_welcome_email", str(user.id)))
-        return Response({
+        refresh = RefreshToken.for_user(user)
+        return attach_refresh_cookie(Response({
             "message": "Email verified successfully.",
             "access": str(refresh.access_token),
             "refresh": str(refresh),
-        }, status=status.HTTP_200_OK)
+        }, status=status.HTTP_200_OK))
 
 
 class PasswordResetRequestView(generics.GenericAPIView):
@@ -272,12 +317,12 @@ class ChangeEmailConfirmView(generics.GenericAPIView):
         # just changed the identity that recovers it. Reissue here so the
         # caller who did the change stays signed in.
         refresh = RefreshToken.for_user(user)
-        return Response({
+        return attach_refresh_cookie(Response({
             "message": "Email address changed successfully.",
             "email": user.email,
             "access": str(refresh.access_token),
             "refresh": str(refresh),
-        })
+        }))
 
 
 class LogoutView(generics.GenericAPIView):
@@ -286,8 +331,11 @@ class LogoutView(generics.GenericAPIView):
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        raw = serializer.validated_data.get("refresh") or cookie_refresh_token(request)
+        if not raw:
+            raise AppError("Refresh token is required.", code="refresh_token_required")
         try:
-            token = RefreshToken(serializer.validated_data["refresh"])
+            token = RefreshToken(raw)
         except TokenError as exc:
             raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token") from exc
         # Without this check the endpoint revokes any well-formed token that is
@@ -298,7 +346,7 @@ class LogoutView(generics.GenericAPIView):
             raise AppError("Invalid or expired refresh token.", code="invalid_refresh_token")
         token.blacklist()
         record_account_event(request, "account.logged_out")
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return clear_refresh_cookie(Response(status=status.HTTP_204_NO_CONTENT))
 
 
 class AccountAuditListView(generics.ListAPIView):
@@ -437,6 +485,11 @@ class MfaDisableView(generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
         if not request.user.check_password(serializer.validated_data["password"]):
             raise AppError("That password is not right.", code="invalid_password", status_code=400)
+        if mfa.is_required(request.user):
+            raise AppError(
+                "Your role needs two-step sign-in, so it cannot be turned off.",
+                code="second_factor_required", status_code=409,
+            )
         mfa.disable(request.user, serializer.validated_data["code"])
         record_account_event(request, "account.mfa_disabled")
         return Response({"enabled": False})
@@ -479,4 +532,4 @@ class MfaVerifyView(generics.GenericAPIView):
             raise
         refresh = RefreshToken.for_user(user)
         record_account_event(request, "account.login_succeeded", actor=user, second_step=method)
-        return Response({"refresh": str(refresh), "access": str(refresh.access_token)})
+        return attach_refresh_cookie(Response({"refresh": str(refresh), "access": str(refresh.access_token)}))

@@ -54,8 +54,10 @@ class QualityRoleTests(APITestCase):
         cases = [
             (self.operator, "operator", True, True),
             (self.miner_user, "miner", False, False),
-            (self.partner_user, "partner", True, False),
-            (self.regulator_user, "regulator", True, False),
+            # Review authority is the quality desk's alone: a laboratory does
+            # not judge its own work and a regulator only reads.
+            (self.partner_user, "partner", False, False),
+            (self.regulator_user, "regulator", False, False),
             (self.nobody, None, False, False),
         ]
         for user, role, can_review, can_decide in cases:
@@ -106,7 +108,12 @@ class QualityApplicationFlowTests(APITestCase):
         resp = self.client.post(url)
         self.assertEqual(resp.status_code, 403)
 
+        # A partner may not take its own application for review.
         self.client.force_authenticate(self.partner_user)
+        resp = self.client.post(url)
+        self.assertEqual(resp.status_code, 403)
+
+        self.client.force_authenticate(self.operator)
         resp = self.client.post(url)
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.data["status"], "in_review")

@@ -1,0 +1,145 @@
+"""The refresh token in an HttpOnly cookie (task G9)."""
+from django.core.cache import cache
+from django.test import override_settings
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework.test import APITestCase
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from accounts.models import User
+from accounts.tests import COMPLIANCE_ORIGIN
+from organisations.models import MembershipRole, Organisation, OrganisationMembership, OrganisationType
+from quality.models import QualityRoleAssignment, RoleAssignmentStatus
+
+PASSWORD = "Str0ng-Passw0rd!"
+COOKIE = "beldium_refresh"
+
+
+def make_user(email, **extra):
+    return User.objects.create_user(email=email, password=PASSWORD, email_verified_at=timezone.now(), **extra)
+
+
+class RefreshCookieTests(APITestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = make_user("person@beldium.test")
+
+    def sign_in(self, user=None):
+        return self.client.post(
+            reverse("token"), {"email": (user or self.user).email, "password": PASSWORD}, HTTP_ORIGIN=COMPLIANCE_ORIGIN,
+        )
+
+    def test_sign_in_sets_an_http_only_cookie(self):
+        response = self.sign_in()
+        cookie = response.cookies[COOKIE]
+        self.assertTrue(cookie["httponly"])
+        self.assertEqual(cookie["path"], "/api/v1/auth/")
+        self.assertEqual(cookie["samesite"], "Lax")
+        self.assertEqual(cookie.value, response.data["refresh"])
+
+    @override_settings(REFRESH_TOKEN_IN_BODY=False)
+    def test_body_copy_can_be_switched_off(self):
+        response = self.sign_in()
+        self.assertNotIn("refresh", response.data)
+        self.assertIn(COOKIE, response.cookies)
+
+    def test_cookie_refresh_rotates_the_token(self):
+        login = self.sign_in()
+        old = login.cookies[COOKIE].value
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+        response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertIn("access", response.data)
+        new = response.cookies[COOKIE].value
+        self.assertNotEqual(new, old)
+        # The old token is revoked.
+        replay = self.client.post(reverse("token-refresh"), {"refresh": old}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(replay.status_code, 401)
+
+    def test_cookie_needs_a_portal_origin(self):
+        login = self.sign_in()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+        response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN="https://evil.example")
+        self.assertEqual(response.status_code, 401)
+
+    def test_reload_with_a_recent_cookie_keeps_the_session(self):
+        self.sign_in()
+        response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_idle_office_session_still_ends(self):
+        from datetime import timedelta
+        from unittest import mock
+
+        self.sign_in()
+        later = timezone.now() + timedelta(minutes=31)
+        with mock.patch("time.time", return_value=later.timestamp()):
+            response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, 401)
+
+    def test_body_token_without_access_is_still_refused(self):
+        login = self.sign_in()
+        self.client.cookies.clear()
+        response = self.client.post(reverse("token-refresh"), {"refresh": login.data["refresh"]})
+        self.assertEqual(response.status_code, 401)
+
+    def test_field_role_refreshes_after_access_lapsed(self):
+        org = Organisation.objects.create(
+            name="Field Co", organisation_type=OrganisationType.INSPECTION_BODY,
+            registration_number="FIELD", verification_status="verified",
+        )
+        sampler = make_user("sampler@field.test")
+        OrganisationMembership.objects.create(organisation=org, user=sampler, role=MembershipRole.OWNER)
+        QualityRoleAssignment.objects.create(
+            user=sampler, role_id="SMP", organisation=org, status=RoleAssignmentStatus.ACTIVE,
+            valid_from=timezone.localdate(),
+        )
+        self.sign_in(sampler)
+        response = self.client.post(reverse("token-refresh"), {}, HTTP_ORIGIN=COMPLIANCE_ORIGIN)
+        self.assertEqual(response.status_code, 200, response.data)
+
+    def test_logout_uses_the_cookie_and_clears_it(self):
+        login = self.sign_in()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {login.data['access']}")
+        response = self.client.post(reverse("logout"), {}, format="json")
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.cookies[COOKIE].value, "")
+        replay = self.client.post(
+            reverse("token-refresh"), {"refresh": login.data["refresh"]}, HTTP_ORIGIN=COMPLIANCE_ORIGIN,
+        )
+        self.assertEqual(replay.status_code, 401)
+
+    def test_wrong_owner_is_refused(self):
+        other = make_user("other@beldium.test")
+        self.client.force_authenticate(self.user)
+        response = self.client.post(reverse("token-refresh"), {"refresh": str(RefreshToken.for_user(other))})
+        self.assertEqual(response.status_code, 401)
+
+
+class CookieAfterCodeStepTests(APITestCase):
+    """With two-step sign-in on, the cookie is set only after the code step."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = make_user("twostep@beldium.test")
+        from accounts import mfa, totp
+
+        secret = mfa.start_setup(self.user)["secret"]
+        mfa.confirm_setup(self.user, totp.code_at_step(secret, totp.current_step()))
+        self.secret = secret
+
+    def test_cookie_only_after_the_code(self):
+        from accounts import totp
+
+        login = self.client.post(
+            reverse("token"), {"email": self.user.email, "password": PASSWORD}, HTTP_ORIGIN=COMPLIANCE_ORIGIN,
+        )
+        self.assertTrue(login.data["mfa_required"])
+        self.assertNotIn(COOKIE, login.cookies)
+        verified = self.client.post(
+            reverse("mfa-verify"),
+            {"mfa_token": login.data["mfa_token"], "code": totp.code_at_step(self.secret, totp.current_step() + 1)},
+            HTTP_ORIGIN=COMPLIANCE_ORIGIN,
+        )
+        self.assertEqual(verified.status_code, 200, verified.data)
+        self.assertEqual(verified.cookies[COOKIE].value, verified.data["refresh"])

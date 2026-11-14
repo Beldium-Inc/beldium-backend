@@ -1,0 +1,53 @@
+name: Test
+
+# Runs the Django test suite against PostgreSQL on every pull request and on
+# every push to main and staging. The deploy workflow runs its own test job
+# before it ships, so a failing test blocks a deploy on either path.
+on:
+  pull_request:
+  push:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        # Throwaway CI database. The password only exists inside this job.
+        image: postgres:16
+        env:
+          POSTGRES_USER: beldium
+          POSTGRES_PASSWORD: beldium
+          POSTGRES_DB: beldium_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U beldium -d beldium_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ENVIRONMENT: ci
+      SECRET_KEY: ci-only-not-a-real-key-ci-only-not-a-real-key-0123456789
+      DATABASE_URL: postgres://beldium:beldium@localhost:5432/beldium_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # Fails when a model change has no migration, so a missing migration
+      # is caught in review rather than in production.
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run
+      - name: Run tests
+        run: python manage.py test --parallel 4

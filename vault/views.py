@@ -5,6 +5,8 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+
+from quality.permissions import SecondStepSetUp
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -26,7 +28,7 @@ def _sector_or_404(value):
 class VaultSectorsView(APIView):
     """The vaults the caller can open, with their folders and counts."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SecondStepSetUp]
 
     def get(self, request):
         visible = VaultDocument.objects.filter(access.visible_filter(request.user), superseded_by__isnull=True)
@@ -56,7 +58,7 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
     """Vault documents. There is no update or delete route by design: a
     corrected file is added as a new version of the document."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, SecondStepSetUp]
     serializer_class = s.VaultDocumentSerializer
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     search_fields = ["reference", "title", "original_name", "description"]
@@ -117,6 +119,7 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
         document = services.upload(
             request.user, sector=sector, category=category, title=data["title"],
             description=data["description"], uploaded_file=data["file"], organisation=organisation,
+            received_from=data["received_from"], received_date=data["received_date"],
         )
         return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
 
@@ -129,6 +132,8 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
         document = services.add_version(
             request.user, current, uploaded_file=serializer.validated_data["file"],
             note=serializer.validated_data["note"],
+            received_from=serializer.validated_data["received_from"],
+            received_date=serializer.validated_data["received_date"],
         )
         return Response(self.get_serializer(document).data, status=status.HTTP_201_CREATED)
 
@@ -147,6 +152,9 @@ class VaultDocumentViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, vie
         document = self.get_object()
         if not document.file:
             raise ResourceNotFoundError("The stored file is missing.")
+        if document.scan_status == "infected":
+            from common.exceptions import AppError
+            raise AppError("This file failed the safety scan and cannot be opened.", code="file_quarantined", status_code=410)
         services.record_download(request.user, document)
         return serve_stored_file(document.file, document.original_name)
 

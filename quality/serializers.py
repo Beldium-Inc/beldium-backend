@@ -1,8 +1,11 @@
 from django.urls import reverse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
+from django.utils import timezone
 from rest_framework import serializers
 
+from organisations.access import sector_allowed
+from organisations.models import Organisation, OrganisationType
 from compliance.signatory import mismatch_message, names_match
 from quality import models as m
 
@@ -104,9 +107,9 @@ class SampleSerializer(serializers.ModelSerializer):
             "registered_at", "miner_org", "partner_org", "buyer_org", "buyer_spec",
             "miner_organisation", "partner_organisation", "buyer_organisation",
             "status", "custody", "test_request", "results", "quality_review", "audit",
-            "created_at", "updated_at",
+            "is_legacy", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "reference", "registered_at", "created_at", "updated_at", "custody", "test_request", "results", "quality_review", "audit"]
+        read_only_fields = ["id", "reference", "registered_at", "created_at", "updated_at", "custody", "test_request", "results", "quality_review", "audit", "is_legacy"]
 
 
 class NewSampleSerializer(serializers.Serializer):
@@ -132,6 +135,24 @@ class TestRequestInputSerializer(serializers.Serializer):
     methods = serializers.ListField(child=serializers.CharField())
     priority = serializers.ChoiceField(choices=["standard", "expedited"])
     turnaround = serializers.CharField(required=False, allow_blank=True, default="")
+    # Set by the quality desk only. The laboratory must be a verified partner
+    # organisation with a seat in quality.
+    laboratory = serializers.PrimaryKeyRelatedField(
+        queryset=Organisation.objects.filter(
+            verification_status="verified",
+            organisation_type__in=[
+                OrganisationType.LABORATORY,
+                OrganisationType.COMPLIANCE_PARTNER,
+                OrganisationType.INSPECTION_BODY,
+            ],
+        ),
+        required=False,
+    )
+
+    def validate_laboratory(self, value):
+        if not sector_allowed(value, "quality"):
+            raise serializers.ValidationError("This organisation is not approved to work in quality.")
+        return value
 
 
 class ResultVerdictInputSerializer(serializers.Serializer):
@@ -168,26 +189,80 @@ class BuyerSpecSerializer(serializers.ModelSerializer):
 
 # --- certificates --------------------------------------------------------------
 
+LEGACY_LABEL = "Legacy, not verified"
+
+
+def certificate_display_status(cert):
+    """The status a screen shows, worked out on the server so no screen ever
+    relies on the device clock (E10). Same rules as the public check."""
+    if cert.is_legacy:
+        return "legacy_not_verified"
+    if cert.status == m.CertificateStatus.REVOKED:
+        return "revoked"
+    if cert.status != m.CertificateStatus.ACTIVE or cert.valid_until is None:
+        return "not_verified"
+    if timezone.localdate(cert.valid_until) < timezone.localdate():
+        return "expired"
+    return "valid"
+
+
 class CertificateSerializer(serializers.ModelSerializer):
     sample_reference = serializers.CharField(source="sample.reference", read_only=True)
     material = serializers.CharField(source="sample.material", read_only=True)
+    display_status = serializers.SerializerMethodField()
+    legacy_label = serializers.SerializerMethodField()
 
     class Meta:
         model = m.Certificate
         fields = [
             "id", "reference", "sample", "sample_reference", "material", "issued_at",
-            "issued_by", "valid_until", "status", "verification_hash", "scans",
+            "issued_by", "valid_until", "status", "verification_hash", "scans", "is_legacy", "rule_version",
+            "display_status", "legacy_label",
         ]
-        read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans"]
+        read_only_fields = ["id", "reference", "issued_at", "verification_hash", "scans", "is_legacy", "rule_version"]
+
+    def get_display_status(self, obj):
+        return certificate_display_status(obj)
+
+    def get_legacy_label(self, obj):
+        return LEGACY_LABEL if obj.is_legacy else None
 
 
 class CertificateVerificationSerializer(serializers.ModelSerializer):
+    """What the public verify page may show.
+
+    ``verification`` is the answer the page must display:
+    ``legacy_not_verified`` for every carried-over certificate, otherwise
+    ``valid``, ``expired`` (valid_until is before today on the server),
+    ``revoked`` or ``not_verified`` (no expiry date, or not active).
+    """
+
     sample_reference = serializers.CharField(source="sample.reference", read_only=True)
     material = serializers.CharField(source="sample.material", read_only=True)
+    verification = serializers.SerializerMethodField()
+    valid = serializers.SerializerMethodField()
 
     class Meta:
         model = m.Certificate
-        fields = ["reference", "sample_reference", "material", "issued_at", "valid_until", "status", "scans"]
+        fields = [
+            "reference", "sample_reference", "material", "issued_at", "valid_until", "status", "scans",
+            "is_legacy", "verification", "valid", "legacy_label", "checked_at",
+        ]
+
+    legacy_label = serializers.SerializerMethodField()
+    checked_at = serializers.SerializerMethodField()
+
+    def get_verification(self, obj):
+        return certificate_display_status(obj)
+
+    def get_legacy_label(self, obj):
+        return LEGACY_LABEL if obj.is_legacy else None
+
+    def get_checked_at(self, obj):
+        return timezone.now()
+
+    def get_valid(self, obj):
+        return self.get_verification(obj) == "valid"
 
 
 class QualityApplicationDocumentSerializer(serializers.ModelSerializer):
@@ -227,9 +302,9 @@ class QualityNonConformitySerializer(serializers.ModelSerializer):
         model = m.QualityNonConformity
         fields = [
             "id", "reference", "title", "raised_at", "raised_by", "against",
-            "severity", "status", "detail", "capa",
+            "severity", "status", "detail", "capa", "is_legacy",
         ]
-        read_only_fields = ["id", "reference", "raised_at", "status", "capa"]
+        read_only_fields = ["id", "reference", "raised_at", "status", "capa", "is_legacy"]
 
 
 class RaiseNonConformitySerializer(serializers.Serializer):
@@ -382,3 +457,122 @@ class QualityProfessionalApplicationSerializer(serializers.ModelSerializer):
             "documents", "audit", "decision_note", "submitted_at", "created_at", "updated_at",
         ]
         read_only_fields = fields
+
+
+# --- roles (G3) ---------------------------------------------------------------
+
+
+class QualityRoleSerializer(serializers.ModelSerializer):
+    role_code = serializers.CharField(source="code")
+    role_name = serializers.CharField(source="name")
+    grid = serializers.SerializerMethodField()
+    restricted = serializers.SerializerMethodField()
+
+    class Meta:
+        model = m.QualityRole
+        fields = ["role_code", "role_name", "is_internal", "second_factor_required", "grid", "restricted"]
+
+    def get_grid(self, role):
+        from quality.roles import letters_to_actions
+
+        return {grant.record_type: letters_to_actions(grant.letters) for grant in role.grants.all()}
+
+    def get_restricted(self, role):
+        return sorted(grant.record_type for grant in role.grants.all() if grant.restricted)
+
+
+class RoleAssignmentSerializer(serializers.ModelSerializer):
+    user_id = serializers.UUIDField(source="user.id", read_only=True)
+    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_name = serializers.CharField(source="user.full_name", read_only=True)
+    role_code = serializers.CharField(source="role_id", read_only=True)
+    organisation_id = serializers.UUIDField(source="organisation.id", read_only=True, allow_null=True, default=None)
+    organisation_name = serializers.CharField(source="organisation.name", read_only=True, default="")
+    granted_by = serializers.UUIDField(source="granted_by_id", read_only=True, allow_null=True)
+    approved_by = serializers.UUIDField(source="approved_by_id", read_only=True, allow_null=True)
+    ended_by = serializers.UUIDField(source="ended_by_id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = m.QualityRoleAssignment
+        fields = [
+            "id", "user_id", "user_email", "user_name", "role_code", "organisation_id", "organisation_name",
+            "valid_from", "valid_to", "status", "granted_by", "approved_by", "decided_at", "decision_reason",
+            "ended_by", "ended_at", "end_reason", "created_at",
+        ]
+        read_only_fields = fields
+
+
+class CreateRoleAssignmentSerializer(serializers.Serializer):
+    # Name the person by id or by email address; one of the two is required.
+    user_id = serializers.UUIDField(required=False)
+    user_email = serializers.EmailField(required=False)
+    role_code = serializers.ChoiceField(choices=[])
+    organisation_id = serializers.UUIDField(required=False, allow_null=True)
+    valid_from = serializers.DateField()
+    valid_to = serializers.DateField(required=False, allow_null=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from quality.roles import ROLE_CODES
+
+        self.fields["role_code"].choices = ROLE_CODES
+
+    def validate(self, data):
+        if not data.get("user_id") and not data.get("user_email"):
+            raise serializers.ValidationError({"user_id": ["Name the person by user id or email address."]})
+        if data.get("valid_to") and data["valid_to"] < data["valid_from"]:
+            raise serializers.ValidationError({"valid_to": ["The end date cannot be before the start date."]})
+        return data
+
+
+class DecideRoleAssignmentSerializer(serializers.Serializer):
+    decision = serializers.ChoiceField(choices=["approve", "reject"])
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=2000)
+
+    def validate(self, data):
+        if data["decision"] == "reject" and not data.get("reason", "").strip():
+            raise serializers.ValidationError({"reason": ["Give a reason for rejecting."]})
+        return data
+
+
+class EndRoleAssignmentSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=2000)
+
+
+# --- audit log (G4) -----------------------------------------------------------
+
+
+class QualityAuditEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = m.QualityAuditEntry
+        fields = [
+            "id", "occurred_at", "actor_id", "actor_name", "actor_role_code", "action",
+            "record_type", "record_id", "record_label", "batch_id", "outcome", "reason",
+            "before", "after", "ip_address", "rule_version",
+        ]
+        read_only_fields = fields
+
+
+# --- settings (G5) ------------------------------------------------------------
+
+
+class SettingChangeSerializer(serializers.ModelSerializer):
+    setting_key = serializers.CharField(source="setting_id", read_only=True)
+    unit = serializers.CharField(source="setting.unit", read_only=True)
+    new_value = serializers.JSONField(source="value", read_only=True)
+    rule_version = serializers.CharField(source="rule_version_id", read_only=True)
+    changed_by = serializers.UUIDField(source="changed_by_id", read_only=True, allow_null=True)
+
+    class Meta:
+        model = m.QualitySettingChange
+        fields = [
+            "id", "setting_key", "new_value", "unit", "effective_from", "reason",
+            "changed_by", "changed_by_name", "changed_at", "rule_version",
+        ]
+        read_only_fields = fields
+
+
+class NewSettingChangeSerializer(serializers.Serializer):
+    value = serializers.JSONField()
+    effective_from = serializers.DateTimeField()
+    reason = serializers.CharField(max_length=2000)

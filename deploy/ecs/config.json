@@ -30,7 +30,8 @@
       "port": 8000,
       "environment": {
         "GUNICORN_WORKERS": "3",
-        "GUNICORN_TIMEOUT": "90"
+        "GUNICORN_TIMEOUT": "90",
+        "SECOND_FACTOR_ENFORCED": "False"
       }
     },
     "worker": {
