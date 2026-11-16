@@ -128,6 +128,7 @@ INSTALLED_APPS = [
     "ecosystem",
     "careers",
     "vault",
+    "governance",
 ]
 
 MIDDLEWARE = [

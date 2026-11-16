@@ -142,6 +142,24 @@ def send_organisation_invitation_email(email_address, organisation_name, inviter
     )
 
 
+@shared_task(
+    name="accounts.send_governance_invitation_email",
+)
+def send_governance_invitation_email(email_address, name, inviter_name, role, organisation, token):
+    _send_template(
+        recipient=email_address,
+        subject="Your invitation to Beldium Governance & Risk",
+        template="accounts/governance_invitation.html",
+        context={
+            "name": name,
+            "inviter_name": inviter_name,
+            "role": role,
+            "organisation": organisation,
+            "accept_url": f"{settings.FRONTEND_URL.rstrip('/')}/governance/invitation?token={token}",
+        },
+    )
+
+
 def _frontend_link(path):
     return f"{settings.FRONTEND_URL.rstrip('/')}{path}"
 
