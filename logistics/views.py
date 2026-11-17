@@ -19,12 +19,30 @@ from rest_framework.response import Response
 
 from accounts.models import AccountAuditEvent
 from organisations import access
+from organisations.desk_alerts import alert_desk
 from organisations.rights import build_me
 from organisations.models import OrganisationMembership
 from common.exceptions import ConflictError
 from compliance.logistics_documents import LOGISTICS_DOCUMENT_TITLES, LOGISTICS_EVIDENCE_DOMAINS
 from logistics import models as m, serializers as s, services
 from logistics.permissions import company_ids, can_review, can_edit, can_see_driver_details, assert_editor, assert_reviewer, is_desk, EDIT_ROLES, SECTOR
+
+
+
+def notify_desk_of_submission(application):
+    """Email the logistics desk that an application is waiting to be claimed."""
+    company = application.company
+    name = company.organisation.name if company.organisation_id else "A logistics operator"
+    return alert_desk(
+        "logistics",
+        f"New logistics application from {name}",
+        [
+            f"{name} submitted a logistics compliance application for review.",
+            f"Contact: {company.contact_name or 'Not given'} ({company.contact_email or 'no email'})",
+            "The first compliance partner to claim it reviews it.",
+        ],
+        log_extra={"application_id": str(application.pk)},
+    )
 
 
 class AtomicViewSet(viewsets.GenericViewSet):
@@ -205,6 +223,9 @@ class ApplicationViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixin
         application.save(update_fields=['status', 'submitted_at', 'updated_at'])
         services.audit(request, application.company, 'application_submitted', application_id=str(application.pk))
         services.notify(application.company, 'Application submitted', 'A logistics application is ready for review.')
+        # The in-app rows above reach only people already tied to the company;
+        # the desk has not claimed it yet, so it hears by email.
+        transaction.on_commit(lambda: notify_desk_of_submission(application))
         return Response(self.get_serializer(application).data)
 
     @extend_schema(request=s.DomainReviewInputSerializer, responses=s.DomainSerializer, parameters=[OpenApiParameter('key', OpenApiTypes.STR, OpenApiParameter.PATH)])

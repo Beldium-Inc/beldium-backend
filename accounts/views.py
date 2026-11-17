@@ -13,6 +13,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from accounts.models import AccountAuditEvent, SocialIdentity, User
 from accounts.portal import portal_for_request
+from organisations import desk_alerts
 from accounts.serializers import (
     AccountAuditEventSerializer,
     ChangeEmailConfirmSerializer,
@@ -230,6 +231,9 @@ class VerifyEmailView(generics.GenericAPIView):
             user.save(update_fields=["portal"])
         record_account_event(request, "account.email_verified", actor=user)
         transaction.on_commit(lambda: enqueue_account_email("send_welcome_email", str(user.id)))
+        # A miner or logistics operator only counts as signed up once their
+        # email is verified; that is when their sector's desk hears of them.
+        transaction.on_commit(lambda: desk_alerts.notify_desk_of_signup(user))
         refresh = RefreshToken.for_user(user)
         return attach_refresh_cookie(Response({
             "message": "Email verified successfully.",
