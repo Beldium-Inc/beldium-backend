@@ -7,6 +7,8 @@ from accounts.audit import record_account_event
 from accounts.test_account_cleanup import plan_removal, remove_test_accounts
 
 from accounts.models import AccountAuditEvent, AccountRecoveryCode, EmailVerificationCode, PhoneVerificationCode, SocialIdentity, User
+from organisations.models import OrganisationMembership
+from organisations.rights import organisation_sector
 
 admin.site.register(EmailVerificationCode)
 admin.site.register(AccountRecoveryCode)
@@ -32,10 +34,34 @@ admin.site.register(PhoneVerificationCode)
 admin.site.register(SocialIdentity)
 
 
+class OrganisationMembershipInline(admin.TabularInline):
+    """Shows which organisation, and which sector, this user belongs to."""
+
+    model = OrganisationMembership
+    fk_name = "user"
+    extra = 0
+    can_delete = False
+    fields = ["organisation", "organisation_type", "sector", "role", "is_active"]
+    readonly_fields = ["organisation", "organisation_type", "sector", "role", "is_active"]
+    show_change_link = True
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    @admin.display(description="Organisation type")
+    def organisation_type(self, obj):
+        return obj.organisation.get_organisation_type_display()
+
+    @admin.display(description="Sector")
+    def sector(self, obj):
+        return organisation_sector(obj.organisation) or "-"
+
+
 @admin.register(User)
 class UserAdmin(DjangoUserAdmin):
     ordering = ["email"]
-    list_display = ["email", "first_name", "last_name", "is_active", "is_staff"]
+    inlines = [OrganisationMembershipInline]
+    list_display = ["email", "first_name", "last_name", "organisation_names", "is_active", "is_staff"]
     fieldsets = (
         (None, {"fields": ("email", "password")}),
         ("Personal information", {"fields": ("first_name", "last_name", "phone_number")}),
@@ -45,6 +71,17 @@ class UserAdmin(DjangoUserAdmin):
     add_fieldsets = ((None, {"classes": ("wide",), "fields": ("email", "password1", "password2")}),)
     search_fields = ["email", "first_name", "last_name"]
     actions = ["remove_test_accounts"]
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("organisation_memberships__organisation")
+
+    @admin.display(description="Organisation(s)")
+    def organisation_names(self, obj):
+        memberships = [m for m in obj.organisation_memberships.all() if m.is_active]
+        return ", ".join(
+            f"{m.organisation.name} ({organisation_sector(m.organisation) or 'no sector'})"
+            for m in memberships
+        ) or "-"
 
     def get_actions(self, request):
         actions = super().get_actions(request)
