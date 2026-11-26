@@ -93,13 +93,22 @@ class TransactionSerializer(serializers.ModelSerializer):
             "id", "reference", "rfq", "mine_site", "mine_site_name",
             "buyer_organisation", "buyer_name", "seller_organisation", "seller_name",
             "mineral", "grade_spec", "committed_tonnes", "aggregated_tonnes",
-            "unit_price", "currency", "incoterm", "destination", "stage",
+            "unit_price", "platform_fee_rate", "platform_fee_percent", "platform_fee_base_amount",
+            "platform_fee_amount", "platform_fee_payer", "platform_fee_fixed_at",
+            "currency", "incoterm", "destination", "stage",
             "quality_sample", "warehousing_lot", "processing_run",
             "export_shipment", "finance_invoice", "progress_percent", "value",
             "is_closed", "stage_events", "batches", "logistics_moves",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "reference", "created_at", "updated_at"]
+        read_only_fields = ["id", "reference", "platform_fee_rate", "platform_fee_percent", "platform_fee_base_amount", "platform_fee_amount", "platform_fee_payer", "platform_fee_fixed_at", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        if self.instance and self.instance.platform_fee_fixed_at:
+            for field in ("committed_tonnes", "unit_price", "seller_organisation"):
+                if field in attrs and attrs[field] != getattr(self.instance, field):
+                    raise serializers.ValidationError({field: "Contract value and fee payer are fixed after settlement."})
+        return attrs
 
 
 class TransactionListSerializer(TransactionSerializer):

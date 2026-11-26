@@ -16,10 +16,11 @@ dashboard's activity feed is a genuine query over stage events, not
 re-parsed frontend state.
 """
 import secrets
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction as db_transaction
 from django.utils import timezone
 
 from common.models import TimeStampedModel
@@ -133,6 +134,18 @@ class Transaction(TimeStampedModel):
     committed_tonnes = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)])
     aggregated_tonnes = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     unit_price = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    platform_fee_rate = models.ForeignKey(
+        "finance.PlatformFeeRate", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="transactions",
+    )
+    platform_fee_percent = models.DecimalField(max_digits=7, decimal_places=4, null=True, blank=True)
+    platform_fee_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    platform_fee_base_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    platform_fee_payer = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="platform_fees_owed",
+    )
+    platform_fee_fixed_at = models.DateTimeField(null=True, blank=True)
     currency = models.CharField(max_length=3, default="USD")
     incoterm = models.CharField(max_length=50, blank=True)
     destination = models.CharField(max_length=150, blank=True)
@@ -161,6 +174,51 @@ class Transaction(TimeStampedModel):
     def __str__(self):
         return self.reference
 
+    def save(self, *args, **kwargs):
+        from finance.models import PlatformFeeRate, fee_amount
+
+        update_fields = kwargs.get("update_fields")
+        if self.platform_fee_fixed_at and not self._state.adding:
+            previous = type(self).objects.only(
+                "committed_tonnes", "unit_price", "seller_organisation_id",
+            ).get(pk=self.pk)
+            if (previous.committed_tonnes != self.committed_tonnes or
+                    previous.unit_price != self.unit_price or
+                    previous.seller_organisation_id != self.seller_organisation_id):
+                raise ValueError("Contract value or fee payer cannot change after the fee is fixed.")
+        if self.stage == LifecycleStage.PAYMENT_SETTLEMENT and self.platform_fee_fixed_at is None:
+            rate = PlatformFeeRate.current()
+            if rate is None:
+                raise ValueError("An effective platform fee rate is required.")
+            self.platform_fee_rate = rate
+            self.platform_fee_percent = rate.rate_percent
+            self.platform_fee_base_amount = self.value.quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
+            self.platform_fee_amount = fee_amount(self.platform_fee_base_amount, rate.rate_percent)
+            self.platform_fee_payer = self.seller_organisation
+            self.platform_fee_fixed_at = timezone.now()
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {
+                    "platform_fee_rate", "platform_fee_percent", "platform_fee_base_amount",
+                    "platform_fee_amount", "platform_fee_payer", "platform_fee_fixed_at",
+                }
+        result = super().save(*args, **kwargs)
+        if self.platform_fee_fixed_at and self.finance_invoice_id:
+            invoice = self.finance_invoice
+            if invoice.platform_fee_fixed_at != self.platform_fee_fixed_at:
+                invoice.platform_fee_rate = self.platform_fee_rate
+                invoice.platform_fee_percent = self.platform_fee_percent
+                invoice.platform_fee_base_amount = self.platform_fee_base_amount
+                invoice.platform_fee_amount = self.platform_fee_amount
+                invoice.platform_fee_payer = self.platform_fee_payer
+                invoice.platform_fee_fixed_at = self.platform_fee_fixed_at
+                invoice.save(update_fields=[
+                    "platform_fee_rate", "platform_fee_percent", "platform_fee_base_amount",
+                    "platform_fee_amount", "platform_fee_payer", "platform_fee_fixed_at",
+                ])
+        return result
+
     @property
     def is_closed(self):
         return self.stage == LifecycleStage.PAYMENT_SETTLEMENT and bool(
@@ -176,12 +234,21 @@ class Transaction(TimeStampedModel):
         idx = stage_index(self.stage)
         return round(((idx + 1) / len(STAGE_ORDER)) * 100) if idx >= 0 else 0
 
+    @db_transaction.atomic
     def advance_stage(self, stage, *, actor=None, note="", occurred_at=None):
         """Move to ``stage`` and log it, refusing to go backwards."""
-        if stage_index(stage) < stage_index(self.stage):
-            raise ValueError(f"Cannot move transaction backwards from {self.stage} to {stage}")
-        self.stage = stage
-        self.save(update_fields=["stage", "updated_at"])
+        locked = type(self).objects.select_for_update().get(pk=self.pk)
+        if stage_index(stage) < stage_index(locked.stage):
+            raise ValueError(f"Cannot move transaction backwards from {locked.stage} to {stage}")
+        locked.stage = stage
+        locked.save(update_fields=["stage", "updated_at"])
+        self.stage = locked.stage
+        self.platform_fee_rate = locked.platform_fee_rate
+        self.platform_fee_percent = locked.platform_fee_percent
+        self.platform_fee_base_amount = locked.platform_fee_base_amount
+        self.platform_fee_amount = locked.platform_fee_amount
+        self.platform_fee_payer = locked.platform_fee_payer
+        self.platform_fee_fixed_at = locked.platform_fee_fixed_at
         return TransactionStageEvent.objects.create(
             transaction=self,
             stage=stage,

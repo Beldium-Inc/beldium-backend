@@ -17,6 +17,7 @@ dashboard actually queries.
 import secrets
 
 from django.conf import settings
+from decimal import Decimal, ROUND_HALF_UP
 from django.core.validators import MinValueValidator
 from django.db import models
 from django.utils import timezone
@@ -58,6 +59,32 @@ class PaymentStatus(models.TextChoices):
     REVERSED = "reversed", "Reversed"
 
 
+class PlatformFeeRate(TimeStampedModel):
+    """Append-only fee policy; each issued record keeps its chosen version."""
+    version = models.PositiveIntegerField(unique=True)
+    rate_percent = models.DecimalField(max_digits=7, decimal_places=4, validators=[MinValueValidator(0)])
+    effective_from = models.DateTimeField(db_index=True)
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["-effective_from", "-version"]
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValueError("Fee rate versions are append only.")
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def current(cls):
+        return cls.objects.filter(effective_from__lte=timezone.now()).first()
+
+
+def fee_amount(base, rate_percent):
+    return (Decimal(base) * Decimal(rate_percent) / Decimal("100")).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP,
+    )
+
+
 class Invoice(TimeStampedModel):
     reference = models.CharField(max_length=50, unique=True, default=invoice_reference, editable=False)
     seller_organisation = models.ForeignKey(
@@ -69,6 +96,17 @@ class Invoice(TimeStampedModel):
     transaction_reference = models.CharField(max_length=50, blank=True, db_index=True)
     description = models.CharField(max_length=255, blank=True)
     amount = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)])
+    platform_fee_rate = models.ForeignKey(
+        PlatformFeeRate, on_delete=models.PROTECT, null=True, blank=True, related_name="invoices",
+    )
+    platform_fee_percent = models.DecimalField(max_digits=7, decimal_places=4, null=True, blank=True)
+    platform_fee_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    platform_fee_base_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    platform_fee_payer = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="platform_fee_invoices",
+    )
+    platform_fee_fixed_at = models.DateTimeField(null=True, blank=True)
     currency = models.CharField(max_length=3, default="USD")
     advance_percent = models.PositiveSmallIntegerField(default=0)
     status = models.CharField(max_length=20, choices=InvoiceStatus.choices, default=InvoiceStatus.DRAFT, db_index=True)
