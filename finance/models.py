@@ -101,6 +101,12 @@ class Invoice(TimeStampedModel):
     )
     platform_fee_percent = models.DecimalField(max_digits=7, decimal_places=4, null=True, blank=True)
     platform_fee_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    platform_fee_base_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
+    platform_fee_payer = models.ForeignKey(
+        "organisations.Organisation", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="platform_fee_invoices",
+    )
+    platform_fee_fixed_at = models.DateTimeField(null=True, blank=True)
     currency = models.CharField(max_length=3, default="USD")
     advance_percent = models.PositiveSmallIntegerField(default=0)
     status = models.CharField(max_length=20, choices=InvoiceStatus.choices, default=InvoiceStatus.DRAFT, db_index=True)
@@ -117,20 +123,6 @@ class Invoice(TimeStampedModel):
 
     def __str__(self):
         return self.reference
-
-    def save(self, *args, **kwargs):
-        update_fields = kwargs.get("update_fields")
-        if self._state.adding and self.platform_fee_rate_id is None:
-            rate = PlatformFeeRate.current()
-            if rate is None:
-                raise ValueError("An effective platform fee rate is required.")
-            self.platform_fee_rate = rate
-            self.platform_fee_percent = rate.rate_percent
-        if self.platform_fee_percent is not None and (update_fields is None or "amount" in update_fields):
-            self.platform_fee_amount = fee_amount(self.amount, self.platform_fee_percent)
-            if update_fields is not None:
-                kwargs["update_fields"] = set(update_fields) | {"platform_fee_amount"}
-        return super().save(*args, **kwargs)
 
     @property
     def amount_paid(self):
