@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 
 from django.urls import reverse
 from rest_framework.test import APITestCase
@@ -42,6 +43,7 @@ class TransactionEvidenceExportTests(APITestCase):
         self.assertIn("attachment", json_response["Content-Disposition"])
         self.assertIn(self.transaction.reference, json_response.content.decode())
         self.assertIn("Evidence checked", json_response.content.decode())
+        self.assertIn("platform_fee_amount", json.loads(json_response.content)["transaction"])
         csv_response = self.client.get(self.url, {"file_format": "csv"})
         self.assertEqual(csv_response.status_code, 200)
         rows = list(csv.reader(io.StringIO(csv_response.content.decode())))

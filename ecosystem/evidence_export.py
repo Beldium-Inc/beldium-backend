@@ -69,6 +69,30 @@ def build_evidence(transaction):
             "unit_price": str(transaction.unit_price),
             "currency": transaction.currency,
             "stage": transaction.stage,
+            "platform_fee_rate_version": (
+                transaction.platform_fee_rate.version
+                if getattr(transaction, "platform_fee_rate_id", None) else None
+            ),
+            "platform_fee_percent": (
+                str(transaction.platform_fee_percent)
+                if getattr(transaction, "platform_fee_percent", None) is not None else None
+            ),
+            "platform_fee_base_amount": (
+                str(transaction.platform_fee_base_amount)
+                if getattr(transaction, "platform_fee_base_amount", None) is not None else None
+            ),
+            "platform_fee_amount": (
+                str(transaction.platform_fee_amount)
+                if getattr(transaction, "platform_fee_amount", None) is not None else None
+            ),
+            "platform_fee_payer_id": (
+                str(transaction.platform_fee_payer_id)
+                if getattr(transaction, "platform_fee_payer_id", None) else None
+            ),
+            "platform_fee_fixed_at": (
+                transaction.platform_fee_fixed_at.isoformat()
+                if getattr(transaction, "platform_fee_fixed_at", None) else None
+            ),
             "created_at": transaction.created_at.isoformat(),
         },
         "stage_events": [
