@@ -16,6 +16,7 @@ dashboard's activity feed is a genuine query over stage events, not
 re-parsed frontend state.
 """
 import secrets
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
@@ -191,7 +192,9 @@ class Transaction(TimeStampedModel):
                 raise ValueError("An effective platform fee rate is required.")
             self.platform_fee_rate = rate
             self.platform_fee_percent = rate.rate_percent
-            self.platform_fee_base_amount = self.value
+            self.platform_fee_base_amount = self.value.quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP,
+            )
             self.platform_fee_amount = fee_amount(self.platform_fee_base_amount, rate.rate_percent)
             self.platform_fee_payer = self.seller_organisation
             self.platform_fee_fixed_at = timezone.now()
