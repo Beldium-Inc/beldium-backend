@@ -133,6 +133,12 @@ class Transaction(TimeStampedModel):
     committed_tonnes = models.DecimalField(max_digits=15, decimal_places=2, validators=[MinValueValidator(0)])
     aggregated_tonnes = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     unit_price = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    platform_fee_rate = models.ForeignKey(
+        "finance.PlatformFeeRate", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="transactions",
+    )
+    platform_fee_percent = models.DecimalField(max_digits=7, decimal_places=4, null=True, blank=True)
+    platform_fee_amount = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=3, default="USD")
     incoterm = models.CharField(max_length=50, blank=True)
     destination = models.CharField(max_length=150, blank=True)
@@ -160,6 +166,24 @@ class Transaction(TimeStampedModel):
 
     def __str__(self):
         return self.reference
+
+    def save(self, *args, **kwargs):
+        from finance.models import PlatformFeeRate, fee_amount
+
+        update_fields = kwargs.get("update_fields")
+        if self._state.adding and self.platform_fee_rate_id is None:
+            rate = PlatformFeeRate.current()
+            if rate is None:
+                raise ValueError("An effective platform fee rate is required.")
+            self.platform_fee_rate = rate
+            self.platform_fee_percent = rate.rate_percent
+        if self.platform_fee_percent is not None and (
+            update_fields is None or {"unit_price", "committed_tonnes"} & set(update_fields)
+        ):
+            self.platform_fee_amount = fee_amount(self.value, self.platform_fee_percent)
+            if update_fields is not None:
+                kwargs["update_fields"] = set(update_fields) | {"platform_fee_amount"}
+        return super().save(*args, **kwargs)
 
     @property
     def is_closed(self):

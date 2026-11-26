@@ -26,8 +26,9 @@ class InvoiceSerializer(serializers.ModelSerializer):
         fields = [
             "id", "reference", "seller_organisation", "seller_organisation_name",
             "buyer_organisation", "buyer_organisation_name", "transaction_reference",
-            "description", "amount", "currency", "advance_percent", "status",
+            "description", "amount", "platform_fee_rate", "platform_fee_percent", "platform_fee_amount",
+            "currency", "advance_percent", "status",
             "issued_at", "due_at", "paid_at", "notes", "amount_paid",
             "amount_outstanding", "payments", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "reference", "status", "paid_at", "created_at", "updated_at"]
+        read_only_fields = ["id", "reference", "platform_fee_rate", "platform_fee_percent", "platform_fee_amount", "status", "paid_at", "created_at", "updated_at"]

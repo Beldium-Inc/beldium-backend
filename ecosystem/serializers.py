@@ -93,13 +93,14 @@ class TransactionSerializer(serializers.ModelSerializer):
             "id", "reference", "rfq", "mine_site", "mine_site_name",
             "buyer_organisation", "buyer_name", "seller_organisation", "seller_name",
             "mineral", "grade_spec", "committed_tonnes", "aggregated_tonnes",
-            "unit_price", "currency", "incoterm", "destination", "stage",
+            "unit_price", "platform_fee_rate", "platform_fee_percent", "platform_fee_amount",
+            "currency", "incoterm", "destination", "stage",
             "quality_sample", "warehousing_lot", "processing_run",
             "export_shipment", "finance_invoice", "progress_percent", "value",
             "is_closed", "stage_events", "batches", "logistics_moves",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "reference", "created_at", "updated_at"]
+        read_only_fields = ["id", "reference", "platform_fee_rate", "platform_fee_percent", "platform_fee_amount", "created_at", "updated_at"]
 
 
 class TransactionListSerializer(TransactionSerializer):
