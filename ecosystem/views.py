@@ -1,4 +1,10 @@
+import csv
+import json
+
 from django.db.models import Q, Sum
+from django.http import HttpResponse
+from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -16,7 +22,9 @@ from ecosystem.models import (
     TransactionStageEvent,
     stage_index,
 )
+from ecosystem.evidence_export import build_evidence, can_export
 from ecosystem.permissions import IsEcosystemParticipant, visible_organisation_filter
+from accounts.audit import record_account_event
 from ecosystem.serializers import (
     CommitmentSerializer,
     LogisticsMoveSerializer,
@@ -63,6 +71,40 @@ class TransactionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return _transaction_queryset(self.request.user)
+
+    @action(detail=True, methods=["get"], url_path="evidence-export")
+    def evidence_export(self, request, pk=None):
+        transaction = self.get_object()
+        if not can_export(request.user, transaction):
+            raise PermissionDenied("Only a transaction's compliance or admin users may export evidence.")
+        export_format = request.query_params.get("file_format", "json").lower()
+        if export_format not in {"json", "csv"}:
+            return Response({"detail": "Format must be json or csv."}, status=400)
+        evidence = build_evidence(transaction)
+        if export_format == "json":
+            response = HttpResponse(json.dumps(evidence, ensure_ascii=False), content_type="application/json")
+        else:
+            response = HttpResponse(content_type="text/csv")
+            writer = csv.writer(response)
+            writer.writerow(["section", "field", "value"])
+            def safe(value):
+                text = "" if value is None else str(value)
+                return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) else text
+            for field, value in evidence["transaction"].items():
+                writer.writerow(["transaction", field, safe(value)])
+            for index, event in enumerate(evidence["stage_events"], 1):
+                for field, value in event.items():
+                    writer.writerow([f"stage_event_{index}", field, safe(value)])
+            for field, value in evidence["linked_records"].items():
+                writer.writerow(["linked_records", field, safe(", ".join(value) if isinstance(value, list) else value)])
+            for section in ("document_references", "certificate_references"):
+                for index, item in enumerate(evidence[section], 1):
+                    for field, value in item.items():
+                        writer.writerow([f"{section}_{index}", field, safe(value)])
+        response["Content-Disposition"] = f'attachment; filename="{transaction.reference}-evidence.{export_format}"'
+        record_account_event(request, "ecosystem.transaction_evidence_exported",
+                             transaction_id=str(transaction.id), format=export_format)
+        return response
 
 
 class TransactionAdvanceStageView(APIView):
